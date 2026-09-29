@@ -314,6 +314,7 @@ contrib/ed25519-wip/       rejected verifier, defect log, and conformance harnes
 docs/architecture.md       the design this implements, and why
 docs/format-v2.md          the shipped v1 on-flash patch format
 docs/format-v2-design.md   proposed v2 format/API for reviewed LZMA, AEAD, and codec checkpoints
+include/microfoam_v2.h     experimental MFP2 structural inspection API (no session execution yet)
 ```
 
 ---

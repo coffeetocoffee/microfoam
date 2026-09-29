@@ -33,7 +33,8 @@ set(MCF_SOURCES
     src/mcf_hal.c
     src/mcf_session.c
     src/mcf_util.c
-    src/mcf_codec_lz4.c)
+    src/mcf_codec_lz4.c
+    src/mcf_v2.c)
 
 # LZMA is opt-in, experimental, and not shippable; see contrib/lzma-wip/README.md.
 # Off by default, and a patch declaring LZMA is rejected unless this development
@@ -45,7 +46,7 @@ if(MCF_ENABLE_LZMA)
     set(MCF_LZMA_DIR ${CMAKE_CURRENT_LIST_DIR}/contrib/lzma-wip)
 endif()
 
-set(MCF_HEADERS include/microfoam.h)
+set(MCF_HEADERS include/microfoam.h include/microfoam_v2.h)
 if(MCF_ENABLE_SODIUM)
     list(APPEND MCF_HEADERS include/microfoam_sodium.h)
 endif()
@@ -126,6 +127,11 @@ if(MCF_BUILD_TESTS)
         target_compile_options(sodium_rfc_test PRIVATE ${MCF_WARNINGS})
         add_test(NAME sodium_rfc_test COMMAND sodium_rfc_test)
     endif()
+
+    add_executable(v2_format_test tests/v2_format_test.c)
+    target_link_libraries(v2_format_test PRIVATE microfoam)
+    target_compile_options(v2_format_test PRIVATE ${MCF_WARNINGS})
+    add_test(NAME v2_format_test COMMAND v2_format_test)
 
     add_executable(hal_concurrency_test tests/hal_concurrency_test.c)
     target_link_libraries(hal_concurrency_test PRIVATE microfoam)
