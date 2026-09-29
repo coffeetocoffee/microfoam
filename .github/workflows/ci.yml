@@ -71,7 +71,13 @@ jobs:
                  -ffunction-sections -fdata-sections -Wall -Wextra -Werror \
                  -Wconversion -Wsign-conversion -Wshadow -Wcast-qual \
                  -Iinclude -Isrc"
+          # The libsodium adapter is opt-in and requires a host crypto library;
+          # keep it out of the bare-metal core compile unless a provider-specific
+          # embedded integration supplies its own implementation.
           for f in src/*.c; do
+            case "$f" in
+              src/mcf_sodium.c) continue ;;
+            esac
             echo "  $f"
             arm-none-eabi-gcc $FLAGS -c "$f" -o "build-arm/$(basename "$f" .c).o"
           done
