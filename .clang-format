@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: MIT
+#
+# Microfoam formatting. Tuned for the C99 subset the library uses: 4-space
+# indent, no tabs, 100-column limit, attached braces for control flow and
+# detached for functions.
+
+BasedOnStyle: LLVM
+
+Language: Cpp
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+AlignAfterOpenBracket: Align
+
+ColumnLimit: 100
+BreakBeforeBraces: Linux
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+
+IndentCaseLabels: true
+AlignOperands: true
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignAfterOperator: Align
+
+PointerAlignment: Right
+DerivePointerAlignment: false
+SpaceBeforeParens: ControlStatements
+
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+
+SortIncludes: false
+ReflowComments: true
+
+IndentPPDirectives: AfterHash
+PPIndentWidth: 4

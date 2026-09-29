@@ -1,0 +1,126 @@
+# SPDX-License-Identifier: MIT
+#
+# Microfoam CI.
+#
+# The gate that matters is the fault-injection suite: a library whose failure
+# path has never been exercised is the failure mode this project exists to
+# avoid. Everything else here exists to keep that suite buildable.
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    name: host build and tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Build
+        run: cmake --build build --config Debug
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure -C Debug
+
+      - name: Report sizes
+        if: always()
+        run: |
+          echo "### Microfoam footprint" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f build/microfoam_tests ]; then
+            ./build/microfoam_tests >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          fi
+
+  cross:
+    name: cross-compile arm (${{ matrix.cortex }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cortex: [cortex-m0, cortex-m3, cortex-m4, cortex-m7]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the bare-metal arm toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi
+
+      - name: Compile every source for ${{ matrix.cortex }}
+        run: |
+          set -e
+          mkdir -p build-arm
+          FLAGS="-mcpu=${{ matrix.cortex }} -mthumb -std=c99 -Os \
+                 -ffunction-sections -fdata-sections -Wall -Wextra -Werror \
+                 -Wconversion -Wsign-conversion -Wshadow -Wcast-qual \
+                 -Iinclude -Isrc"
+          for f in src/*.c; do
+            echo "  $f"
+            arm-none-eabi-gcc $FLAGS -c "$f" -o "build-arm/$(basename "$f" .c).o"
+          done
+
+      - name: Link and report size
+        run: |
+          set -e
+          arm-none-eabi-size -t build-arm/*.o || true
+          arm-none-eabi-gcc -mcpu=${{ matrix.cortex }} -mthumb -nostdlib \
+            -Wl,--gc-sections -Wl,-Map=build-arm/microfoam.map \
+            build-arm/*.o -o build-arm/libmicrofoam.a 2>/dev/null || true
+          echo "### ${{ matrix.cortex }} object sizes" >> "$GITHUB_STEP_SUMMARY"
+          arm-none-eabi-size build-arm/*.o >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+
+  python:
+    name: host tool self-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Round-trip the host tool end to end
+        run: |
+          set -e
+          mkdir -p build-py
+          python host/selftest.py
+
+  headers:
+    name: licence headers
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every source file carries an SPDX identifier
+        run: |
+          set -e
+          missing=0
+          for f in $(git ls-files '*.c' '*.h' '*.py'); do
+            if ! head -3 "$f" | grep -q 'SPDX-License-Identifier: MIT'; then
+              echo "missing SPDX header: $f"
+              missing=1
+            fi
+          done
+          test $missing -eq 0
+
+      - name: C and Python agree on the container layout
+        run: python host/selftest.py --layout-only

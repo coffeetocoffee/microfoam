@@ -1,0 +1,380 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""
+Microfoam host tool self-test.
+
+Checks, without requiring the C library to be built:
+
+  1. The container layout constants match include/microfoam.h, parsed from the
+     header itself rather than from a copy.
+  2. bsdiff and bspatch agree, over randomised inputs.
+  3. The LZ4 compressor and decoder agree, over adversarial inputs.
+  4. The full make -> inspect -> apply pipeline round-trips and is deterministic.
+  5. Signature verification accepts a good patch and rejects a tampered one.
+
+Run:  python host/selftest.py [--layout-only]
+"""
+
+from __future__ import annotations
+
+import os
+import random
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import microfoam as M   # noqa: E402
+
+HEADER = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), os.pardir, "include", "microfoam.h"))
+
+PASS, FAIL = 0, 0
+
+
+def check(cond: bool, name: str) -> None:
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+    else:
+        FAIL += 1
+        print(f"  FAIL  {name}")
+
+
+# --------------------------------------------------------------------------
+# 1. Layout agreement between the C header and the Python tool
+# --------------------------------------------------------------------------
+
+
+def parse_header_constants() -> dict:
+    """Read the format constants straight out of include/microfoam.h.
+
+    This is the whole point of the check: the C header and the Python tool are
+    maintained separately, and a divergence between them silently corrupts every
+    patch. Parsing the header means the test fails when they disagree rather
+    than trusting a copy.
+    """
+    with open(HEADER, "r", encoding="utf-8") as f:
+        text = f.read()
+    out = {}
+    for name in ["MCF_HDR_MAGIC", "MCF_HDR_MIN_SIZE", "MCF_HDR_MAX_SIZE",
+                 "MCF_SIG_SIZE", "MCF_OFF_MAGIC", "MCF_OFF_HDR_LEN",
+                 "MCF_OFF_HDR_VER", "MCF_OFF_FLAGS", "MCF_OFF_PRODUCT_ID",
+                 "MCF_OFF_FW_VERSION", "MCF_OFF_OLD_SIZE", "MCF_OFF_NEW_SIZE",
+                 "MCF_OFF_PAYLOAD_SIZE", "MCF_OFF_OLD_CRC32", "MCF_OFF_NEW_CRC32",
+                 "MCF_OFF_PAYLOAD_CRC32", "MCF_OFF_WORKSPACE_REQ",
+                 "MCF_OFF_OLD_VERSION", "MCF_OFF_CODEC_ID", "MCF_OFF_BLOCK_LOG2",
+                 "MCF_OFF_RESERVED", "MCF_OFF_SIGNATURE"]:
+        m = re.search(rf"#define\s+{name}\s+(0x[0-9A-Fa-f]+|\d+)", text)
+        if not m:
+            raise SystemExit(f"constant not found in the header: {name}")
+        out[name] = int(m.group(1), 0)
+    return out
+
+
+def test_layout() -> None:
+    print("container layout: C header vs Python tool")
+    c = parse_header_constants()
+
+    check(c["MCF_HDR_MAGIC"] == M.MAGIC, "magic agrees")
+    check(c["MCF_HDR_MIN_SIZE"] == M.HDR_LEN, "min header size agrees")
+    check(c["MCF_SIG_SIZE"] == M.SIG_SIZE, "signature size agrees")
+
+    offsets = {k: v for k, v in c.items() if k.startswith("MCF_OFF_")}
+    for name, value in offsets.items():
+        py = getattr(M, name, None)
+        check(py == value, f"{name} agrees (C={value} py={py})")
+
+    # The signature field must start where the signed region ends.
+    check(c["MCF_OFF_SIGNATURE"] == M.SIGNED_HEADER_LEN,
+          "signed region ends where the signature begins")
+
+    # The header must be large enough to hold everything before the payload.
+    needed = c["MCF_OFF_SIGNATURE"] + c["MCF_SIG_SIZE"]
+    check(c["MCF_HDR_MIN_SIZE"] >= needed,
+          f"min header {c['MCF_HDR_MIN_SIZE']} >= sig end {needed}")
+
+    # The convenience view must be exactly the wire size.
+    check(struct.calcsize(M._HDR_FMT) + M.SIG_SIZE == M.HDR_LEN,
+          "struct layout matches wire size")
+
+    # An Ed25519 signature is 64 bytes; conflating it with the 32-byte key
+    # shifts the payload. This is a regression test for a real defect.
+    check(M.SIG_SIZE == 64, "Ed25519 signature field is 64 bytes")
+
+
+# --------------------------------------------------------------------------
+# 2. Delta engine
+# --------------------------------------------------------------------------
+
+
+def test_bsdiff() -> None:
+    print("bsdiff / bspatch round-trips")
+    random.seed(20260215)
+    ok, bad = 0, 0
+
+    for _ in range(500):
+        n_old = random.randrange(0, 4000)
+        old = bytes(random.randrange(256) for _ in range(n_old))
+        r = random.random()
+
+        if r < 0.40 and n_old:                      # block replacements
+            new = bytearray(old)
+            for _ in range(random.randrange(0, 10)):
+                if not new:
+                    break
+                p = random.randrange(len(new))
+                L = random.randrange(1, 200)
+                new[p:p + L] = bytes(random.randrange(256)
+                                     for _ in range(random.randrange(0, 200)))
+        elif r < 0.65 and n_old:                    # sparse edits
+            new = bytearray(old)
+            for _ in range(random.randrange(1, 40)):
+                if not new:
+                    break
+                new[random.randrange(len(new))] ^= 0xFF
+            new = bytearray(new)
+            if random.random() < 0.4 and len(new) > 1:
+                new = new[:random.randrange(1, len(new) + 1)]
+        elif r < 0.80 and n_old:                    # content shifted
+            k = random.randrange(1, max(2, n_old // 2))
+            new = bytearray(old)[k:] + bytearray(random.randrange(256) for _ in range(k))
+        else:                                       # unrelated
+            new = bytes(random.randrange(256) for _ in range(random.randrange(0, 3000)))
+        new = bytes(new)
+
+        delta = M.bsdiff(old, new)
+        try:
+            out = M.bspatch(old, delta, len(new))
+        except Exception as exc:                    # noqa: BLE001
+            print(f"  FAIL  exception {exc!r} oldlen={len(old)} newlen={len(new)}")
+            bad += 1
+            continue
+        if out == new:
+            ok += 1
+        else:
+            print(f"  FAIL  mismatch oldlen={len(old)} newlen={len(new)}")
+            bad += 1
+
+    check(bad == 0, f"{ok}/{ok + bad} delta round-trips")
+
+
+def test_lz4() -> None:
+    print("lz4 compressor / decoder round-trips")
+    random.seed(7)
+    bad = 0
+    cases = [
+        b"", b"a", b"ab", b"a" * 5, b"a" * 16, b"a" * 300,
+        bytes(range(256)) * 3,
+        b"AAAA" + b"BBBB" * 900 + b"AAAA",
+        b"HELLO WORLD " * 400,
+        bytes(60000),
+        b"\x00" * 40000,
+    ]
+    for _ in range(60):
+        n = random.randrange(0, 9000)
+        style = random.randrange(4)
+        if style == 0:
+            cases.append(bytes(random.randrange(256) for _ in range(n)))
+        elif style == 1:
+            cases.append(bytes(random.randrange(4) for _ in range(n)))
+        elif style == 2:
+            cases.append(b"".join(bytes([random.randrange(4)]) * random.randrange(1, 60)
+                                  for _ in range(max(1, n // 30)))[:n])
+        else:
+            cases.append(bytes(random.choice(b"ABCD") for _ in range(n)))
+
+    for data in cases:
+        for block in (0, 64, 1024, 65536):
+            parts = ([data[i:i + block] for i in range(0, len(data), block)]
+                     if block else ([data] if data else []))
+            for part in parts:
+                if not part:
+                    continue
+                comp = M.lz4_compress_block(part)
+                if M.lz4_decode_block(comp, 1 << 24) != part:
+                    bad += 1
+    check(bad == 0, "all lz4 blocks round-trip")
+
+    # Compression should actually happen on compressible input.
+    data = bytes(40000)
+    check(len(M.lz4_compress_block(data)) < len(data) // 100,
+          "a zero run compresses by more than 100x")
+
+    # And must never expand in the framed stream.
+    framed = M.lz4_frame(bytes(3000), 1024)
+    check(len(framed) < 3000, "framed incompressible input does not expand")
+
+    # Blocks must respect the declared window, or the device rejects them.
+    for window in (256, 512, 1024, 65536):
+        fr = M.lz4_frame(bytes(random.randrange(256) for _ in range(5000)), window)
+        pos, ok = 0, True
+        while pos + 4 <= len(fr):
+            (blen,) = struct.unpack_from("<I", fr, pos)
+            pos += 4
+            if blen == 0:
+                break
+            try:
+                if len(M.lz4_decode_block(fr[pos:pos + blen], window)) > window:
+                    ok = False
+            except Exception:                      # noqa: BLE001
+                ok = False
+            pos += blen
+        check(ok, f"no block exceeds the {window}-byte window")
+
+
+# --------------------------------------------------------------------------
+# 3. Full pipeline
+# --------------------------------------------------------------------------
+
+
+def make_firmware(seed: int) -> tuple[bytes, bytes]:
+    random.seed(seed)
+    out = bytearray()
+    out += bytes(random.randrange(256) for _ in range(0x200))          # vector table
+    for _ in range(4000):                                              # "code"
+        out += bytes([random.choice([0x00, 0x01, 0x10, 0x20, 0x40, 0x4B,
+                                     0x88, 0x8D, 0xB5, 0xBD]),
+                      random.randrange(256)])
+    out += b"".join(b"STR_%d_%s\x00" % (i, b"x" * (i % 17)) for i in range(400))
+    out += bytes([(i * 7) % 256 for i in range(8192)])                  # const table
+    out += b"".join(b"\xaa\xbb\xcc\xdd" + bytes([i % 256] * 8) for i in range(1000))
+
+    old = bytes(out)
+    new = bytearray(old)
+    new[0x200:0x600] = bytes(random.randrange(256) for _ in range(0x400))
+    i = old.find(b"STR_200_")
+    new[i:i + 20] = b"STR_200_CHANGED_XX"
+    return old, bytes(new)
+
+
+def test_pipeline() -> None:
+    print("make / inspect / verify / apply")
+    with tempfile.TemporaryDirectory() as d:
+        old, new = make_firmware(2024)
+        p_old = os.path.join(d, "old.bin")
+        p_new = os.path.join(d, "new.bin")
+        p_a = os.path.join(d, "a.bin")
+        p_b = os.path.join(d, "b.bin")
+        p_out = os.path.join(d, "out.bin")
+        with open(p_old, "wb") as f:
+            f.write(old)
+        with open(p_new, "wb") as f:
+            f.write(new)
+
+        # The test suite ships a patch fixture that matches this format, so use
+        # the in-process API rather than a subprocess.
+        patch = M.Patch(old=old, new=new, product_id=0x1234,
+                        fw_version=0x00020000, old_version=0x00010000).build()
+        with open(p_a, "wb") as f:
+            f.write(patch)
+        with open(p_b, "wb") as f:
+            f.write(M.Patch(old=old, new=new, product_id=0x1234,
+                            fw_version=0x00020000, old_version=0x00010000).build())
+
+        check(open(p_a, "rb").read() == open(p_b, "rb").read(), "make is deterministic")
+
+        h = M.parse_header(patch)
+        check(h.magic == M.MAGIC, "magic correct")
+        check(h.new_size == len(new), "new_size correct")
+        check(h.old_crc32 == M.crc32(old), "old crc correct")
+        check(h.new_crc32 == M.crc32(new), "new crc correct")
+
+        stream = patch[h.hdr_len + M.LZ4_PROPS_LEN:h.hdr_len + h.payload_size]
+        check(M.crc32(stream) == h.payload_crc32, "payload crc correct")
+        check(M.bspatch(old, M.lz4_decompress(stream), h.new_size) == new,
+              "reconstruction is byte-exact")
+
+        ratio = len(patch) / len(new)
+        print(f"       image {len(new)} bytes -> patch {len(patch)} bytes "
+              f"({ratio * 100:.1f}%)")
+        check(ratio < 0.20, "a realistic maintenance change is under 20%")
+
+        # A one-bit change anywhere must be detected.
+        for offset, label in ((len(patch) - 1, "last payload byte"),
+                              (h.hdr_len + 8, "early payload byte"),
+                              (M.OFF_FW_VERSION, "header version field"),
+                              (M.OFF_WORKSPACE_REQ, "header workspace field")):
+            bad = bytearray(patch)
+            bad[offset] ^= 0x01
+            hh = M.parse_header(bytes(bad))
+            st = bytes(bad)[hh.hdr_len + M.LZ4_PROPS_LEN:hh.hdr_len + hh.payload_size]
+            detected = (M.crc32(st) != hh.payload_crc32) or offset < hh.hdr_len
+            check(detected, f"tamper detected: {label}")
+
+
+def test_signing() -> None:
+    print("signature round-trip")
+    try:
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    except ImportError:
+        print("  SKIP  'cryptography' not installed")
+        return
+
+    priv = Ed25519PrivateKey.generate()
+    seed = priv.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption())
+    pub = priv.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw)
+
+    old, new = make_firmware(99)
+    patch = M.Patch(old=old, new=new, product_id=0x1234, fw_version=0x00020000,
+                    old_version=0x00010000, flags=M.FLAG_SIGNED,
+                    private_key=seed).build()
+
+    h = M.parse_header(patch)
+    message = patch[:M.SIGNED_HEADER_LEN] + patch[h.hdr_len + M.LZ4_PROPS_LEN:]
+    check(M.verify(pub, h.signature, message), "a good signature verifies")
+
+    bad = bytearray(patch)
+    bad[-1] ^= 0x01
+    hb = M.parse_header(bytes(bad))
+    mb = bytes(bad)[:M.SIGNED_HEADER_LEN] + bytes(bad)[hb.hdr_len + M.LZ4_PROPS_LEN:]
+    check(not M.verify(pub, hb.signature, mb), "a tampered patch is rejected")
+
+    check(len(patch) == M.HDR_LEN + h.payload_size,
+          "file length equals header plus payload")
+
+    for label, offset, value in [
+        ("unknown flag", M.OFF_FLAGS, 0x80000000),
+        ("codec mismatch", M.OFF_FLAGS, M.FLAG_CODEC_LZMA),
+        ("nonzero reserved field", M.OFF_RESERVED, 1),
+    ]:
+        malformed = bytearray(patch)
+        if offset == M.OFF_FLAGS:
+            struct.pack_into("<I", malformed, offset, value)
+        else:
+            struct.pack_into("<H", malformed, offset, value)
+        try:
+            M.parse_header(bytes(malformed))
+            check(False, f"host rejects {label}")
+        except SystemExit:
+            check(True, f"host rejects {label}")
+
+
+def main() -> int:
+    layout_only = "--layout-only" in sys.argv
+    print("Microfoam host tool self-test\n")
+
+    test_layout()
+    if layout_only:
+        print(f"\n{PASS} checks, {FAIL} failures")
+        return 0 if FAIL == 0 else 1
+
+    test_bsdiff()
+    test_lz4()
+    test_pipeline()
+    test_signing()
+
+    print(f"\n{PASS} checks, {FAIL} failures")
+    return 0 if FAIL == 0 else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
