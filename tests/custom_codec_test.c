@@ -297,10 +297,6 @@ static void test_custom_success(void)
     CHECK(mcf_session_open(session_a, &cfg_a) == MCF_OK, "open first custom-codec session");
     CHECK(mcf_session_open(session_b, &cfg_b) == MCF_OK, "open second custom-codec session");
     status = mcf_session_run(session_a);
-    if (status != MCF_OK) {
-        fprintf(stderr, "first session: got %d at site %u\n",
-                (int)status, (unsigned)mcf_session_error_site(session_a));
-    }
     CHECK(status == MCF_OK, "first custom codec session runs");
     CHECK(mcf_session_state(session_a) == MCF_ST_DONE, "first session completes");
     CHECK(memcmp(g_flash, g_new, sizeof(g_new)) == 0, "first custom codec output matches");
@@ -308,10 +304,6 @@ static void test_custom_success(void)
     CHECK(g_init_calls > 0u, "custom init callback was invoked");
 
     status = mcf_session_run(session_b);
-    if (status != MCF_OK) {
-        fprintf(stderr, "second session: got %d at site %u\n",
-                (int)status, (unsigned)mcf_session_error_site(session_b));
-    }
     CHECK(status == MCF_OK, "second session resolves its caller-owned descriptor");
     CHECK(mcf_session_state(session_b) == MCF_ST_DONE, "second session completes independently");
     CHECK(memcmp(&g_flash[256], g_new, sizeof(g_new)) == 0,
