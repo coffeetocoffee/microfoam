@@ -104,9 +104,16 @@ static int32_t mcf_engine_ensure(mcf_engine_t *e, uint32_t want)
             return (int32_t)MCF_E_TRUNCATED;
         }
 
-        if (e->io->refill(e->io->ctx, &e->raw[e->raw_len],
-                          e->raw_cap - e->raw_len, &n, &eof) < 0) {
-            return (int32_t)MCF_E_CORRUPT;
+        {
+            int32_t refill_status = e->io->refill(e->io->ctx, &e->raw[e->raw_len],
+                                                  e->raw_cap - e->raw_len, &n, &eof);
+            if (refill_status < 0) {
+                return refill_status;
+            }
+            if (refill_status != MCF_OK) {
+                *e->io->site = MCF_SITE_READ_DIFF;
+                return (int32_t)MCF_E_CORRUPT;
+            }
         }
         if (eof) {
             e->raw_eof = 1;

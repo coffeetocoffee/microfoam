@@ -27,9 +27,9 @@ enum {
 };
 
 static uint8_t g_flash[FLASH_SIZE];
-static uint8_t g_old[16];
-static uint8_t g_new[16];
-static uint8_t g_delta[40];
+static uint8_t g_old[32];
+static uint8_t g_new[32];
+static uint8_t g_delta[56];
 static uint8_t g_patch[256];
 static uint32_t g_codec_mode;
 static uint32_t g_init_calls;
