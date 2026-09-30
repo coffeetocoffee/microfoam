@@ -442,12 +442,22 @@ typedef struct {
 } mcf_codec_ops_t;
 ```
 
-Two codecs ship:
+Three codecs ship:
 
 | Codec | Decoder state | Workspace | RAM | Ratio vs LZMA | Role |
 |---|---|---|---|---|---|
 | **LZ4** | ~256 B | ring buffer, configurable | **~1.5 KB @ 1 KB ring** | −5% to −15% on binary diffs | **Default** |
-| **LZMA** | ~16 KB probs (parameter-dependent) | dictionary, configurable | ~20–34 KB | baseline | Opt-in, max ratio saving |
+| **Raw** | 16 B | none | **16 B** | delta verbatim | `--codec raw`, for sub-threshold deltas |
+| **LZMA** | vendored SDK, 16 KB probs at `lc=3` | dictionary, configurable | ~20–33 KB | baseline | Opt-in, max ratio saving |
+
+The raw codec exists because framing overhead is not free at the bottom of the size range: a
+delta smaller than a codec's headers is better sent verbatim. It carries no properties block
+and no per-block framing, and it removes no integrity check — the payload CRC, the engine's
+control-triple bounds checks and the whole-image CRC all still apply.
+
+LZMA's parameters are additionally policy-checked at header-validation time when
+`mcf_config_t.lzma_max_dict` / `lzma_max_lc_plus_lp` are set, so a product bounds its
+decoder's resident cost by policy and not only by the reported workspace figure.
 
 **The architectural consequence.** The reference implementation's ~15.6 KB probability
 table is an unconditional RAM floor imposed by its default codec — no amount of buffer
@@ -908,7 +918,7 @@ header-translation step, preserving field investment (**§19**).
 Performed once, in `mcf_hdr_open()`, and everything downstream trusts the result (**P5**):
 
 ```
- 1. magic == 'BSPD'                    else MCF_E_FORMAT
+ 1. magic == 'MFP1'                    else MCF_E_FORMAT
  2. hdr_ver major supported            else MCF_E_UNSUPPORTED
  3. hdr_len >= MIN_HDR, <= MAX_HDR     else MCF_E_FORMAT
  4. product_id == configured product   else MCF_E_PRODUCT
@@ -917,11 +927,19 @@ Performed once, in `mcf_hdr_open()`, and everything downstream trusts the result
  7. codec_id known                     else MCF_E_UNSUPPORTED
  8. sizes within flash capacity        else MCF_E_PARAM
  9. workspace_req <= ram_budget        else MCF_E_DICT_TOO_LARGE   ← prevents B-01
-10. signature valid over hdr[0..55]+payload  else MCF_E_SIGNATURE   ← prevents G-01
-11. hdr CRC valid                      else MCF_E_CORRUPT
+10. flag/codec_id agreement (incl. RAW) else MCF_E_FORMAT
+11. LZMA props: lc+lp and dict within
+    lzma_max_lc_plus_lp / lzma_max_dict else MCF_E_FORMAT / MCF_E_DICT_TOO_LARGE
+12. signature valid over hdr[0..55]+payload  else MCF_E_SIGNATURE ← prevents G-01
+13. payload CRC valid                 else MCF_E_CORRUPT
 ```
 
 Order matters: cheap checks first, cryptographic verification last.
+
+Two of these are policy rather than format. **Step 9** bounds the *reported* workspace;
+**step 11** bounds the *declared* LZMA parameters, which is what a product actually cares
+about when it provisions a part. Together they mean an over-sized patch is a named rejection
+with its own diagnostic stage, not an allocation that fails somewhere later.
 
 ---
 

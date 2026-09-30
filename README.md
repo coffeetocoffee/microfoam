@@ -19,7 +19,7 @@ kilobytes of RAM.
 | **Language** | C99, MISRA-friendly, `-Wall -Wextra -Wconversion` clean | |
 | **Targets verified** | arm-none-eabi-gcc: M0, M0+, M3, M4, M7, M33 | |
 | **Licence** | MIT | |
-| **Status** | 1.2.0 — see [Status](#status) | |
+| **Status** | 1.3.0 — see [Status](#status) | |
 
 ---
 
@@ -217,12 +217,34 @@ per-session descriptor.
 |---|---|---|---|---|
 | **LZ4** | ~16 B | + block buffers | −5% to −15% on binary diffs | **yes** |
 | LZMA | probability table + dictionary | see below | baseline | no (`-DMCF_ENABLE_LZMA=ON`) |
+| Raw | 16 B | none | delta verbatim | no (`--codec raw`) |
+
+**Raw** is the delta stream passed through untouched — no framing, no properties, no
+per-block headers. Use it when the delta is small enough that a codec's headers cost more
+than they save, or when the producer knows the delta is incompressible. It weakens nothing:
+the payload CRC, the engine's control-triple bounds checks and the whole-image CRC all still
+apply.
 
 LZMA is opt-in because its probability table is an unconditional RAM floor that this
 architecture exists to remove — but when enabled it is a fully supported, CI-tested codec.
 The decoder is the vendored **LZMA SDK** (`third_party/lzma-sdk`, public domain, Igor
 Pavlov), the same implementation shipped in 7-Zip, U-Boot, and EDK2. A patch declaring LZMA
 on a build without it is rejected as `MCF_E_UNSUPPORTED` rather than handed to a stub.
+
+### LZMA parameter policy
+
+A patch's properties block declares `lc/lp/pb` and a dictionary size, and those set the
+decoder's resident cost. Two optional `mcf_config_t` fields let a product bound that by
+policy, checked during header validation **before anything is allocated**:
+
+| Field | `0` means | Rejection |
+|---|---|---|
+| `lzma_max_dict` | no limit | `MCF_E_DICT_TOO_LARGE` at the workspace stage |
+| `lzma_max_lc_plus_lp` | no limit | `MCF_E_FORMAT` at the LZMA-properties stage |
+
+Setting both on a deployed product turns "the decoder needed more RAM than we have" from an
+unreportable field failure into a named rejection with its own diagnostic stage. The decoded
+parameters are readable afterwards through `mcf_session_lzma_info()`.
 
 LZMA workspace, as reported by `mcf_lzma_workspace()` and declared in the patch header:
 
@@ -297,6 +319,8 @@ ctest --test-dir build
 | `custom_codec_test` | Caller-owned codec validation, isolation, budget enforcement, and failure propagation |
 | `host_selftest` | The Python tool against an independent reference implementation |
 | `cross_test` | A Python-produced patch applied by the C library |
+| `cross_test_raw` | A Python-produced **raw** patch applied by the C library |
+| `lzma_policy_test` | Dictionary / `lc+lp` policy rejections and diagnostics (with `MCF_ENABLE_LZMA=ON`) |
 | `lzma_conformance_test` | 67 liblzma vectors × 5 block sizes against the LZMA decoder (with `MCF_ENABLE_LZMA=ON`) |
 | `cross_test_lzma` | A Python-produced **LZMA** patch applied by the C library (with `MCF_ENABLE_LZMA=ON`) |
 
@@ -325,6 +349,7 @@ src/mcf_container.c        header parse and validation (the only place it's inte
 src/mcf_engine.c           BSDIFF43 delta loop, resumable, 32-bit clean
 src/mcf_session.c          state machine, workspace, flash write path
 src/mcf_codec_lz4.c        LZ4 block decoder
+src/mcf_codec_raw.c        raw (uncompressed) codec
 src/mcf_lzma.c             LZMA codec adapter (opt-in)
 src/mcf_codec.c            codec registry
 src/mcf_hal.c              HAL registration, workspace allocation
@@ -359,9 +384,10 @@ and all three test suites pass in both Debug and Release:
 | Suite | What it proves |
 |---|---|
 | `microfoam_tests` | 71 checks: round trip, **resume journal**, and fault injection at every stage |
-| `host_selftest` | 64 checks: 500 randomised delta round-trips, LZ4 and LZMA round-trips, format layout agreement, signing |
+| `host_selftest` | 85 checks: 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, LZMA props + policy fields, format layout agreement, signing |
 | `cross_test` | The Python host tool's patch, applied by the C library, byte-exact |
 | `lzma_conformance_test` | 335 checks: 67 liblzma vectors at five block sizes each (opt-in build) |
+| `lzma_policy_test` | 15 checks: dictionary and `lc+lp` policy rejections with their exact status and stage |
 
 The cross test is the one that matters most: a library verified only against its own
 encoder proves nothing about the format. Two independently written implementations agreeing

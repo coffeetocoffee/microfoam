@@ -6,7 +6,7 @@
 cmake_minimum_required(VERSION 3.15)
 
 project(microfoam
-    VERSION 1.2.0
+    VERSION 1.3.0
     DESCRIPTION "Firmware delta update library for resource-constrained microcontrollers"
     LANGUAGES C)
 
@@ -34,6 +34,7 @@ set(MCF_SOURCES
     src/mcf_session.c
     src/mcf_util.c
     src/mcf_codec_lz4.c
+    src/mcf_codec_raw.c
     src/mcf_v2.c)
 
 # LZMA is opt-in and fully supported when enabled: a patch declaring LZMA is
@@ -181,6 +182,13 @@ if(MCF_BUILD_TESTS)
         target_include_directories(lzma_conformance_test PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
+        add_executable(lzma_policy_test tests/lzma_policy_test.c)
+        target_link_libraries(lzma_policy_test PRIVATE microfoam)
+        target_compile_options(lzma_policy_test PRIVATE ${MCF_WARNINGS})
+        target_include_directories(lzma_policy_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        add_test(NAME lzma_policy_test COMMAND lzma_policy_test)
+
         find_package(Python3 COMPONENTS Interpreter)
         if(Python3_Interpreter_FOUND)
             set(MCF_LZMA_VECTORS ${CMAKE_CURRENT_BINARY_DIR}/lzma_vectors.bin)
@@ -219,6 +227,20 @@ if(MCF_BUILD_TESTS)
                          -DTOOL=${CMAKE_CURRENT_SOURCE_DIR}/host/microfoam.py
                          -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cross
                          -DCODEC=lz4
+                         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/cross_test.cmake)
+
+        # The same cross test with a raw (uncompressed) patch: proves the
+        # identity codec round-trips through the C session.
+        add_test(NAME cross_test_raw
+                 COMMAND ${CMAKE_COMMAND}
+                         -DOLD=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/old.bin
+                         -DNEW=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/new.bin
+                         -DKEY=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/key.priv
+                         -DMCF=$<TARGET_FILE:cross_test>
+                         -DPY=${Python3_EXECUTABLE}
+                         -DTOOL=${CMAKE_CURRENT_SOURCE_DIR}/host/microfoam.py
+                         -DWORK=${CMAKE_CURRENT_BINARY_DIR}/cross
+                         -DCODEC=raw
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/cross_test.cmake)
 
         # The same cross test with an LZMA patch, when the decoder is built in.

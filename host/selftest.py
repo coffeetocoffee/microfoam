@@ -416,6 +416,69 @@ def test_lzma() -> None:
           "4 KB dictionary round-trips byte-exact")
 
 
+def test_raw() -> None:
+    print("raw (uncompressed) make / apply round-trip")
+    old, new = make_firmware(55)
+    patch = M.Patch(old=old, new=new, product_id=0x1234, fw_version=0x00020000,
+                    old_version=0x00010000, codec=M.CODEC_RAW).build()
+
+    h = M.parse_header(patch)
+    check(h.codec_id == M.CODEC_RAW, "codec id is RAW")
+    check(bool(h.flags & M.FLAG_RAW), "raw flag is set")
+    check(not (h.flags & (M.FLAG_CODEC_LZ4 | M.FLAG_CODEC_LZMA)),
+          "no compressed codec flag is set")
+    check(h.workspace_req == M.WS_RAW, "raw workspace is the identity state block")
+
+    payload = patch[h.hdr_len:h.hdr_len + h.payload_size]
+    check(M.crc32(payload) == h.payload_crc32, "payload crc covers the raw delta")
+    check(M.bspatch(old, payload, h.new_size) == new, "raw reconstruction is byte-exact")
+
+    patch_b = M.Patch(old=old, new=new, product_id=0x1234, fw_version=0x00020000,
+                      old_version=0x00010000, codec=M.CODEC_RAW).build()
+    check(patch == patch_b, "raw make is deterministic")
+
+    # The raw payload is the delta verbatim: it must equal bsdiff's output byte
+    # for byte, i.e. zero framing or compression overhead. (The delta itself is
+    # larger than the image only because it carries BSDIFF43 control triples.)
+    delta = M.bsdiff(old, new)
+    check(payload == delta, "raw payload is the delta byte for byte")
+    print(f"       raw payload {len(payload)} bytes = delta; "
+          f"lz4 patch is smaller on this fixture")
+
+    # Tampering must still be detected by the payload CRC.
+    bad = bytearray(patch)
+    bad[h.hdr_len + 4] ^= 0x01
+    hb = M.parse_header(bytes(bad))
+    check(M.crc32(bytes(bad)[hb.hdr_len:hb.hdr_len + hb.payload_size]) != hb.payload_crc32,
+          "a flipped raw payload byte is detected by the CRC")
+
+
+def test_lzma_policy_guard() -> None:
+    """The host side of the LZMA props contract.
+
+    The device refuses a patch whose declared dictionary or lc+lp exceeds its
+    policy; the host tool must therefore write the declaration the device reads
+    back, and the rules must round-trip as documented.
+    """
+    print("lzma props and policy fields")
+    old, new = make_firmware(88)
+    for dict_size in (4096, 8192, 16384):
+        patch = M.Patch(old=old, new=new, product_id=0x1234, fw_version=0x00020000,
+                        old_version=0x00010000, codec=M.CODEC_LZMA,
+                        dict_size=dict_size).build()
+        h = M.parse_header(patch)
+        payload = patch[h.hdr_len:h.hdr_len + h.payload_size]
+        props = payload[:M.LZMA_PROPS_LEN]
+        declared = struct.unpack_from("<I", props, 1)[0]
+        check(declared == dict_size, f"declared dictionary is {dict_size}")
+        check(h.workspace_req == M.lzma_workspace_req(
+            M.LZMA_DEFAULT_LC, M.LZMA_DEFAULT_LP, dict_size),
+            f"workspace_req matches the device figure at dict={dict_size}")
+        v = props[0]
+        check(v % 9 == M.LZMA_DEFAULT_LC, "lc is in range")
+        check(v // 45 == M.LZMA_DEFAULT_PB, "pb is in range")
+
+
 def main() -> int:
     layout_only = "--layout-only" in sys.argv
     print("Microfoam host tool self-test\n")
@@ -428,7 +491,9 @@ def main() -> int:
     test_bsdiff()
     test_lz4()
     test_pipeline()
+    test_raw()
     test_lzma()
+    test_lzma_policy_guard()
     test_signing()
 
     print(f"\n{PASS} checks, {FAIL} failures")

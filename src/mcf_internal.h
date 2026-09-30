@@ -49,6 +49,7 @@
 #define MCF_SITE_NEW_CRC         30u
 #define MCF_SITE_COMMIT          31u
 #define MCF_SITE_STATE           32u
+#define MCF_SITE_HDR_LZMA_PROPS  33u
 
 /* ------------------------------------------------------------------------ *
  * Little-endian scalar reads. The parser never depends on host byte order.
@@ -87,6 +88,13 @@ typedef struct mcf_hdr_view {
     uint32_t       props_len;
     const uint8_t *payload; /*!< First byte of the compressed delta stream.    */
     uint32_t       payload_stream_len;
+
+    /* Decoded LZMA properties, when the codec is LZMA. Kept so the policy check
+     * and field diagnostics do not have to re-decode the block. */
+    uint8_t  lzma_lc;
+    uint8_t  lzma_lp;
+    uint8_t  lzma_pb;
+    uint32_t lzma_dict;
 } mcf_hdr_view_t;
 
 /* Parse and validate. `hal` supplies product id and running version. Returns

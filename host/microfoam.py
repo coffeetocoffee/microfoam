@@ -70,11 +70,16 @@ FLAG_CODEC_LZ4 = 0x00000008
 CODEC_AUTO = 0
 CODEC_LZ4 = 1
 CODEC_LZMA = 2
+CODEC_RAW = 3
 
 # LZ4 codec properties are 4 bytes: the uncompressed content size.
 LZ4_PROPS_LEN = 4
 # The device's LZ4 state block. Must be >= sizeof(mcf_lz4_t) in the C build.
 WS_LZ4 = 16
+# The raw codec has no properties and a 16-byte state block; mirrors
+# MCF_RAW_WORKSPACE_BYTES in src/mcf_codec_raw.h.
+RAW_PROPS_LEN = 0
+WS_RAW = 16
 
 # LZMA codec properties are 9 bytes: encoded lc/lp/pb, dictionary size, and
 # exact decompressed length. Mirrors mcf_lzma.h.
@@ -447,7 +452,11 @@ def lzma_decompress(stream: bytes, props: bytes) -> bytes:
 
 
 def props_len_for(codec_id: int) -> int:
-    return LZMA_PROPS_LEN if codec_id == CODEC_LZMA else LZ4_PROPS_LEN
+    if codec_id == CODEC_LZMA:
+        return LZMA_PROPS_LEN
+    if codec_id == CODEC_RAW:
+        return RAW_PROPS_LEN
+    return LZ4_PROPS_LEN
 
 
 # --------------------------------------------------------------------------
@@ -507,7 +516,17 @@ class Patch:
     def build(self) -> bytes:
         delta = bsdiff(self.old, self.new)
 
-        if self.codec == CODEC_LZMA:
+        if self.codec == CODEC_RAW:
+            # The delta verbatim: no framing, no properties, no per-block cost.
+            # The right choice when the delta is small enough that a codec's
+            # headers cost more than they save.
+            stream = delta
+            payload_size = len(stream)
+            codec_id = CODEC_RAW
+            codec_flag = FLAG_RAW
+            workspace_req = WS_RAW
+            signed_stream = delta
+        elif self.codec == CODEC_LZMA:
             props = self._lzma_props(delta)
             stream = props + lzma_compress(delta, self.dict_size)
             payload_size = len(stream)
@@ -603,7 +622,7 @@ def parse_header(blob: bytes) -> HeaderView:
         raise SystemExit("invalid header length")
     if h.reserved != 0 or h.flags & ~known:
         raise SystemExit("unsupported header flags or nonzero reserved field")
-    if not (h.flags & (FLAG_CODEC_LZMA | FLAG_CODEC_LZ4)):
+    if not (h.flags & (FLAG_RAW | FLAG_CODEC_LZMA | FLAG_CODEC_LZ4)):
         raise SystemExit("missing codec flag")
     if (h.flags & FLAG_CODEC_LZ4) and (h.flags & FLAG_CODEC_LZMA):
         raise SystemExit("multiple codec flags are not supported")
@@ -613,7 +632,11 @@ def parse_header(blob: bytes) -> HeaderView:
         raise SystemExit("LZ4 patch is missing FLAG_CODEC_LZ4")
     if h.codec_id == CODEC_LZMA and not (h.flags & FLAG_CODEC_LZMA):
         raise SystemExit("LZMA patch is missing FLAG_CODEC_LZMA")
-    if h.codec_id not in (CODEC_LZ4, CODEC_LZMA):
+    # The raw flag and the raw codec id must agree in both directions, exactly
+    # as the compressed codec flags must agree with theirs.
+    if bool(h.flags & FLAG_RAW) != (h.codec_id == CODEC_RAW):
+        raise SystemExit("raw flag and codec id disagree")
+    if h.codec_id not in (CODEC_LZ4, CODEC_LZMA, CODEC_RAW):
         raise SystemExit("unsupported codec id in header")
     return h
 
@@ -724,7 +747,7 @@ def cmd_make(args: argparse.Namespace) -> int:
     new = open(args.new, "rb").read()
     key = open(args.key, "rb").read() if args.key else None
 
-    codec = {"lz4": CODEC_LZ4, "lzma": CODEC_LZMA}[args.codec]
+    codec = {"lz4": CODEC_LZ4, "lzma": CODEC_LZMA, "raw": CODEC_RAW}[args.codec]
     if args.dict_size < LZMA_MIN_DICT:
         raise SystemExit(f"--dict-size must be at least {LZMA_MIN_DICT}")
 
@@ -743,7 +766,8 @@ def cmd_make(args: argparse.Namespace) -> int:
 
     ratio = (len(patch) / len(new) * 100.0) if new else 0.0
     workspace = (lzma_workspace_req(LZMA_DEFAULT_LC, LZMA_DEFAULT_LP, args.dict_size)
-                 if codec == CODEC_LZMA else WS_LZ4)
+                 if codec == CODEC_LZMA else
+                 WS_RAW if codec == CODEC_RAW else WS_LZ4)
     print(f"old      {len(old):>9} bytes")
     print(f"new      {len(new):>9} bytes")
     print(f"patch    {len(patch):>9} bytes  ({ratio:.1f}% of new)")
@@ -760,7 +784,7 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     h = parse_header(blob)
     if h.payload_size > len(blob) - h.hdr_len:
         raise SystemExit("truncated payload")
-    codec = {CODEC_LZ4: "lz4", CODEC_LZMA: "lzma"}.get(h.codec_id, "?")
+    codec = {CODEC_LZ4: "lz4", CODEC_LZMA: "lzma", CODEC_RAW: "raw"}.get(h.codec_id, "?")
 
     print(f"magic          0x{h.magic:08X}  {'ok' if h.magic == MAGIC else 'BAD'}")
     print(f"header         {h.hdr_len} bytes, version {h.hdr_ver >> 8}.{h.hdr_ver & 0xFF}")
@@ -830,6 +854,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
     payload = blob[h.hdr_len:h.hdr_len + h.payload_size]
     if h.codec_id == CODEC_LZMA:
         delta = lzma_decompress(payload[props_len:], payload[:props_len])
+    elif h.codec_id == CODEC_RAW:
+        delta = payload
     else:
         delta = lz4_decompress(payload[props_len:])
     new = bspatch(old, delta, h.new_size)
@@ -879,8 +905,9 @@ def main(argv: Optional[list] = None) -> int:
     m.add_argument("--version", type=lambda s: int(s, 0), required=True)
     m.add_argument("--old-version", type=lambda s: int(s, 0), default=0)
     m.add_argument("--block-log2", type=int, default=DEFAULT_BLOCK_LOG2)
-    m.add_argument("--codec", choices=("lz4", "lzma"), default="lz4",
-                   help="lz4 (default, smallest RAM) or lzma (smaller patch)")
+    m.add_argument("--codec", choices=("lz4", "lzma", "raw"), default="lz4",
+                   help="lz4 (default, smallest RAM), lzma (smaller patch), or "
+                        "raw (delta verbatim; best for sub-threshold patches)")
     m.add_argument("--dict-size", type=lambda s: int(s, 0), default=LZMA_DEFAULT_DICT,
                    help=f"LZMA dictionary in bytes (default {LZMA_DEFAULT_DICT}); "
                         "the device must have RAM for the probability table plus this")

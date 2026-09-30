@@ -25,7 +25,7 @@ tool (`host/microfoam.py`) assert their field offsets against this table indepen
 | 40 | 4 | `payload_crc32` | CRC-32 of the compressed stream, excluding codec properties. |
 | 44 | 4 | `workspace_req` | **Decoder RAM required, in bytes.** The keystone field. |
 | 48 | 4 | `old_version` | Version of the base image this patch requires. Must equal the running version. |
-| 52 | 1 | `codec_id` | 1 = LZ4, 2 = LZMA. 0 is AUTO and is never valid on the wire; other values are unsupported. |
+| 52 | 1 | `codec_id` | 1 = LZ4, 2 = LZMA, 3 = raw. 0 is AUTO and is never valid on the wire; other values are unsupported. |
 | 53 | 1 | `block_size_log2` | log2 of the processing window. 8..20. |
 | 54 | 2 | `reserved` | Must be zero. |
 | 56 | 64 | `signature` | Ed25519 signature, R‖S. Zero when `FLAG_SIGNED` is clear. |
@@ -46,9 +46,14 @@ This is a regression test in `host/selftest.py`; it was a real defect during dev
 | Bit | Name | Meaning |
 |---|---|---|
 | 0 | `SIGNED` | `signature` is populated and must verify. |
-| 1 | `RAW` | The payload is not compressed. |
+| 1 | `RAW` | The payload is the delta verbatim; the codec id must be `MCF_CODEC_RAW`. |
 | 2 | `CODEC_LZMA` | LZMA codec. |
 | 3 | `CODEC_LZ4` | LZ4 codec. |
+
+The `RAW` flag and `codec_id == 3` must agree in both directions, exactly as the compressed
+codec flags must agree with theirs: a flag set without the matching id is `MCF_E_FORMAT`, and
+an id without its flag is too. This closes the trick of claiming compression that was never
+applied, or the reverse.
 
 ## Signed region
 
@@ -72,12 +77,24 @@ Performed once, in `mcf_hdr_parse()`. Everything downstream trusts the result.
 | 7 | `codec_id` known to this build and permitted by the configuration | `MCF_E_UNSUPPORTED` |
 | 8 | sizes consistent; `payload_size <= patch_size - hdr_len`; `block_size_log2` in 8..20 | `MCF_E_FORMAT` / `MCF_E_TRUNCATED` |
 | 9 | `workspace_req <= ram_budget`, and two block buffers also fit | `MCF_E_DICT_TOO_LARGE` |
-| 10 | reserved field is zero; only known flags are set; RAW is rejected; codec flag agrees with `codec_id` | `MCF_E_FORMAT` |
-| 11 | signature valid over the signed region (header[0..55] + compressed stream) | `MCF_E_SIGNATURE` |
-| 12 | `payload_crc32` matches | `MCF_E_CORRUPT` |
+| 10 | reserved field is zero; only known flags are set; the codec flag and `codec_id` agree in both directions (including RAW) | `MCF_E_FORMAT` |
+| 11 | LZMA only: properties decode; `lc+lp` within `lzma_max_lc_plus_lp`; `dict_size <= lzma_max_dict` | `MCF_E_FORMAT` / `MCF_E_DICT_TOO_LARGE` |
+| 12 | signature valid over the signed region (header[0..55] + compressed stream) | `MCF_E_SIGNATURE` |
+| 13 | `payload_crc32` matches | `MCF_E_CORRUPT` |
 
 Cheap structural checks come first; the cryptographic check comes last, after everything
 that could be decided without it.
+
+### Step 11 in detail — the LZMA parameter policy
+
+The properties block declares `lc/lp/pb` and a dictionary size, and those two set the
+decoder's resident cost: the probability table is `2 * (1984 + 768 << (lc + lp))` bytes and
+the dictionary is allocated at the declared size. A product therefore configures
+`mcf_config_t.lzma_max_dict` and `lzma_max_lc_plus_lp` (`0` = no limit) and the library
+refuses a patch outside that policy here, during header validation and before any
+allocation, reporting `MCF_SITE_HDR_LZMA_PROPS` or the workspace stage. The decoded
+parameters remain readable through `mcf_session_lzma_info()` so the field failure is
+diagnosable rather than just a number.
 
 ### Step 9 in detail
 
@@ -97,6 +114,15 @@ Note that the allocation size is subsequently taken from the codec's own
 cannot cause an allocation smaller than the codec needs.
 
 ## Codec properties
+
+A codec's properties block sits at the head of the payload; the compressed (or raw) stream
+follows immediately after it. `hdr_len` is where the payload starts, and the properties
+length is fixed per codec id, so the split is unambiguous.
+
+### Raw — 0 bytes
+
+The payload is the delta stream verbatim: no properties, no framing, no per-block headers.
+`MCF_FLAG_RAW` must be set and `codec_id` must be 3.
 
 ### LZ4 — 4 bytes
 

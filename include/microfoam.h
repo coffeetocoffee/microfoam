@@ -27,7 +27,7 @@ extern "C" {
  * ======================================================================== */
 
 #define MCF_VERSION_MAJOR 1u
-#define MCF_VERSION_MINOR 2u
+#define MCF_VERSION_MINOR 3u
 #define MCF_VERSION_PATCH 0u
 
 /* Packed as (major << 16) | (minor << 8) | patch. */
@@ -202,7 +202,8 @@ typedef enum mcf_codec_id {
     MCF_CODEC_AUTO = 0, /*!< Smallest workspace that fits ram_budget.        */
     MCF_CODEC_LZ4  = 1,
     MCF_CODEC_LZMA = 2,
-    MCF_CODEC_MAX  = 3,
+    MCF_CODEC_RAW  = 3, /*!< Payload is the delta verbatim, uncompressed.    */
+    MCF_CODEC_MAX  = 4,
     MCF_CODEC_CUSTOM_MIN = 0x80
 } mcf_codec_id_t;
 
@@ -414,6 +415,22 @@ typedef struct mcf_config {
     mcf_verify_fn  verify;
     void          *verify_ctx;
 
+    /* Optional LZMA policy. A patch's properties block declares lc/lp/pb and a
+     * dictionary size, and the device must not accept parameters it cannot
+     * afford or does not intend to run. These are checked during header
+     * validation, before anything is allocated:
+     *
+     *   lzma_max_dict        0 = no limit. A patch whose declared dictionary is
+     *                        larger is rejected with MCF_E_DICT_TOO_LARGE.
+     *   lzma_max_lc_plus_lp  0 = no limit. The literals-context sum drives the
+     *                        probability table size (768 << (lc + lp) entries).
+     *                        A patch over this is rejected with MCF_E_FORMAT.
+     *
+     * Set both on a deployed product to bound the decoder's resident cost by
+     * policy rather than only by the reported workspace figure. */
+    uint32_t       lzma_max_dict;
+    uint32_t       lzma_max_lc_plus_lp;
+
     /* Optional caller-owned codec table. Built-ins remain available; entries
      * here override a matching codec id for this session only. */
     const mcf_codec_ops_t *codecs;
@@ -572,6 +589,21 @@ uint32_t mcf_session_flags(const mcf_session_t *s);
  * with the line numbers in the source. */
 uint32_t mcf_session_error_site(const mcf_session_t *s);
 const char *mcf_session_strerror(mcf_status_t status);
+
+/* Decoded LZMA properties of the patch a session is working on. Populated by
+ * mcf_session_begin() when the patch's codec is LZMA; `valid` is 0 otherwise.
+ * Exists so a field failure can be diagnosed with the parameters that were in
+ * play, which the status code alone does not convey. */
+typedef struct mcf_lzma_info {
+    uint8_t  valid;
+    uint8_t  lc;
+    uint8_t  lp;
+    uint8_t  pb;
+    uint32_t dict_size;
+    uint32_t workspace;  /*!< What the device computed for these parameters. */
+} mcf_lzma_info_t;
+
+mcf_status_t mcf_session_lzma_info(const mcf_session_t *s, mcf_lzma_info_t *out);
 
 /* ======================================================================== *
  * 10. Utilities

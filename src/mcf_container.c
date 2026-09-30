@@ -9,6 +9,10 @@
 
 #include "mcf_internal.h"
 
+#ifdef MCF_ENABLE_LZMA
+#include "mcf_lzma.h"
+#endif
+
 /* The convenience view must agree with the on-wire offsets byte for byte. The
  * C reference asserts this; the Python host tool asserts the same table, and a
  * mismatch fails the build rather than corrupting a field. */
@@ -140,16 +144,21 @@ mcf_status_t mcf_hdr_parse(const mcf_hal_t *hal, const mcf_config_t *cfg,
     out->block_log2    = h[MCF_OFF_BLOCK_LOG2];
 
     /* Reserved bits and codec markers are part of the wire contract. Reject
-     * values that a newer producer could otherwise make ambiguous. */
+     * values that a newer producer could otherwise make ambiguous. The raw flag
+     * must agree with the raw codec id in both directions, exactly as the
+     * compressed codec flags must agree with theirs. */
     *site = MCF_SITE_HDR_CODEC;
     if (mcf_rd16(&h[MCF_OFF_RESERVED]) != 0u ||
         (out->flags & ~(MCF_FLAG_SIGNED | MCF_FLAG_RAW |
                         MCF_FLAG_CODEC_LZMA | MCF_FLAG_CODEC_LZ4)) != 0u ||
-        (out->flags & MCF_FLAG_RAW) != 0u ||
+        (((out->flags & MCF_FLAG_RAW) != 0u) !=
+         (out->codec_id == (uint8_t)MCF_CODEC_RAW)) ||
         ((out->flags & MCF_FLAG_CODEC_LZ4) != 0u &&
          out->codec_id != (uint8_t)MCF_CODEC_LZ4) ||
         ((out->flags & MCF_FLAG_CODEC_LZMA) != 0u &&
-         out->codec_id != (uint8_t)MCF_CODEC_LZMA)) {
+         out->codec_id != (uint8_t)MCF_CODEC_LZMA) ||
+        ((out->flags & MCF_FLAG_RAW) != 0u &&
+         (out->flags & (MCF_FLAG_CODEC_LZMA | MCF_FLAG_CODEC_LZ4)) != 0u)) {
         return MCF_E_FORMAT;
     }
 
@@ -210,6 +219,39 @@ mcf_status_t mcf_hdr_parse(const mcf_hal_t *hal, const mcf_config_t *cfg,
         *site = MCF_SITE_HDR_SIZES;
         return MCF_E_FORMAT;
     }
+
+#ifdef MCF_ENABLE_LZMA
+    /* 10. LZMA parameter policy. The properties block declares the decoder's
+     *     context parameters and its dictionary size; those set the probability
+     *     table size and the resident cost. A patch is refused here, during
+     *     header validation and before any allocation, when the declaration is
+     *     outside what this product accepts - so an over-sized dictionary is a
+     *     specific, reportable rejection rather than a downstream surprise. */
+    if (out->codec_id == (uint8_t)MCF_CODEC_LZMA) {
+        mcf_lzma_params_t lp;
+
+        *site = MCF_SITE_HDR_LZMA_PROPS;
+        if (mcf_lzma_props_decode(out->props, out->props_len, &lp) != MCF_OK) {
+            return MCF_E_FORMAT;
+        }
+        if (lp.content_size == 0u) {
+            return MCF_E_FORMAT;
+        }
+        out->lzma_lc   = (uint8_t)lp.lc;
+        out->lzma_lp   = (uint8_t)lp.lp;
+        out->lzma_pb   = (uint8_t)lp.pb;
+        out->lzma_dict = lp.dict_size;
+
+        if (cfg->lzma_max_lc_plus_lp != 0u &&
+            (lp.lc + lp.lp) > cfg->lzma_max_lc_plus_lp) {
+            return MCF_E_FORMAT;
+        }
+        if (cfg->lzma_max_dict != 0u && lp.dict_size > cfg->lzma_max_dict) {
+            *site = MCF_SITE_WORKSPACE;
+            return MCF_E_DICT_TOO_LARGE;
+        }
+    }
+#endif
 
     *site = MCF_SITE_NONE;
     return MCF_OK;

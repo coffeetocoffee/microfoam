@@ -34,6 +34,23 @@
  * reservation fails the build instead of the field. */
 #define MCF_LZMA_STATE_BYTES 256u
 
+/* Decoded properties, shared by the decoder and the header-parsing policy check
+ * so the two cannot disagree about the encoding. */
+typedef struct mcf_lzma_params {
+    uint32_t lc;
+    uint32_t lp;
+    uint32_t pb;
+    uint32_t dict_size;
+    uint32_t content_size;
+} mcf_lzma_params_t;
+
+/* Decode the 9-byte properties block. Returns MCF_OK, MCF_E_PARAM on a short
+ * block, or MCF_E_FORMAT when the encoded byte is out of range. Performs the
+ * same dictionary floor clamp the decoder applies (4 KiB), so callers see the
+ * size that will actually be used. */
+mcf_status_t mcf_lzma_props_decode(const uint8_t *props, uint32_t props_len,
+                                   mcf_lzma_params_t *out);
+
 /* Workspace in bytes needed to decode a payload described by `props`, or 0 if
  * the properties are malformed. Must not allocate. */
 uint32_t mcf_lzma_workspace(const uint8_t *props, uint32_t props_len);

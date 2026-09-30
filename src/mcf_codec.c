@@ -9,12 +9,14 @@
 
 #include "mcf_internal.h"
 #include "mcf_codec_lz4.h"
+#include "mcf_codec_raw.h"
 #ifdef MCF_ENABLE_LZMA
 #include "mcf_lzma.h"
 #endif
 
 static const mcf_codec_ops_t *const g_builtin[] = {
     &mcf_codec_lz4_ops,
+    &mcf_codec_raw_ops,
 #ifdef MCF_ENABLE_LZMA
     &mcf_codec_lzma_ops,
 #endif
@@ -62,6 +64,8 @@ uint32_t mcf_codec_props_len(mcf_codec_id_t id)
         return 4u;  /* u32 le content size            */
     case MCF_CODEC_LZMA:
         return 9u;  /* props byte, u32 dict, u32 size */
+    case MCF_CODEC_RAW:
+        return 0u;  /* the payload is the delta itself */
     default:
         return 0u;
     }

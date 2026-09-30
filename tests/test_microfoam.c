@@ -595,6 +595,20 @@ static void test_header_rejections(void)
     g_patch[MCF_OFF_CODEC_ID] = 0x7Fu;
     CHECK_EQ(apply(len, NULL), MCF_E_FORMAT, "unknown codec marker rejected");
 
+    /* raw flag disagreeing with the codec id: the two must agree in both
+     * directions, or a producer could claim compression it did not apply. */
+    device_reset();
+    len = build_patch(g_patch, g_old, OLD_LEN, g_new, NEW_LEN, PRODUCT, VER_NEW, VER_OLD,
+                      WS_LZ4, 0u, 9u);
+    wr32(&g_patch[MCF_OFF_FLAGS], MCF_FLAG_RAW | MCF_FLAG_CODEC_LZ4);
+    CHECK_EQ(apply(len, NULL), MCF_E_FORMAT, "raw flag with LZ4 codec rejected");
+
+    device_reset();
+    len = build_patch(g_patch, g_old, OLD_LEN, g_new, NEW_LEN, PRODUCT, VER_NEW, VER_OLD,
+                      WS_LZ4, 0u, 9u);
+    g_patch[MCF_OFF_CODEC_ID] = (uint8_t)MCF_CODEC_RAW;
+    CHECK_EQ(apply(len, NULL), MCF_E_FORMAT, "raw codec without the raw flag rejected");
+
     /* future major version */
     device_reset();
     len = build_patch(g_patch, g_old, OLD_LEN, g_new, NEW_LEN, PRODUCT, VER_NEW, VER_OLD,

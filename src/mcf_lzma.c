@@ -146,31 +146,51 @@ static void mcf_lzma_free_cb(ISzAllocPtr p, void *address)
  * Properties. Layout is documented in mcf_lzma.h (9 bytes, little-endian).
  * ---------------------------------------------------------------------- */
 
+mcf_status_t mcf_lzma_props_decode(const uint8_t *props, uint32_t props_len,
+                                   mcf_lzma_params_t *out)
+{
+    uint32_t v;
+    uint32_t dict;
+
+    if (props == NULL || out == NULL || props_len < MCF_LZMA_PROPS_LEN) {
+        return MCF_E_PARAM;
+    }
+    memset(out, 0, sizeof(*out));
+
+    v = props[0];
+    if (v >= (9u * 5u * 5u)) {
+        return MCF_E_FORMAT;
+    }
+    out->lc = v % 9u;
+    out->lp = (v / 9u) % 5u;
+    out->pb = v / 45u;
+
+    dict = mcf_lzma_rd32(&props[1]);
+    if (dict < 4096u) {
+        dict = 4096u; /* the SDK's LZMA_DIC_MIN clamp */
+    }
+    out->dict_size = dict;
+    out->content_size = mcf_lzma_rd32(&props[5]);
+    return MCF_OK;
+}
+
 static int mcf_lzma_props(const uint8_t *props, uint32_t props_len,
                           uint32_t *lc, uint32_t *lp, uint32_t *pb,
                           uint32_t *dict_size, uint32_t *content_size)
 {
-    uint32_t v;
+    mcf_lzma_params_t p;
 
-    if (props == NULL || props_len < MCF_LZMA_PROPS_LEN) {
+    if (mcf_lzma_props_decode(props, props_len, &p) != MCF_OK) {
         return -1;
     }
-    v = props[0];
-    if (v >= (9u * 5u * 5u)) {
+    if (p.content_size == 0u) {
         return -1;
     }
-    *lc = v % 9u;
-    *lp = (v / 9u) % 5u;
-    *pb = v / 45u;
-
-    *dict_size = mcf_lzma_rd32(&props[1]);
-    if (*dict_size < 4096u) {
-        *dict_size = 4096u; /* the SDK's LZMA_DIC_MIN clamp */
-    }
-    *content_size = mcf_lzma_rd32(&props[5]);
-    if (*content_size == 0u) {
-        return -1;
-    }
+    *lc = p.lc;
+    *lp = p.lp;
+    *pb = p.pb;
+    *dict_size = p.dict_size;
+    *content_size = p.content_size;
     return 0;
 }
 

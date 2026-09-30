@@ -860,3 +860,23 @@ uint32_t mcf_session_error_site(const mcf_session_t *s)
 {
     return (s != NULL) ? s->site : MCF_SITE_NONE;
 }
+
+mcf_status_t mcf_session_lzma_info(const mcf_session_t *s, mcf_lzma_info_t *out)
+{
+    if (s == NULL || out == NULL) {
+        return MCF_E_PARAM;
+    }
+    memset(out, 0, sizeof(*out));
+    if (s->hdr.codec_id != (uint8_t)MCF_CODEC_LZMA) {
+        return MCF_E_NOT_FOUND;
+    }
+    out->valid     = 1u;
+    out->lc        = s->hdr.lzma_lc;
+    out->lp        = s->hdr.lzma_lp;
+    out->pb        = s->hdr.lzma_pb;
+    out->dict_size = s->hdr.lzma_dict;
+    /* The device's own figure for these parameters. Callers compare it against
+     * their budget; it is what the session would allocate. */
+    out->workspace = s->ws_size;
+    return MCF_OK;
+}
