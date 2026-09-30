@@ -14,15 +14,26 @@ extern "C" {
 #define MCF_V2_VERSION 0x0200u
 #define MCF_V2_FLAG_SIGNED 0x00000001u
 #define MCF_V2_FLAG_ENCRYPTED 0x00000002u
-#define MCF_V2_FLAG_CODEC_LZMA 0x00000004u
+#define MCF_V2_FLAG_CODEC_LZMA 0x00000004u /* Reserved; forbidden in executable v2 profile. */
 #define MCF_V2_FLAG_CODEC_LZ4 0x00000008u
 #define MCF_V2_FLAG_RESUME_CHUNKS 0x00000010u
 #define MCF_V2_KNOWN_FLAGS (MCF_V2_FLAG_SIGNED | MCF_V2_FLAG_ENCRYPTED | \
                            MCF_V2_FLAG_CODEC_LZMA | MCF_V2_FLAG_CODEC_LZ4 | \
                            MCF_V2_FLAG_RESUME_CHUNKS)
+#define MCF_V2_EXEC_REQUIRED_FLAGS (MCF_V2_FLAG_SIGNED | MCF_V2_FLAG_ENCRYPTED | \
+                                    MCF_V2_FLAG_CODEC_LZ4)
 #define MCF_V2_RECORD_TAG_SIZE 16u
+#define MCF_V2_RECORD_LOG2_MIN 8u
+#define MCF_V2_RECORD_LOG2_MAX 13u
+#define MCF_V2_RECORD_MAX_SIZE (1u << MCF_V2_RECORD_LOG2_MAX)
+#define MCF_V2_KEY_ID_SIZE 16u
+#define MCF_V2_KEY_SIZE 32u
+#define MCF_V2_NONCE_PREFIX_SIZE 16u
+#define MCF_V2_NONCE_SIZE 24u
+#define MCF_V2_AEAD_AD_PREFIX "MCF2REC\0"
+#define MCF_V2_SIGNATURE_DOMAIN "MCF2SIG\0"
 
-/* Fixed v2 offsets. */
+/* Fixed v2 offsets. These remain the wire layout; do not pack a C struct over it. */
 #define MCF_V2_OFF_MAGIC 0u
 #define MCF_V2_OFF_HEADER_LEN 4u
 #define MCF_V2_OFF_VERSION 6u
@@ -76,16 +87,22 @@ typedef struct mcf_v2_record {
     uint32_t tag_len;
 } mcf_v2_record_t;
 
-/* Structural parser only. It never decrypts, decodes, or writes flash, and it
- * is not a session path - v2 execution is deferred.
- *
- * Validates the complete container shape in one call: header fields, TLV area,
- * and the record area (which must frame exactly `payload_size` bytes into
- * exactly `record_count` records). A view that returns MCF_OK therefore has
- * known-good framing; callers do not need to re-validate while iterating.
- *
- * Encrypted patches are rejected with MCF_E_UNSUPPORTED until the AEAD layer
- * exists: their framing cannot be validated without tag verification. */
+/* Key-provider contract for the future execution API (declaration only).
+ * On MCF_OK, provide exactly 32 key bytes in out_key. The output buffer is
+ * library-owned, writable, and must be wiped by the caller immediately after
+ * the operation that needs the key; implementations must wipe every internal
+ * key copy on every exit path using a non-optimizable zeroization primitive.
+ * The callback context and provider must remain valid for the full operation.
+ * No key is retained across operations or stored in the patch/configuration. */
+typedef mcf_status_t (*mcf_v2_key_provider_fn)(void *ctx,
+                                               const uint8_t key_id[MCF_V2_KEY_ID_SIZE],
+                                               uint8_t out_key[MCF_V2_KEY_SIZE]);
+
+/* Structural parser only; never decrypts, decodes, verifies signatures, or
+ * writes flash, and is not a session path. A successful parse means only that
+ * the container shape is valid, not that the patch is authentic or acceptable.
+ * The inspection parser may inspect the currently supported structural subset;
+ * this is not permission to execute an unsigned, plaintext, or non-LZ4 patch. */
 mcf_status_t mcf_v2_parse(const uint8_t *patch, uint32_t patch_size,
                           mcf_v2_view_t *out);
 

@@ -99,6 +99,7 @@ const char *mcf_session_strerror(mcf_status_t status)
     case MCF_E_ABORTED:        return "aborted by caller";
     case MCF_E_COMMIT:         return "rejected by commit hook";
     case MCF_E_NOT_FOUND:      return "not found";
+    case MCF_E_AUTH:           return "authentication failed";
     default:                   return "unknown error";
     }
 }

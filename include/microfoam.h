@@ -90,7 +90,8 @@ typedef enum mcf_status {
     MCF_E_ABORTED         = -15, /*!< Cancelled through the progress callback.          */
     MCF_E_COMMIT          = -16, /*!< The integrator's commit hook rejected the image.   */
     MCF_E_NOT_FOUND       = -17, /*!< No such session, state, or registered codec.      */
-    MCF_E_MAX             = -18
+    MCF_E_AUTH            = -18, /*!< Authentication tag or key validation failed.      */
+    MCF_E_MAX             = -19
 } mcf_status_t;
 
 /* ======================================================================== *

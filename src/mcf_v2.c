@@ -12,9 +12,8 @@
  *   - the TLV area is walked and unknown critical TLVs are rejected
  *   - the record area is walked once and must frame exactly payload_size bytes
  *     into exactly record_count records, with no trailing bytes
- *   - encrypted patches are rejected as MCF_E_UNSUPPORTED, because their
- *     framing can only be validated together with tag verification and that
- *     layer is not implemented
+ *   - encrypted record framing includes one detached AEAD tag per record
+ *     (framing validation does not itself authenticate those tags)
  *
  * The record walk happens in full during mcf_v2_parse(), so a caller that gets
  * MCF_OK holds a patch whose framing is known good. mcf_v2_next_record() is
@@ -121,12 +120,14 @@ mcf_status_t mcf_v2_parse(const uint8_t *patch, uint32_t patch_size,
     if (mcf_rd16(&patch[MCF_V2_OFF_VERSION]) != MCF_V2_VERSION) return MCF_E_UNSUPPORTED;
     flags = mcf_rd32(&patch[MCF_V2_OFF_FLAGS]);
     if ((flags & ~MCF_V2_KNOWN_FLAGS) != 0u) return MCF_E_FORMAT;
-    if ((flags & MCF_V2_FLAG_CODEC_LZ4) != 0u &&
-        (flags & MCF_V2_FLAG_CODEC_LZMA) != 0u) return MCF_E_FORMAT;
-    /* Encrypted patches are rejected outright. Rejecting is the fail-closed
-     * answer: a shape check without the AEAD layer would be a claim this code
-     * cannot make. */
-    if ((flags & MCF_V2_FLAG_ENCRYPTED) != 0u) return MCF_E_UNSUPPORTED;
+    if ((flags & (MCF_V2_FLAG_SIGNED | MCF_V2_FLAG_ENCRYPTED | MCF_V2_FLAG_CODEC_LZ4)) !=
+        (MCF_V2_FLAG_SIGNED | MCF_V2_FLAG_ENCRYPTED | MCF_V2_FLAG_CODEC_LZ4) ||
+        (flags & (MCF_V2_FLAG_CODEC_LZMA | MCF_V2_FLAG_RESUME_CHUNKS)) != 0u) {
+        return MCF_E_UNSUPPORTED;
+    }
+    /* Encrypted records carry a detached tag after each ciphertext. Their
+     * framing is safe to validate independently; authentication is performed
+     * by the sodium adapter before plaintext is consumed. */
     if (mcf_rd32(&patch[MCF_V2_OFF_RESERVED]) != 0u ||
         mcf_rd32(&patch[MCF_V2_OFF_RESERVED + 4u]) != 0u ||
         memcmp(&patch[MCF_V2_OFF_HEADER_DIGEST], "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 16u) != 0) {
@@ -141,23 +142,28 @@ mcf_status_t mcf_v2_parse(const uint8_t *patch, uint32_t patch_size,
         return st;
     }
     codec = patch[MCF_V2_OFF_CODEC];
-    if (codec != (uint8_t)MCF_CODEC_LZ4 && codec != (uint8_t)MCF_CODEC_LZMA &&
-        codec < (uint8_t)MCF_CODEC_CUSTOM_MIN) return MCF_E_UNSUPPORTED;
-    if ((codec == (uint8_t)MCF_CODEC_LZ4) && !(flags & MCF_V2_FLAG_CODEC_LZ4)) return MCF_E_FORMAT;
-    if ((codec == (uint8_t)MCF_CODEC_LZMA) && !(flags & MCF_V2_FLAG_CODEC_LZMA)) return MCF_E_FORMAT;
+    if (codec != (uint8_t)MCF_CODEC_LZ4) return MCF_E_UNSUPPORTED;
+    if (mcf_rd32(&patch[MCF_V2_OFF_CODEC_PROFILE]) != 0u) return MCF_E_UNSUPPORTED;
     log2 = patch[MCF_V2_OFF_RECORD_LOG2];
-    if (log2 < 8u || log2 > 16u) return MCF_E_FORMAT;
+    if (log2 < MCF_V2_RECORD_LOG2_MIN || log2 > MCF_V2_RECORD_LOG2_MAX) return MCF_E_FORMAT;
+    if (memcmp(&patch[MCF_V2_OFF_KEY_ID], "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", MCF_V2_KEY_ID_SIZE) == 0 ||
+        memcmp(&patch[MCF_V2_OFF_NONCE_PREFIX + MCF_V2_NONCE_PREFIX_SIZE], "\0\0\0\0\0\0\0\0", 8u) != 0) {
+        return MCF_E_FORMAT;
+    }
     records = mcf_rd32(&patch[MCF_V2_OFF_RECORD_COUNT]);
     if (records == 0u) return MCF_E_FORMAT;
     payload_size = mcf_rd32(&patch[MCF_V2_OFF_PAYLOAD_SIZE]);
     if (payload_size > patch_size - header_len) {
         return MCF_E_TRUNCATED;
     }
+    if (payload_size != patch_size - header_len) {
+        return MCF_E_FORMAT;
+    }
 
     /* The record area must frame exactly. Done here, not lazily, so a validated
-     * view is a guarantee rather than an invitation to re-scan. Encrypted is
-     * always 0 at this point - that case returned above. */
-    st = mcf_v2_walk_records(&patch[header_len], payload_size, records, log2, 0);
+     * view is a guarantee rather than an invitation to re-scan. */
+    st = mcf_v2_walk_records(&patch[header_len], payload_size, records, log2,
+                             (flags & MCF_V2_FLAG_ENCRYPTED) != 0u);
     if (st != MCF_OK) {
         return st;
     }
@@ -192,7 +198,6 @@ mcf_status_t mcf_v2_next_record(const mcf_v2_view_t *view, const uint8_t *patch,
     uint32_t index;
 
     if (view == NULL || patch == NULL || offset == NULL || out == NULL) return MCF_E_PARAM;
-    if ((view->flags & MCF_V2_FLAG_ENCRYPTED) != 0u) return MCF_E_UNSUPPORTED;
 
     end = (uint32_t)view->header_len + view->payload_size;
     if (end > patch_size) return MCF_E_TRUNCATED;
@@ -227,9 +232,16 @@ mcf_status_t mcf_v2_next_record(const mcf_v2_view_t *view, const uint8_t *patch,
     out->index = index;
     out->data = &patch[pos];
     out->data_len = len;
-    out->tag = NULL;
-    out->tag_len = 0u;
     pos += len;
+    if ((view->flags & MCF_V2_FLAG_ENCRYPTED) != 0u) {
+        if (end - pos < MCF_V2_RECORD_TAG_SIZE) return MCF_E_FORMAT;
+        out->tag = &patch[pos];
+        out->tag_len = MCF_V2_RECORD_TAG_SIZE;
+        pos += MCF_V2_RECORD_TAG_SIZE;
+    } else {
+        out->tag = NULL;
+        out->tag_len = 0u;
+    }
     *offset = pos;
     return MCF_OK;
 }

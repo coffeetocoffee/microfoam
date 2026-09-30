@@ -558,7 +558,7 @@ static void test_corrupt_payload(void)
 static void test_v2_session_rejected(void)
 {
     mcf_v2_view_t view;
-    uint32_t len = MCF_V2_HEADER_MIN + 5u;
+    uint32_t len = MCF_V2_HEADER_MIN + 21u;
 
     banner("MFP2 session boundary");
     device_reset();
@@ -566,13 +566,16 @@ static void test_v2_session_rejected(void)
     wr32(&g_patch[MCF_V2_OFF_MAGIC], MCF_V2_MAGIC);
     wr16(&g_patch[MCF_V2_OFF_HEADER_LEN], MCF_V2_HEADER_MIN);
     wr16(&g_patch[MCF_V2_OFF_VERSION], MCF_V2_VERSION);
-    wr32(&g_patch[MCF_V2_OFF_FLAGS], MCF_V2_FLAG_CODEC_LZ4);
-    wr32(&g_patch[MCF_V2_OFF_PAYLOAD_SIZE], 5u);
+    wr32(&g_patch[MCF_V2_OFF_FLAGS], MCF_V2_EXEC_REQUIRED_FLAGS);
+    wr32(&g_patch[MCF_V2_OFF_PAYLOAD_SIZE], 21u);
     g_patch[MCF_V2_OFF_CODEC] = (uint8_t)MCF_CODEC_LZ4;
-    g_patch[MCF_V2_OFF_RECORD_LOG2] = 8u;
+    g_patch[MCF_V2_OFF_RECORD_LOG2] = MCF_V2_RECORD_LOG2_MIN;
+    memset(&g_patch[MCF_V2_OFF_KEY_ID], 0x42, MCF_V2_KEY_ID_SIZE);
+    memset(&g_patch[MCF_V2_OFF_NONCE_PREFIX], 0x24, MCF_V2_NONCE_PREFIX_SIZE);
     wr32(&g_patch[MCF_V2_OFF_RECORD_COUNT], 1u);
     wr32(&g_patch[MCF_V2_HEADER_MIN], 1u);
     g_patch[MCF_V2_HEADER_MIN + 4u] = 0xAAu;
+    memset(&g_patch[MCF_V2_HEADER_MIN + 5u], 0x5A, MCF_V2_RECORD_TAG_SIZE);
 
     CHECK_EQ(mcf_v2_parse(g_patch, len, &view), MCF_OK,
              "fixture is structurally valid MFP2");
