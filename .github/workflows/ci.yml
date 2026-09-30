@@ -133,6 +133,26 @@ jobs:
           mkdir -p build-py
           python host/selftest.py
 
+  sodium:
+    name: libsodium MFP2 boundary and tamper tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install crypto dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev
+          python -m pip install pynacl
+      - name: Configure with sodium enabled
+        run: cmake -B build-sodium -DCMAKE_BUILD_TYPE=Debug -DMCF_ENABLE_SODIUM=ON
+      - name: Build
+        run: cmake --build build-sodium --config Debug
+      - name: Test
+        run: ctest --test-dir build-sodium --output-on-failure -C Debug
+
   lzma:
     name: LZMA codec (host tests)
     runs-on: ubuntu-latest

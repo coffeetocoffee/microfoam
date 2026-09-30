@@ -35,7 +35,8 @@ set(MCF_SOURCES
     src/mcf_util.c
     src/mcf_codec_lz4.c
     src/mcf_codec_raw.c
-    src/mcf_v2.c)
+    src/mcf_v2.c
+    src/mcf_v2_session.c)
 
 # LZMA is opt-in and fully supported when enabled: a patch declaring LZMA is
 # rejected with MCF_E_UNSUPPORTED unless this option is ON, because the decoder
@@ -148,6 +149,13 @@ if(MCF_BUILD_TESTS)
         target_include_directories(sodium_rfc_test PRIVATE ${SODIUM_INCLUDE_DIR})
         target_compile_options(sodium_rfc_test PRIVATE ${MCF_WARNINGS})
         add_test(NAME sodium_rfc_test COMMAND sodium_rfc_test)
+
+        # The parser/session boundary is valid in every build; this test adds a
+        # real host-produced signed+encrypted patch when the optional crypto
+        # provider and host PyNaCl are both available.
+        add_executable(mfp2_boundary_test tests/mfp2_boundary_test.c)
+        target_link_libraries(mfp2_boundary_test PRIVATE microfoam)
+        target_compile_options(mfp2_boundary_test PRIVATE ${MCF_WARNINGS})
     endif()
 
     add_executable(v2_format_test tests/v2_format_test.c)
@@ -211,6 +219,27 @@ if(MCF_BUILD_TESTS)
     # proves nothing about the format, so this is the check that matters most.
     find_package(Python3 COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        if(MCF_ENABLE_SODIUM)
+            execute_process(
+                COMMAND ${Python3_EXECUTABLE} -c "import nacl.bindings"
+                RESULT_VARIABLE MCF_PYNACL_RESULT
+                OUTPUT_QUIET ERROR_QUIET)
+            if(MCF_PYNACL_RESULT EQUAL 0)
+                add_test(NAME mfp2_host_to_parser
+                    COMMAND ${CMAKE_COMMAND}
+                        -DOLD=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/old.bin
+                        -DNEW=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/new.bin
+                        -DSIGNING_KEY=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/key.priv
+                        -DMCF=$<TARGET_FILE:mfp2_boundary_test>
+                        -DPY=${Python3_EXECUTABLE}
+                        -DTOOL=${CMAKE_CURRENT_SOURCE_DIR}/host/microfoam.py
+                        -DWORK=${CMAKE_CURRENT_BINARY_DIR}/mfp2
+                        -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/mfp2_boundary_test.cmake)
+            else()
+                message(STATUS "PyNaCl unavailable: MFP2 host-to-parser test is not registered")
+            endif()
+        endif()
+
         add_executable(cross_test tests/cross_test.c)
         target_link_libraries(cross_test PRIVATE microfoam)
         target_compile_options(cross_test PRIVATE ${MCF_WARNINGS})

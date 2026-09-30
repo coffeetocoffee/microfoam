@@ -453,6 +453,32 @@ def test_raw() -> None:
           "a flipped raw payload byte is detected by the CRC")
 
 
+def test_v2() -> None:
+    print("MFP2 signed/encrypted LZ4 make / verify / apply")
+    try:
+        from nacl.signing import SigningKey
+        signing = SigningKey.generate()
+        seed = bytes(signing)  # 32-byte seed
+        pub = bytes(signing.verify_key)
+    except Exception as exc:
+        print(f"  SKIP  PyNaCl unavailable: {exc}")
+        return
+    old, new = make_firmware(123)
+    key = bytes(range(32)); key_id = bytes(range(16)); nonce = bytes(range(16, 32))
+    patch = M.V2Patch(old, new, product_id=0x1234, fw_version=2, old_version=1,
+                      private_key=seed, key=key, key_id=key_id,
+                      nonce_prefix=nonce, record_log2=10).build()
+    h = M.parse_v2_header(patch)
+    check(h.header_len == 192 and h.tlv_len == 0, "MFP2 fixed header is 192 bytes")
+    check(h.flags == M.V2_REQUIRED_FLAGS and h.record_count > 0, "MFP2 profile and records")
+    check(M.verify_v2(patch, pub) == b"", "MFP2 signature and CRC verify")
+    check(M.verify_v2(patch, pub, key=key, old=old) == new, "MFP2 decrypt/apply round-trip")
+    bad = bytearray(patch); bad[-1] ^= 1
+    try: M.verify_v2(bytes(bad), pub)
+    except SystemExit: check(True, "MFP2 tamper rejected")
+    else: check(False, "MFP2 tamper rejected")
+
+
 def test_lzma_policy_guard() -> None:
     """The host side of the LZMA props contract.
 
@@ -495,6 +521,7 @@ def main() -> int:
     test_lzma()
     test_lzma_policy_guard()
     test_signing()
+    test_v2()
 
     print(f"\n{PASS} checks, {FAIL} failures")
     return 0 if FAIL == 0 else 1

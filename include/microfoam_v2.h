@@ -98,6 +98,70 @@ typedef mcf_status_t (*mcf_v2_key_provider_fn)(void *ctx,
                                                const uint8_t key_id[MCF_V2_KEY_ID_SIZE],
                                                uint8_t out_key[MCF_V2_KEY_SIZE]);
 
+/* Ed25519ph verifier for the exact three-span MFP2 signed message. */
+typedef int32_t (*mcf_v2_verify_fn)(void *ctx, const uint8_t *sig, uint32_t sig_len,
+                                    const uint8_t *part1, uint32_t part1_len,
+                                    const uint8_t *part2, uint32_t part2_len,
+                                    const uint8_t *part3, uint32_t part3_len);
+
+/* Detached XChaCha20-Poly1305-IETF record authentication/decryption. */
+typedef int32_t (*mcf_v2_aead_fn)(void *ctx, const uint8_t *key,
+                                  const uint8_t nonce[MCF_V2_NONCE_SIZE],
+                                  const uint8_t *ciphertext, uint32_t ciphertext_len,
+                                  const uint8_t *tag, uint32_t tag_len,
+                                  const uint8_t *ad, uint32_t ad_len,
+                                  uint8_t *plaintext);
+
+typedef struct mcf_v2_config {
+    const mcf_hal_t *hal;
+    const uint8_t *patch;
+    uint32_t patch_size;
+    const uint8_t *old;
+    uint32_t old_size;
+    mcf_read_fn old_read;
+    void *old_ctx;
+    uint32_t dst_addr;
+    uint32_t block_size;
+    uint32_t ram_budget;
+    void *workspace;
+    uint32_t workspace_size;
+    mcf_v2_key_provider_fn key_provider;
+    void *key_ctx;
+    mcf_v2_verify_fn verify;
+    void *verify_ctx;
+    mcf_v2_aead_fn aead;
+    void *aead_ctx;
+    mcf_progress_fn progress;
+    void *progress_ctx;
+    mcf_commit_fn commit;
+    void *commit_ctx;
+} mcf_v2_config_t;
+
+/* Caller-owned bounded v2 session. The implementation authenticates the whole
+ * container, decrypts records into the supplied workspace, then hands the
+ * authenticated LZ4 stream to the unchanged MFP1 engine. */
+typedef struct mcf_v2_session {
+    mcf_session_storage_t inner_storage;
+    mcf_session_t *inner;
+    const mcf_v2_config_t *cfg;
+    uint8_t *scratch;
+    uint32_t scratch_len;
+    uint32_t state;
+    mcf_status_t status;
+    uint32_t site;
+    uint8_t key[MCF_V2_KEY_SIZE];
+    mcf_config_t inner_cfg;
+} mcf_v2_session_t;
+
+mcf_status_t mcf_v2_session_open(mcf_v2_session_t *s, const mcf_v2_config_t *cfg);
+mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s);
+mcf_status_t mcf_v2_session_step(mcf_v2_session_t *s);
+mcf_status_t mcf_v2_session_finish(mcf_v2_session_t *s);
+mcf_status_t mcf_v2_session_run(mcf_v2_session_t *s);
+void mcf_v2_session_close(mcf_v2_session_t *s);
+mcf_state_t mcf_v2_session_state(const mcf_v2_session_t *s);
+mcf_status_t mcf_v2_session_status(const mcf_v2_session_t *s);
+
 /* Structural parser only; never decrypts, decodes, verifies signatures, or
  * writes flash, and is not a session path. A successful parse means only that
  * the container shape is valid, not that the patch is authentic or acceptable.

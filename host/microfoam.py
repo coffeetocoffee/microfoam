@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import struct
 import sys
 import zlib
@@ -496,6 +497,185 @@ def verify(public_key: bytes, signature: bytes, message: bytes) -> bool:
 
 
 # --------------------------------------------------------------------------
+# MFP2 signed/encrypted container
+# --------------------------------------------------------------------------
+
+V2_MAGIC = 0x3250464D
+V2_HEADER_MIN = 192
+V2_HEADER_MAX = 4096
+V2_VERSION = 0x0200
+V2_FLAG_SIGNED = 0x01
+V2_FLAG_ENCRYPTED = 0x02
+V2_FLAG_CODEC_LZ4 = 0x08
+V2_REQUIRED_FLAGS = V2_FLAG_SIGNED | V2_FLAG_ENCRYPTED | V2_FLAG_CODEC_LZ4
+V2_RECORD_TAG_SIZE = 16
+V2_RECORD_LOG2_MIN = 8
+V2_RECORD_LOG2_MAX = 13
+V2_KEY_ID_SIZE = 16
+V2_NONCE_PREFIX_SIZE = 16
+V2_OFF_SIGNATURE = 56
+V2_OFF_KEY_ID = 120
+V2_OFF_NONCE_PREFIX = 136
+V2_OFF_RECORD_COUNT = 160
+V2_OFF_CODEC_PROFILE = 164
+V2_OFF_RESERVED = 168
+V2_OFF_HEADER_DIGEST = 176
+
+
+def _sodium():
+    try:
+        from nacl.bindings import (crypto_aead_xchacha20poly1305_ietf_decrypt,
+            crypto_aead_xchacha20poly1305_ietf_encrypt, crypto_sign_ed25519ph_state,
+            crypto_sign_ed25519ph_update, crypto_sign_ed25519ph_final_create,
+            crypto_sign_ed25519ph_final_verify)
+        return locals()
+    except ImportError as exc:
+        raise SystemExit("MFP2 requires PyNaCl/libsodium with Ed25519ph and XChaCha20-Poly1305") from exc
+
+
+def _v2_header_for_auth(header: bytes) -> bytes:
+    h = bytearray(header)
+    h[V2_OFF_SIGNATURE:V2_OFF_SIGNATURE + SIG_SIZE] = b"\\0" * SIG_SIZE
+    return bytes(h)
+
+
+def _ed25519ph_sign(seed_or_secret: bytes, message: bytes) -> bytes:
+    s = _sodium()
+    raw = seed_or_secret[:32] if len(seed_or_secret) in (32, 64) else seed_or_secret
+    if len(raw) == 32:
+        from nacl.signing import SigningKey
+        raw = bytes(SigningKey(raw)._signing_key)
+    if len(raw) != 64:
+        raise SystemExit("MFP2 signing key must be 32-byte seed or 64-byte secret key")
+    st = s["crypto_sign_ed25519ph_state"]()
+    s["crypto_sign_ed25519ph_update"](st, message)
+    return s["crypto_sign_ed25519ph_final_create"](st, raw)
+
+
+def _ed25519ph_verify(public_key: bytes, signature: bytes, message: bytes) -> bool:
+    try:
+        s = _sodium()
+        if len(public_key) != 32 or len(signature) != 64:
+            return False
+        st = s["crypto_sign_ed25519ph_state"]()
+        s["crypto_sign_ed25519ph_update"](st, message)
+        return s["crypto_sign_ed25519ph_final_verify"](st, signature, public_key) == 0
+    except Exception:
+        return False
+
+
+def _v2_aead(key: bytes, nonce: bytes, plaintext: bytes, aad: bytes) -> bytes:
+    return _sodium()["crypto_aead_xchacha20poly1305_ietf_encrypt"](plaintext, aad, nonce, key)
+
+
+def _v2_open(key: bytes, nonce: bytes, ciphertext_and_tag: bytes, aad: bytes) -> bytes:
+    return _sodium()["crypto_aead_xchacha20poly1305_ietf_decrypt"](ciphertext_and_tag, aad, nonce, key)
+
+
+def _v2_records(stream: bytes, record_size: int) -> list[bytes]:
+    records = []
+    pos = 0
+    while pos < len(stream):
+        if pos + 4 > len(stream):
+            raise ValueError("truncated LZ4 frame")
+        blen = struct.unpack_from("<I", stream, pos)[0]
+        end = pos + 4 + blen
+        if blen == 0:
+            records.append(stream[pos:end]); pos = end
+            break
+        if end > len(stream):
+            raise ValueError("truncated LZ4 block")
+        frame = stream[pos:end]
+        if len(frame) > record_size:
+            raise ValueError("LZ4 frame exceeds MFP2 record size")
+        records.append(frame); pos = end
+    if pos != len(stream) or not records:
+        raise ValueError("invalid LZ4 stream")
+    return records
+
+
+@dataclass
+class V2HeaderView:
+    header_len: int; version: int; flags: int; product_id: int; fw_version: int
+    old_size: int; new_size: int; payload_size: int; old_crc32: int; new_crc32: int
+    payload_crc32: int; workspace_req: int; old_version: int; codec_id: int
+    record_log2: int; tlv_len: int; signature: bytes; key_id: bytes; nonce_prefix: bytes
+    record_count: int; codec_profile: int; tlvs: bytes
+
+
+def parse_v2_header(blob: bytes) -> V2HeaderView:
+    if len(blob) < V2_HEADER_MIN: raise SystemExit("MFP2 patch is shorter than 192-byte header")
+    magic, hlen, ver, flags, product, fw, oldsz, newsz, psz, oldcrc, newcrc, pcrc, ws, oldver = struct.unpack_from("<IHHIIIIIIIIIII", blob, 0)
+    codec, rlog2, tlv_len = struct.unpack_from("<BBH", blob, 52)
+    if magic != V2_MAGIC or ver != V2_VERSION or not (V2_HEADER_MIN <= hlen <= V2_HEADER_MAX) or hlen % 4 or hlen > len(blob): raise SystemExit("invalid MFP2 header")
+    if tlv_len != hlen - V2_HEADER_MIN or flags != V2_REQUIRED_FLAGS or codec != CODEC_LZ4 or not 8 <= rlog2 <= 13: raise SystemExit("unsupported MFP2 profile")
+    record_count = struct.unpack_from("<I", blob, 160)[0]
+    if not record_count or struct.unpack_from("<I", blob, 164)[0] != 0: raise SystemExit("invalid MFP2 record/profile fields")
+    if blob[168:192] != b"\\0" * 24 or not blob[120:136].strip(b"\\0") or not blob[136+16:160] == b"\\0" * 8: raise SystemExit("invalid MFP2 reserved/key fields")
+    tlvs = blob[192:hlen]
+    if any(tlvs[i] for i in range(0, len(tlvs), 4) if i + 3 >= len(tlvs)): raise SystemExit("nonzero MFP2 TLV padding")
+    return V2HeaderView(hlen, ver, flags, product, fw, oldsz, newsz, psz, oldcrc, newcrc, pcrc, ws, oldver, codec, rlog2, tlv_len, blob[56:120], blob[120:136], blob[136:160], struct.unpack_from("<I", blob, 160)[0], struct.unpack_from("<I", blob, 164)[0], blob[192:hlen])
+
+
+@dataclass
+class V2Patch:
+    old: bytes; new: bytes; product_id: int = 0; fw_version: int = 0; old_version: int = 0
+    private_key: bytes = b""; key: bytes = b""; key_id: bytes = b""; nonce_prefix: bytes = b""
+    record_log2: int = 13; tlvs: bytes = b""; workspace_req: int = WS_LZ4
+
+    def build(self) -> bytes:
+        if len(self.key) != 32 or not self.private_key: raise SystemExit("MFP2 requires --key and a signing key")
+        if self.tlvs and any(self.tlvs[i] for i in range(0, len(self.tlvs), 4) if i + 3 >= len(self.tlvs)): raise SystemExit("MFP2 TLV padding must be zero")
+        if len(self.key_id) != 16: raise SystemExit("MFP2 key id must be 16 bytes")
+        if not self.nonce_prefix: self.nonce_prefix = os.urandom(16)
+        if len(self.nonce_prefix) != 16 or not any(self.nonce_prefix): raise SystemExit("MFP2 nonce prefix must be 16 nonzero bytes")
+        if not 8 <= self.record_log2 <= 13 or len(self.tlvs) % 4: raise SystemExit("invalid MFP2 record/TLV size")
+        delta = bsdiff(self.old, self.new)
+        # Leave room for the LZ4 block header/literal extension so the complete
+        # framed block (the record plaintext) always fits the wire limit.
+        framed = lz4_frame(delta, max(1, (1 << self.record_log2) - 64))
+        records = _v2_records(framed, 1 << self.record_log2)
+        hlen = V2_HEADER_MIN + len(self.tlvs)
+        hdr = bytearray(hlen)
+        struct.pack_into("<IHHIIIIIIIIIII", hdr, 0, V2_MAGIC, hlen, V2_VERSION, V2_REQUIRED_FLAGS, self.product_id, self.fw_version, len(self.old), len(self.new), 0, crc32(self.old), crc32(self.new), 0, self.workspace_req, self.old_version)
+        struct.pack_into("<BBH", hdr, 52, CODEC_LZ4, self.record_log2, len(self.tlvs))
+        hdr[120:136] = self.key_id; hdr[136:152] = self.nonce_prefix
+        struct.pack_into("<II", hdr, 160, len(records), 0); hdr[192:] = self.tlvs
+        area = bytearray()
+        for i, plain in enumerate(records):
+            clen = len(plain); aad = b"MCF2REC\\0" + _v2_header_for_auth(hdr) + struct.pack("<II", i, clen)
+            enc = _v2_aead(self.key, self.nonce_prefix + struct.pack("<Q", i), plain, aad)
+            area += struct.pack("<I", clen) + enc
+        struct.pack_into("<II", hdr, 28, len(area), crc32(area))
+        sigmsg = b"MCF2SIG\\0" + _v2_header_for_auth(hdr) + area
+        hdr[56:120] = _ed25519ph_sign(self.private_key, sigmsg)
+        return bytes(hdr) + bytes(area)
+
+
+def verify_v2(blob: bytes, public_key: bytes, key: Optional[bytes] = None, apply: bool = False, old: bytes = b"") -> bytes:
+    h = parse_v2_header(blob)
+    if h.payload_size != len(blob) - h.header_len: raise SystemExit("MFP2 payload length mismatch")
+    area = blob[h.header_len:]
+    if crc32(area) != h.payload_crc32: raise SystemExit("MFP2 payload CRC mismatch")
+    if not _ed25519ph_verify(public_key, h.signature, b"MCF2SIG\\0" + _v2_header_for_auth(blob[:h.header_len]) + area): raise SystemExit("MFP2 signature invalid")
+    if key is None: return b""
+    if len(key) != 32: raise SystemExit("MFP2 symmetric key must be 32 bytes")
+    stream = bytearray(); pos = 0
+    for i in range(h.record_count):
+        if pos + 4 > len(area): raise SystemExit("MFP2 record framing truncated")
+        clen = struct.unpack_from("<I", area, pos)[0]; pos += 4
+        if not 1 <= clen <= (1 << h.record_log2) or pos + clen + 16 > len(area): raise SystemExit("invalid MFP2 record length")
+        enc = area[pos:pos + clen + 16]; pos += clen + 16
+        aad = b"MCF2REC\\0" + _v2_header_for_auth(blob[:h.header_len]) + struct.pack("<II", i, clen)
+        try: stream += _v2_open(key, h.nonce_prefix + struct.pack("<Q", i), enc, aad)
+        except Exception as exc: raise SystemExit("MFP2 record authentication failed") from exc
+    if pos != len(area): raise SystemExit("MFP2 trailing record bytes")
+    delta = lz4_decompress(bytes(stream)); result = bspatch(old, delta, h.new_size)
+    if crc32(result) != h.new_crc32: raise SystemExit("MFP2 reconstructed image CRC mismatch")
+    return result
+
+
+# --------------------------------------------------------------------------
 # Patch construction
 # --------------------------------------------------------------------------
 
@@ -745,6 +925,17 @@ def bspatch(old: bytes, delta: bytes, new_size: int) -> bytes:
 def cmd_make(args: argparse.Namespace) -> int:
     old = open(args.old, "rb").read()
     new = open(args.new, "rb").read()
+    if args.v2:
+        signing = open(args.signing_key, "rb").read()
+        symmetric = open(args.key, "rb").read()
+        key_id = bytes.fromhex(args.key_id) if args.key_id else b""
+        nonce = bytes.fromhex(args.nonce_prefix) if args.nonce_prefix else b""
+        patch = V2Patch(old=old, new=new, product_id=args.product, fw_version=args.version,
+                        old_version=args.old_version, private_key=signing, key=symmetric,
+                        key_id=key_id, nonce_prefix=nonce, record_log2=args.record_log2).build()
+        with open(args.out, "wb") as f: f.write(patch)
+        print(f"MFP2 patch {len(patch)} bytes, signed/encrypted LZ4")
+        return 0
     key = open(args.key, "rb").read() if args.key else None
 
     codec = {"lz4": CODEC_LZ4, "lzma": CODEC_LZMA, "raw": CODEC_RAW}[args.codec]
@@ -781,6 +972,14 @@ def cmd_make(args: argparse.Namespace) -> int:
 
 def cmd_inspect(args: argparse.Namespace) -> int:
     blob = open(args.patch, "rb").read()
+    if blob[:4] == struct.pack("<I", V2_MAGIC):
+        h = parse_v2_header(blob)
+        print(f"magic          MFP2, header {h.header_len} bytes, records {h.record_count}")
+        print(f"flags          0x{h.flags:08X} signed encrypted LZ4")
+        print(f"product        0x{h.product_id:08X}")
+        print(f"version        0x{h.fw_version:08X} (from 0x{h.old_version:08X})")
+        print(f"payload        {h.payload_size} bytes, crc32 0x{h.payload_crc32:08X}")
+        return 0
     h = parse_header(blob)
     if h.payload_size > len(blob) - h.hdr_len:
         raise SystemExit("truncated payload")
@@ -824,6 +1023,11 @@ def cmd_inspect(args: argparse.Namespace) -> int:
 
 def cmd_verify(args: argparse.Namespace) -> int:
     blob = open(args.patch, "rb").read()
+    if blob[:4] == struct.pack("<I", V2_MAGIC):
+        pub = open(args.pub, "rb").read()
+        verify_v2(blob, pub)
+        print("MFP2 signature and structure ok")
+        return 0
     h = parse_header(blob)
     if h.payload_size > len(blob) - h.hdr_len:
         raise SystemExit("truncated payload")
@@ -843,6 +1047,13 @@ def cmd_verify(args: argparse.Namespace) -> int:
 def cmd_apply(args: argparse.Namespace) -> int:
     old = open(args.old, "rb").read()
     blob = open(args.patch, "rb").read()
+    if blob[:4] == struct.pack("<I", V2_MAGIC):
+        pub = open(args.pub, "rb").read()
+        key = open(args.key, "rb").read()
+        new = verify_v2(blob, pub, key=key, apply=True, old=old)
+        with open(args.out, "wb") as f: f.write(new)
+        print(f"reconstructed {len(new)} bytes, MFP2 authenticated")
+        return 0
     h = parse_header(blob)
 
     if h.payload_size > len(blob) - h.hdr_len:
@@ -911,7 +1122,12 @@ def main(argv: Optional[list] = None) -> int:
     m.add_argument("--dict-size", type=lambda s: int(s, 0), default=LZMA_DEFAULT_DICT,
                    help=f"LZMA dictionary in bytes (default {LZMA_DEFAULT_DICT}); "
                         "the device must have RAM for the probability table plus this")
-    m.add_argument("--key", help="32- or 64-byte Ed25519 private key")
+    m.add_argument("--key", help="32- or 64-byte Ed25519 private key (MFP1), or 32-byte symmetric key (MFP2)")
+    m.add_argument("--v2", action="store_true", help="build MFP2 signed/encrypted LZ4 patch")
+    m.add_argument("--signing-key", help="MFP2 Ed25519 private key")
+    m.add_argument("--key-id", help="MFP2 16-byte key id as hex")
+    m.add_argument("--nonce-prefix", help="MFP2 16-byte nonce prefix as hex")
+    m.add_argument("--record-log2", type=int, default=13)
     m.set_defaults(func=cmd_make)
 
     i = sub.add_parser("inspect", help="dump and validate a header")
@@ -927,6 +1143,8 @@ def main(argv: Optional[list] = None) -> int:
     a.add_argument("--old", required=True)
     a.add_argument("--patch", required=True)
     a.add_argument("--out", required=True)
+    a.add_argument("--pub", help="MFP2 Ed25519 public key")
+    a.add_argument("--key", help="MFP2 32-byte symmetric key")
     a.set_defaults(func=cmd_apply)
 
     k = sub.add_parser("keygen", help="generate an Ed25519 signing key pair")

@@ -323,10 +323,12 @@ ctest --test-dir build
 | `lzma_policy_test` | Dictionary / `lc+lp` policy rejections and diagnostics (with `MCF_ENABLE_LZMA=ON`) |
 | `lzma_conformance_test` | 67 liblzma vectors × 5 block sizes against the LZMA decoder (with `MCF_ENABLE_LZMA=ON`) |
 | `cross_test_lzma` | A Python-produced **LZMA** patch applied by the C library (with `MCF_ENABLE_LZMA=ON`) |
+| `mfp2_host_to_parser` | Sodium/PyNaCl-produced signed+encrypted MFP2 patch: structural parse succeeds, MFP1 session rejects before RAM-flash mutation |
 
 | Option | Default | Effect |
 |---|---|---|
 | `MCF_ENABLE_LZMA` | `OFF` | Build the LZMA codec (vendored LZMA SDK) |
+| `MCF_ENABLE_SODIUM` | `OFF` | Build libsodium adapters and MFP2 host-to-parser boundary tests |
 | `MCF_BUILD_TESTS` | `ON` | Build the host test suite |
 | `MCF_WERROR` | `ON` | Warnings are errors |
 | `MCF_STRICT` | `ON` | Add `-Wconversion -Wsign-conversion` |

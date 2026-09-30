@@ -39,6 +39,15 @@ int main(void)
     uint8_t pk[crypto_sign_PUBLICKEYBYTES];
     uint8_t sig[crypto_sign_BYTES];
     uint8_t dummy = 0u;
+    uint8_t key[crypto_aead_xchacha20poly1305_ietf_KEYBYTES];
+    uint8_t nonce[crypto_aead_xchacha20poly1305_ietf_NPUBBYTES];
+    uint8_t msg[] = "MFP2 authenticated record";
+    uint8_t ad[] = "MCF2REC\\0header";
+    uint8_t cipher[sizeof(msg) - 1u];
+    uint8_t plain[sizeof(msg) - 1u];
+    uint8_t tag[crypto_aead_xchacha20poly1305_ietf_ABYTES];
+    unsigned long long clen = 0u;
+    mcf_sodium_aead_ctx_t aead;
     mcf_sodium_verify_ctx_t ctx;
     int ok = 1;
 
@@ -54,10 +63,29 @@ int main(void)
     sig[0] ^= 1u;
     ok &= (mcf_sodium_verify(&ctx, sig, sizeof(sig), &dummy, 0u,
                              &dummy, 0u) == MCF_E_SIGNATURE);
+
+    memset(key, 0x31, sizeof(key));
+    memset(nonce, 0x42, sizeof(nonce));
+    aead.key = key;
+    aead.nonce = nonce;
+    ok &= (crypto_aead_xchacha20poly1305_ietf_encrypt_detached(
+               cipher, tag, &clen, msg, sizeof(msg) - 1u, ad, sizeof(ad) - 1u,
+               NULL, nonce, key) == 0);
+    ok &= (clen == sizeof(tag));
+    ok &= (mcf_sodium_xchacha20poly1305_decrypt(
+               &aead, cipher, sizeof(cipher), tag, sizeof(tag), ad,
+               sizeof(ad) - 1u, plain) == MCF_OK);
+    ok &= (memcmp(plain, msg, sizeof(plain)) == 0);
+    tag[0] ^= 1u;
+    memset(plain, 0xA5, sizeof(plain));
+    ok &= (mcf_sodium_xchacha20poly1305_decrypt(
+               &aead, cipher, sizeof(cipher), tag, sizeof(tag), ad,
+               sizeof(ad) - 1u, plain) == MCF_E_AUTH);
+    ok &= (plain[0] == 0xA5u);
     if (!ok) {
-        fprintf(stderr, "libsodium RFC 8032 TEST 1 failed\n");
+        fprintf(stderr, "libsodium RFC/tamper tests failed\n");
         return 1;
     }
-    puts("libsodium RFC 8032 TEST 1 passed; tampered signature rejected");
+    puts("libsodium RFC 8032 and MFP2 AEAD tamper tests passed");
     return 0;
 }
