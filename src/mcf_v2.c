@@ -1,27 +1,101 @@
 /* SPDX-License-Identifier: MIT */
+/*
+ * Microfoam - MFP2 structural inspection.
+ *
+ * Scope: this file parses and validates the MFP2 container shape only. It does
+ * not decrypt, decode, reconstruct, or write flash, and it is not a session
+ * path. v2 execution is deliberately deferred; see docs/format-v2-design.md for
+ * the proposal and the decisions that gate it.
+ *
+ * What "structural" means here, precisely:
+ *   - every header field is read at its fixed offset, little-endian
+ *   - the TLV area is walked and unknown critical TLVs are rejected
+ *   - the record area is walked once and must frame exactly payload_size bytes
+ *     into exactly record_count records, with no trailing bytes
+ *   - encrypted patches are rejected as MCF_E_UNSUPPORTED, because their
+ *     framing can only be validated together with tag verification and that
+ *     layer is not implemented
+ *
+ * The record walk happens in full during mcf_v2_parse(), so a caller that gets
+ * MCF_OK holds a patch whose framing is known good. mcf_v2_next_record() is
+ * then a linear cursor over that validated area, not a re-scan.
+ */
+
 #include "microfoam_v2.h"
 #include "mcf_internal.h"
 
-static int critical_tlv_unknown(const uint8_t *p, uint32_t n)
+/* TLV area: u16 type, u16 flags, u32 length, value, zero padding to 4 bytes.
+ * Bit 0 of flags means critical. Type 1 is the only critical type defined so
+ * far, so any other critical type is an extension this build cannot honour and
+ * the patch is rejected rather than half-understood. */
+static mcf_status_t mcf_v2_walk_tlvs(const uint8_t *p, uint32_t n)
 {
     uint32_t off = 0u;
-    uint16_t type;
-    uint16_t flags;
-    uint32_t len;
+
     while (off < n) {
-        if (n - off < 8u) return 1;
-        type = mcf_rd16(&p[off]);
+        uint16_t type;
+        uint16_t flags;
+        uint32_t len;
+
+        if (n - off < 8u) {
+            return MCF_E_FORMAT;
+        }
+        type  = mcf_rd16(&p[off]);
         flags = mcf_rd16(&p[off + 2u]);
-        len = mcf_rd32(&p[off + 4u]);
-        if (len > n - off - 8u) return 1;
-        if ((flags & 1u) != 0u && type != 1u) return 1;
+        len   = mcf_rd32(&p[off + 4u]);
+        if (len > n - off - 8u) {
+            return MCF_E_FORMAT;
+        }
+        if ((flags & 1u) != 0u && type != 1u) {
+            return MCF_E_FORMAT;
+        }
         off += 8u + len;
         while ((off & 3u) != 0u) {
-            if (off >= n || p[off] != 0u) return 1;
+            if (off >= n || p[off] != 0u) {
+                return MCF_E_FORMAT;
+            }
             off++;
         }
     }
-    return off != n;
+    return (off == n) ? MCF_OK : MCF_E_FORMAT;
+}
+
+/* Walk the record area once: `record_count` records of
+ *   u32 length, payload[length], tag[16] (encrypted only)
+ * which together must consume exactly `payload_size` bytes. This is what makes
+ * record_count meaningful rather than advisory, and it is why a validated view
+ * needs no further framing checks. */
+static mcf_status_t mcf_v2_walk_records(const uint8_t *records,
+                                        uint32_t payload_size,
+                                        uint32_t record_count,
+                                        uint32_t record_log2,
+                                        int encrypted)
+{
+    uint32_t pos = 0u;
+    uint32_t i;
+
+    for (i = 0u; i < record_count; i++) {
+        uint32_t len;
+
+        if (payload_size - pos < 4u) {
+            return MCF_E_FORMAT;
+        }
+        len = mcf_rd32(&records[pos]);
+        pos += 4u;
+        if (len == 0u || len > (1u << record_log2) || len > payload_size - pos) {
+            return MCF_E_FORMAT;
+        }
+        pos += len;
+        if (encrypted) {
+            if (payload_size - pos < MCF_V2_RECORD_TAG_SIZE) {
+                return MCF_E_FORMAT;
+            }
+            pos += MCF_V2_RECORD_TAG_SIZE;
+        }
+    }
+    /* Exactly consumed. A short area means a missing record; a long one means
+     * bytes no record claims. Both are malformed framing. */
+    return (pos == payload_size) ? MCF_OK : MCF_E_FORMAT;
 }
 
 mcf_status_t mcf_v2_parse(const uint8_t *patch, uint32_t patch_size,
@@ -32,7 +106,9 @@ mcf_status_t mcf_v2_parse(const uint8_t *patch, uint32_t patch_size,
     uint16_t tlv_len;
     uint8_t codec;
     uint32_t records;
+    uint32_t payload_size;
     uint8_t log2;
+    mcf_status_t st;
 
     if (patch == NULL || out == NULL || patch_size < MCF_V2_HEADER_MIN) {
         return MCF_E_PARAM;
@@ -47,6 +123,9 @@ mcf_status_t mcf_v2_parse(const uint8_t *patch, uint32_t patch_size,
     if ((flags & ~MCF_V2_KNOWN_FLAGS) != 0u) return MCF_E_FORMAT;
     if ((flags & MCF_V2_FLAG_CODEC_LZ4) != 0u &&
         (flags & MCF_V2_FLAG_CODEC_LZMA) != 0u) return MCF_E_FORMAT;
+    /* Encrypted patches are rejected outright. Rejecting is the fail-closed
+     * answer: a shape check without the AEAD layer would be a claim this code
+     * cannot make. */
     if ((flags & MCF_V2_FLAG_ENCRYPTED) != 0u) return MCF_E_UNSUPPORTED;
     if (mcf_rd32(&patch[MCF_V2_OFF_RESERVED]) != 0u ||
         mcf_rd32(&patch[MCF_V2_OFF_RESERVED + 4u]) != 0u ||
@@ -54,8 +133,13 @@ mcf_status_t mcf_v2_parse(const uint8_t *patch, uint32_t patch_size,
         return MCF_E_FORMAT;
     }
     tlv_len = mcf_rd16(&patch[MCF_V2_OFF_TLV_LEN]);
-    if ((uint32_t)tlv_len != (uint32_t)header_len - MCF_V2_HEADER_MIN ||
-        critical_tlv_unknown(&patch[MCF_V2_HEADER_MIN], tlv_len) != 0) return MCF_E_FORMAT;
+    if ((uint32_t)tlv_len != (uint32_t)header_len - MCF_V2_HEADER_MIN) {
+        return MCF_E_FORMAT;
+    }
+    st = mcf_v2_walk_tlvs(&patch[MCF_V2_HEADER_MIN], tlv_len);
+    if (st != MCF_OK) {
+        return st;
+    }
     codec = patch[MCF_V2_OFF_CODEC];
     if (codec != (uint8_t)MCF_CODEC_LZ4 && codec != (uint8_t)MCF_CODEC_LZMA &&
         codec < (uint8_t)MCF_CODEC_CUSTOM_MIN) return MCF_E_UNSUPPORTED;
@@ -65,7 +149,19 @@ mcf_status_t mcf_v2_parse(const uint8_t *patch, uint32_t patch_size,
     if (log2 < 8u || log2 > 16u) return MCF_E_FORMAT;
     records = mcf_rd32(&patch[MCF_V2_OFF_RECORD_COUNT]);
     if (records == 0u) return MCF_E_FORMAT;
-    if (mcf_rd32(&patch[MCF_V2_OFF_PAYLOAD_SIZE] ) > patch_size - header_len) return MCF_E_TRUNCATED;
+    payload_size = mcf_rd32(&patch[MCF_V2_OFF_PAYLOAD_SIZE]);
+    if (payload_size > patch_size - header_len) {
+        return MCF_E_TRUNCATED;
+    }
+
+    /* The record area must frame exactly. Done here, not lazily, so a validated
+     * view is a guarantee rather than an invitation to re-scan. Encrypted is
+     * always 0 at this point - that case returned above. */
+    st = mcf_v2_walk_records(&patch[header_len], payload_size, records, log2, 0);
+    if (st != MCF_OK) {
+        return st;
+    }
+
     out->header_len = header_len;
     out->version = MCF_V2_VERSION;
     out->flags = flags;
@@ -73,7 +169,7 @@ mcf_status_t mcf_v2_parse(const uint8_t *patch, uint32_t patch_size,
     out->fw_version = mcf_rd32(&patch[MCF_V2_OFF_FW_VERSION]);
     out->old_size = mcf_rd32(&patch[MCF_V2_OFF_OLD_SIZE]);
     out->new_size = mcf_rd32(&patch[MCF_V2_OFF_NEW_SIZE]);
-    out->payload_size = mcf_rd32(&patch[MCF_V2_OFF_PAYLOAD_SIZE]);
+    out->payload_size = payload_size;
     out->workspace_req = mcf_rd32(&patch[MCF_V2_OFF_WORKSPACE]);
     out->old_version = mcf_rd32(&patch[MCF_V2_OFF_OLD_VERSION]);
     out->codec_id = codec;
@@ -94,29 +190,40 @@ mcf_status_t mcf_v2_next_record(const mcf_v2_view_t *view, const uint8_t *patch,
     uint32_t end;
     uint32_t len;
     uint32_t index;
+
     if (view == NULL || patch == NULL || offset == NULL || out == NULL) return MCF_E_PARAM;
     if ((view->flags & MCF_V2_FLAG_ENCRYPTED) != 0u) return MCF_E_UNSUPPORTED;
+
     end = (uint32_t)view->header_len + view->payload_size;
     if (end > patch_size) return MCF_E_TRUNCATED;
-    pos = (*offset == 0u) ? (uint32_t)view->header_len : *offset;
-    if (pos == end) return MCF_E_NOT_FOUND;
-    if (pos < view->header_len || pos > end || end - pos < 4u) return MCF_E_TRUNCATED;
-    index = 0u;
-    {
-        uint32_t scan = (uint32_t)view->header_len;
-        while (scan < pos) {
-            uint32_t prior;
-            if (end - scan < 4u) return MCF_E_TRUNCATED;
-            prior = mcf_rd32(&patch[scan]);
-            if (prior == 0u || prior > end - scan - 4u) return MCF_E_FORMAT;
-            scan += 4u + prior;
-            index++;
-        }
-        if (scan != pos || index >= view->record_count) return MCF_E_FORMAT;
+
+    /* Linear cursor. *offset == 0 starts the walk; afterwards *offset is the
+     * byte position the previous call left off at, and the record index is
+     * carried in out->index. The framing was validated by mcf_v2_parse(), so
+     * this only has to bound-check. */
+    if (*offset == 0u) {
+        pos = (uint32_t)view->header_len;
+        index = 0u;
+    } else {
+        if (*offset < view->header_len || *offset > end) return MCF_E_FORMAT;
+        pos = *offset;
+        index = out->index + 1u;
     }
+    if (pos == end) {
+        return MCF_E_NOT_FOUND;
+    }
+    if (index >= view->record_count) {
+        return MCF_E_FORMAT;
+    }
+    if (end - pos < 4u) {
+        return MCF_E_FORMAT;
+    }
+
     len = mcf_rd32(&patch[pos]);
     pos += 4u;
-    if (len == 0u || len > (1u << view->record_log2) || len > end - pos) return MCF_E_FORMAT;
+    if (len == 0u || len > (1u << view->record_log2) || len > end - pos) {
+        return MCF_E_FORMAT;
+    }
     out->index = index;
     out->data = &patch[pos];
     out->data_len = len;

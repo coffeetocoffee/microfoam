@@ -344,8 +344,8 @@ target_link_libraries(my_app PRIVATE microfoam::microfoam)
 ## Repository layout
 
 ```
-include/microfoam.h        the public API — the entire contract
-src/mcf_container.c        header parse and validation (the only place it's interpreted)
+include/microfoam.h        the public v1 API — the entire production contract
+src/mcf_container.c        MFP1 header parse and validation (the only session format)
 src/mcf_engine.c           BSDIFF43 delta loop, resumable, 32-bit clean
 src/mcf_session.c          state machine, workspace, flash write path
 src/mcf_codec_lz4.c        LZ4 block decoder
@@ -364,10 +364,10 @@ tests/cross_test.c         host-tool patch applied by the C library
 tests/fixtures/            deterministic firmware pair and a test key
 contrib/ed25519-wip/       rejected verifier, defect log, and conformance harness
 docs/architecture.md       the design this implements, and why
-docs/format-v2.md          the shipped v1 on-flash patch format
-docs/format-v2-design.md   proposed v2 format/API for AEAD and codec checkpoints
+docs/format-v2.md          the shipped MFP1 on-flash patch format
+docs/format-v2-design.md   formally deferred MFP2 proposal for AEAD and codec checkpoints
 docs/lzma-history.md       the retired from-scratch LZMA decoder's defect log
-include/microfoam_v2.h     experimental MFP2 structural inspection API (no session execution yet)
+include/microfoam_v2.h     MFP2 structural inspection API (never an apply/session path)
 ```
 
 ---
@@ -377,6 +377,9 @@ include/microfoam_v2.h     experimental MFP2 structural inspection API (no sessi
 Honest accounting of what exists and what does not.
 
 **Working and tested**
+
+The production/session path supports MFP1 only. MFP2 is deliberately deferred: its public
+inspection parser validates container shape, but no MFP2 patch can be applied by a session.
 
 The build is warning-clean under `-Wall -Wextra -Wconversion -Wsign-conversion -Werror`,
 and all three test suites pass in both Debug and Release:

@@ -262,7 +262,7 @@ typedef struct mcf_codec_ops {
 mcf_status_t mcf_codec_register(const mcf_codec_ops_t *ops);
 
 /* ======================================================================== *
- * 7. Patch container format (v2)
+ * 7. Patch container format (v1)
  * ======================================================================== */
 
 /*

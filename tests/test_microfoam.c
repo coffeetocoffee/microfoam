@@ -12,6 +12,7 @@
  */
 
 #include "microfoam.h"
+#include "microfoam_v2.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,6 +77,8 @@ static int g_commit_called;
 static int g_abort;
 static int g_contract_violation;
 static int g_fail_journal;
+static int g_flash_mutations;
+static uint32_t g_last_error_site;
 
 static int32_t h_erase(void *ctx, uint32_t addr, uint32_t len)
 {
@@ -84,6 +87,7 @@ static int32_t h_erase(void *ctx, uint32_t addr, uint32_t len)
     if (g_fail_erase) {
         return MCF_E_FLASH;
     }
+    g_flash_mutations++;
     /* The journal region models a separate small NVM device with its own
      * geometry, so it is not subject to the code flash's alignment contract. */
     if (addr >= JOURNAL_BASE) {
@@ -112,6 +116,7 @@ static int32_t h_write(void *ctx, uint32_t addr, const uint8_t *p, uint32_t len)
     if (g_fail_write || g_readonly) {
         return MCF_E_FLASH;
     }
+    g_flash_mutations++;
     if (addr >= JOURNAL_BASE) {
         if (g_fail_journal) return MCF_E_FLASH;
         if (len > JOURNAL_SIZE) {
@@ -199,6 +204,7 @@ static void device_reset(void)
     g_abort = 0;
     g_contract_violation = 0;
     g_fail_journal = 0;
+    g_flash_mutations = 0;
     memset(g_flash, 0xFF, sizeof(g_flash));
 }
 
@@ -394,9 +400,10 @@ static mcf_status_t apply(uint32_t patch_len, mcf_config_t *cfg_out)
     if (st == MCF_OK) {
         st = mcf_session_run(g_session);
     }
+    g_last_error_site = mcf_session_error_site(g_session);
     if (st != MCF_OK) {
         printf("       -> %s at site %u\n", mcf_session_strerror(st),
-               mcf_session_error_site(g_session));
+               g_last_error_site);
     }
     mcf_session_close(g_session);
     return st;
@@ -546,6 +553,35 @@ static void test_corrupt_payload(void)
     CHECK(st != MCF_OK, "corrupt payload does not report success");
     printf("       (status: %s, site %u)\n", mcf_session_strerror(st),
            mcf_session_error_site(NULL) == 0u ? 0u : 0u);
+}
+
+static void test_v2_session_rejected(void)
+{
+    mcf_v2_view_t view;
+    uint32_t len = MCF_V2_HEADER_MIN + 5u;
+
+    banner("MFP2 session boundary");
+    device_reset();
+    memset(g_patch, 0, len);
+    wr32(&g_patch[MCF_V2_OFF_MAGIC], MCF_V2_MAGIC);
+    wr16(&g_patch[MCF_V2_OFF_HEADER_LEN], MCF_V2_HEADER_MIN);
+    wr16(&g_patch[MCF_V2_OFF_VERSION], MCF_V2_VERSION);
+    wr32(&g_patch[MCF_V2_OFF_FLAGS], MCF_V2_FLAG_CODEC_LZ4);
+    wr32(&g_patch[MCF_V2_OFF_PAYLOAD_SIZE], 5u);
+    g_patch[MCF_V2_OFF_CODEC] = (uint8_t)MCF_CODEC_LZ4;
+    g_patch[MCF_V2_OFF_RECORD_LOG2] = 8u;
+    wr32(&g_patch[MCF_V2_OFF_RECORD_COUNT], 1u);
+    wr32(&g_patch[MCF_V2_HEADER_MIN], 1u);
+    g_patch[MCF_V2_HEADER_MIN + 4u] = 0xAAu;
+
+    CHECK_EQ(mcf_v2_parse(g_patch, len, &view), MCF_OK,
+             "fixture is structurally valid MFP2");
+    CHECK_EQ(apply(len, NULL), MCF_E_FORMAT,
+             "normal session rejects MFP2 as non-MFP1");
+    CHECK_EQ(g_last_error_site, 2u,
+             "MFP2 rejection is reported at the MFP1 magic check");
+    CHECK_EQ(g_flash_mutations, 0,
+             "MFP2 rejection happens before flash erase or write");
 }
 
 static void test_header_rejections(void)
@@ -971,6 +1007,7 @@ int main(void)
     test_fault_readonly();
     test_truncated();
     test_corrupt_payload();
+    test_v2_session_rejected();
     test_header_rejections();
     test_base_image_mismatch();
     test_new_image_crc();

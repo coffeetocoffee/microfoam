@@ -76,12 +76,25 @@ typedef struct mcf_v2_record {
     uint32_t tag_len;
 } mcf_v2_record_t;
 
-/* Structural parser only. It never decrypts, decodes, or writes flash. */
+/* Structural parser only. It never decrypts, decodes, or writes flash, and it
+ * is not a session path - v2 execution is deferred.
+ *
+ * Validates the complete container shape in one call: header fields, TLV area,
+ * and the record area (which must frame exactly `payload_size` bytes into
+ * exactly `record_count` records). A view that returns MCF_OK therefore has
+ * known-good framing; callers do not need to re-validate while iterating.
+ *
+ * Encrypted patches are rejected with MCF_E_UNSUPPORTED until the AEAD layer
+ * exists: their framing cannot be validated without tag verification. */
 mcf_status_t mcf_v2_parse(const uint8_t *patch, uint32_t patch_size,
                           mcf_v2_view_t *out);
 
-/* Iterate unencrypted records. Encrypted records are rejected until the v2 AEAD
- * provider is implemented. Pass *offset=MCF_V2_HEADER_MIN on first call. */
+/* Linear iteration over an unencrypted record area that mcf_v2_parse() has
+ * already validated.
+ *
+ * Call with *offset == 0 to start; thereafter pass the same `out` back in and
+ * the function advances by carrying the record index in `out->index`. Returns
+ * MCF_E_NOT_FOUND when the area is exhausted. */
 mcf_status_t mcf_v2_next_record(const mcf_v2_view_t *view, const uint8_t *patch,
                                 uint32_t patch_size, uint32_t *offset,
                                 mcf_v2_record_t *out);

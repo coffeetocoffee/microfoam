@@ -1,10 +1,61 @@
 # Microfoam Container/API v2 Design Proposal
 
-**Status:** design only; not implemented or supported.
-**Scope:** reviewed LZMA, authenticated encryption, and codec-aware resume.
+**Status: formally deferred (2026-09-30). Design only; not implemented or supported.**
+
+This document is the normative proposal for a v2 container. It is **not scheduled
+for implementation**, and nothing here should be read as a commitment. The
+decision to defer was taken deliberately:
+
+- No known consumer needs encrypted firmware patches today. Encryption is v2's
+  only capability that v1 cannot already deliver, and it is the expensive half.
+- v1 already covers everything else v2 was designed to add. Reviewed LZMA shipped
+  in v1.2.0 (vendored LZMA SDK); anti-rollback, product binding, signatures,
+  fail-closed verification, a resumable journal and a bounded LZMA parameter
+  policy are all in the shipped v1 format.
+- The five decisions in §11 are protocol/product decisions, not engineering
+  ones, and none of them can be answered by writing code. Implementing v2 before
+  answering them would build the wrong format.
+
+**Scope:** authenticated encryption (XChaCha20-Poly1305), per-record framing,
+codec-aware checkpoint resume. The LZMA half of the original scope is done in v1.
+
 **Compatibility rule:** v1 remains unchanged and remains the default interoperable format. A v1 reader MUST reject v2. A v2 reader MAY support v1 through an explicit compatibility path, but MUST NOT infer v2 from v1 fields.
 
-This document is a normative proposal for the next implementation phase. It intentionally does not change the current wire format or enable the quarantined LZMA decoder.
+## 0. What exists today, and what does not
+
+| Piece | State |
+|---|---|
+| `src/mcf_v2.c` / `include/microfoam_v2.h` | **Shipped**: inspection-only structural parser. For unencrypted patches, validates the header, TLV area, and record-area framing (exactly `record_count` records consuming exactly `payload_size` bytes). Rejects encrypted patches as `MCF_E_UNSUPPORTED` before validating their record framing. Never decrypts, decodes or writes flash. |
+| `tests/v2_format_test.c` | **Shipped**: 25 checks over the shape rules above. |
+| v2 session integration | **Not implemented.** No `mcf_session_t` path accepts MFP2. |
+| Encrypted record support (AEAD) | **Not implemented.** |
+| v2 host patch generation | **Not implemented.** The host tool writes MFP1 only. |
+| v2 signature semantics in the session path | **Not implemented.** |
+| v2 compatibility / cross-tests | **Not implemented.** |
+
+**What the parser deliberately does not claim.** Passing `mcf_v2_parse()` means the
+container *shape* is well-formed. It says nothing about authenticity, about whether
+the records decrypt, or about whether the payload reconstructs a valid image. A
+caller must not treat a successful parse as any kind of acceptance.
+
+**Why unencrypted record framing is validated eagerly.** `record_count` is a header field, and
+a header field that is never cross-checked against the data is exactly the class of
+"implicit, unenforced contract" this project exists to avoid. For an unencrypted patch,
+`mcf_v2_parse()` walks the whole record area once and requires it to frame exactly; a
+view that returns `MCF_OK` therefore needs no further framing checks, and
+`mcf_v2_next_record()` is a linear cursor rather than a re-scan. Encrypted patches are
+rejected before record framing because the AEAD layer is not implemented.
+
+## 0.1 Un-deferring this work
+
+Before any v2 execution is written, §11 must be answered. Then the acceptance
+gates in §10 are the definition of done, and the parser's two known limits should
+be revisited first:
+
+- the record walk assumes the unencrypted framing; the encrypted framing (with
+  per-record tags) is implemented but unreachable until AEAD exists, and is
+  therefore untested;
+- no fuzzing has been run against the parser.
 
 ## 1. Goals and non-goals
 
@@ -97,7 +148,7 @@ When `ENCRYPTED` is clear, records retain the same length framing but have no ta
 - `SIGNED` covers `"MCF2SIG\0" || header_without_signature || complete_record_area`. This authenticates metadata and the complete encrypted or plaintext payload. Signature verification happens before flash writes.
 - If both signature and AEAD are used, both MUST verify. AEAD protects confidentiality and per-record integrity; the signature provides publisher authenticity. Neither may be treated as a substitute for the other.
 - If encrypted but unsigned patches are permitted by a product, that must be an explicit integrator policy. The library default policy SHOULD require signatures for firmware installation.
-- The Ed25519 provider remains external/vetted (libsodium or hardware root of trust); the quarantined custom implementation is never linked.
+- The Ed25519 provider remains external/vetted (libsodium or hardware root of trust); the quarantined custom implementation is never linked. v1's `mcf_verify_fn` is the same rule already in force.
 
 ## 4. Codec profiles
 
@@ -106,6 +157,14 @@ When `ENCRYPTED` is clear, records retain the same length framing but have no ta
 V2 LZ4 uses the existing Microfoam framed LZ4 blocks, but each v2 record boundary is also an independent restart boundary. The record plaintext is one or more complete LZ4 frames; record boundaries MUST occur between frames, never inside a frame.
 
 ### 4.2 Reviewed LZMA1 profile
+
+**Note (2026-09-30): this subsection is superseded by the shipped v1 profile.** v1.2.0
+delivered LZMA on the vendored LZMA SDK with the 9-byte properties block and a
+policy-checked dictionary (`mcf_config_t.lzma_max_dict`). The 16-byte `LZP2` profile
+below was designed for a liblzma-backed decoder and is **not** what ships. It is kept
+only so a future v2 does not have to rediscover the constraints; if v2 is ever
+implemented, this profile must be re-justified against the shipped v1 one first,
+because two LZMA profiles in one library is a support liability.
 
 V2 codec id 2 means **raw LZMA1 stream using liblzma**, not `.xz` or `.lzma` container format. Properties prefix is exactly 16 bytes:
 
@@ -223,12 +282,23 @@ Host `inspect` reports encryption/key ID/nonce/record count without printing sec
 
 ## 11. Open decisions before implementation
 
-These are protocol/product decisions and must be resolved before coding v2:
+These are protocol/product decisions, not engineering ones, and they are the reason
+v2 is deferred rather than scheduled: none of them can be answered by writing code,
+and building before answering them would build the wrong format.
 
 1. **Key model:** one symmetric device-group key, per-device keys selected by `key_id`, or hardware-backed key-provider only? Recommended default: integrator key provider, per-device/tenant key slots, no key bytes in config files.
 2. **Signature policy:** require publisher signature for all firmware patches, including encrypted ones? Recommended: yes by default; encryption is not publisher identity.
-3. **LZMA segmentation:** are independent per-triple streams acceptable despite worse ratio, or should LZMA be v2 without resume optimization? Recommended first v2 release: independent segments for auditable restart; measure ratio before enabling.
+3. **LZMA segmentation:** are independent per-triple streams acceptable despite worse ratio, or should LZMA be v2 without resume optimization? Recommended first v2 release: independent segments for auditable restart; measure ratio before enabling. (Note: v1 now ships LZMA with a single stream and a replay-based resume; this decision only matters if v2's record model is adopted.)
 4. **Encryption packaging:** may the host use PyNaCl (libsodium) or is Python `cryptography` a required dependency? This affects tool installation and interoperability tests.
 5. **Public ABI:** v2 callbacks can be added alongside v1 APIs (`mcf_*_v2`) or by a major library API version bump. Recommended: parallel v2 API until downstream migration is complete.
 
-Until these decisions are approved and the acceptance gates pass, v2 remains a design proposal and must not be advertised as implemented.
+## 12. Deferral record
+
+| Date | Decision | Rationale |
+|---|---|---|
+| 2026-09-30 | **v2 deferred; no implementation scheduled.** | No consumer needs encrypted patches; v1 already covers every other v2 goal (LZMA shipped in v1.2.0, anti-rollback, product binding, signatures, resume, LZMA parameter policy); §11's decisions are unresolved and are product decisions. |
+
+Until §11 is answered and the §10 acceptance gates pass, v2 remains a design
+proposal. The structural parser may ship, but v2 **execution** must not be
+advertised as implemented, and no code should treat a successful `mcf_v2_parse()`
+as an acceptance.
