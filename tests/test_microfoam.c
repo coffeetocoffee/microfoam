@@ -118,7 +118,7 @@ static int32_t h_write(void *ctx, uint32_t addr, const uint8_t *p, uint32_t len)
             return MCF_E_FLASH;
         }
         memcpy(g_journal, p, len);
-        return (int32_t)len;
+        return MCF_OK;
     }
     off = addr - FLASH_BASE;
     if (off + len > FLASH_SIZE) {
@@ -134,7 +134,7 @@ static int32_t h_write(void *ctx, uint32_t addr, const uint8_t *p, uint32_t len)
     } else {
         memcpy(&g_flash[off], p, len);
     }
-    return 0;
+    return MCF_OK;
 }
 
 static int32_t h_read(void *ctx, uint32_t addr, uint8_t *p, uint32_t len)

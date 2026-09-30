@@ -52,7 +52,7 @@ static int32_t h_write(void *c, uint32_t addr, const uint8_t *p, uint32_t len)
     }
     if (off + len > FLASH_SIZE) { return MCF_E_FLASH; }
     memcpy(&g_flash[off], p, len);
-    return (int32_t)len;
+    return MCF_OK;
 }
 
 static int32_t h_read(void *c, uint32_t addr, uint8_t *p, uint32_t len)

@@ -97,7 +97,8 @@ typedef enum mcf_status {
  * 4. Callback types
  * ======================================================================== */
 
-/* Read `len` bytes at absolute offset `off` from a source image. */
+/* Read `len` bytes at absolute offset `off` from a source image.
+ * Return exactly `len` on success, or a negative mcf_status_t on failure. */
 typedef int32_t (*mcf_read_fn)(void *ctx, uint32_t off, uint8_t *buf, uint32_t len);
 
 /* Progress notification. Return non-zero to abort the session with
@@ -131,13 +132,16 @@ typedef void (*mcf_log_fn)(void *ctx, int level, const char *msg);
  * The library never issues an unaligned or block-crossing operation:
  *
  *   erase  - `len` is always a whole multiple of flash_block_size() and
- *            `addr` is aligned to it. Return MCF_OK on success.
+ *            `addr` is aligned to it. Return MCF_OK on success, or a negative
+ *            mcf_status_t on failure. Positive counts are not valid here.
  *   write  - `len` is always a multiple of the device's program granularity and
  *            never crosses a flash block boundary. The library buffers across
  *            erase-block boundaries, so a write may be called repeatedly for a
- *            single logical block. Return MCF_OK on success.
+ *            single logical block. Return MCF_OK on success, or a negative
+ *            mcf_status_t on failure. Positive counts are not valid here.
  *   read   - optional. May be NULL when the region is directly addressable and
- *            the destination is not.
+ *            the destination is not. Return exactly `len` on success, or a
+ *            negative mcf_status_t on failure.
  *
  * The library performs read-back verification after programming unless
  * flash_is_readonly() reports the region cannot be read.
@@ -228,15 +232,26 @@ typedef struct mcf_codec_ops {
 
     /* `workspace` is at least workspace_size() bytes. The codec places its state
      * at the head of it and returns the handle from `*out_handle`, so no
-     * separate allocation is needed. */
+     * separate allocation is needed. Return MCF_OK and a non-NULL handle, or a
+     * negative mcf_status_t. */
     int32_t (*init)(mcf_codec_t **out_handle, const uint8_t *props,
                     uint32_t props_len, uint8_t *workspace);
 
+    /* Return MCF_OK and set both output counts within the supplied capacities,
+     * or return a negative mcf_status_t. `consumed == 0` with `produced == 0`
+     * is only valid when the stream has ended; otherwise the session rejects it
+     * as a corrupt/non-progressing codec. */
     int32_t (*decode)(mcf_codec_t *c,
                       uint8_t *out, uint32_t cap, uint32_t *produced,
                       const uint8_t *in, uint32_t in_avail, uint32_t *consumed);
 
+    /* Return MCF_OK only when the codec produced the complete declared stream,
+     * or a negative mcf_status_t. The session maps failures to the codec-finish
+     * diagnostic stage. */
     int32_t (*finish)(mcf_codec_t *c);
+
+    /* Release codec state. Called after init succeeded, including all later
+     * session failure paths. It must not report an error. */
     void    (*destroy)(mcf_codec_t *c);
     void   *ctx; /*!< Passed to every callback above. */
 } mcf_codec_ops_t;

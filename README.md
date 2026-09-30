@@ -19,7 +19,7 @@ kilobytes of RAM.
 | **Language** | C99, MISRA-friendly, `-Wall -Wextra -Wconversion` clean | |
 | **Targets verified** | arm-none-eabi-gcc: M0, M0+, M3, M4, M7, M33 | |
 | **Licence** | MIT | |
-| **Status** | 0.1.0 — see [Status](#status) | |
+| **Status** | 1.1.0 — see [Status](#status) | |
 
 ---
 
@@ -180,9 +180,9 @@ Five required callbacks and one optional. This is the entire platform dependency
 
 | Callback | Required | Contract |
 |---|---|---|
-| `flash_erase(ctx, addr, len)` | yes | `len` is always a whole multiple of `flash_block_size()`, and `addr` is aligned to it. The library guarantees this. |
-| `flash_write(ctx, addr, p, len)` | yes | Never crosses an erase-block boundary. May be called repeatedly for one logical block. Handles your part's program granularity. |
-| `flash_read(ctx, addr, p, len)` | for read-back verify | Needed unless `flash_is_readonly` reports the region unreadable. |
+| `flash_erase(ctx, addr, len)` | yes | `len` is always a whole multiple of `flash_block_size()`, and `addr` is aligned to it. Return `MCF_OK` on success or a negative status on failure. |
+| `flash_write(ctx, addr, p, len)` | yes | Never crosses an erase-block boundary. May be called repeatedly for one logical block. Return `MCF_OK` on success or a negative status on failure; positive byte counts are not valid. |
+| `flash_read(ctx, addr, p, len)` | for read-back verify | Needed unless `flash_is_readonly` reports the region unreadable. Return exactly `len` on success or a negative status on failure. The old-image `old_read` callback follows the same exact-count rule. |
 | `flash_block_size(ctx)` | yes | Erase granularity in bytes. Must be a power of two. |
 | `alloc` / `free` | unless static | Returning `NULL` is reported as `MCF_E_NOMEM`. |
 | `get_product_id`, `get_fw_version` | yes | Device-provisioned identity and running version. |
@@ -222,8 +222,11 @@ this architecture exists to remove, so it is an opt-in component and the LZMA SD
 separately. A patch declaring LZMA on a build without it is rejected as
 `MCF_E_UNSUPPORTED` rather than handed to a stub.
 
-Register your own codec through `mcf_codec_ops_t`; the registry is a link-time constant table,
-so it cannot be mutated after start-up.
+Register your own codec through `mcf_codec_ops_t`; the descriptor is caller-owned and resolved per
+session. `workspace_size` must not allocate, `init`/`decode`/`finish` return `MCF_OK` or a
+negative status, and `decode` must report bounded output counts and make progress unless the
+stream has ended. `destroy` is called after successful initialization on every later failure path.
+`mcf_codec_register()` validates a descriptor but does not retain global state.
 
 ---
 
@@ -274,6 +277,7 @@ ctest --test-dir build
 | Test | What it checks |
 |---|---|
 | `microfoam_tests` | Round trip and fault injection against a mock device |
+| `custom_codec_test` | Caller-owned codec validation, isolation, budget enforcement, and failure propagation |
 | `host_selftest` | The Python tool against an independent reference implementation |
 | `cross_test` | A Python-produced patch applied by the C library |
 

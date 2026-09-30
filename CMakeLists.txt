@@ -6,7 +6,7 @@
 cmake_minimum_required(VERSION 3.15)
 
 project(microfoam
-    VERSION 0.1.0
+    VERSION 1.1.0
     DESCRIPTION "Firmware delta update library for resource-constrained microcontrollers"
     LANGUAGES C)
 
@@ -64,6 +64,17 @@ set(MCF_WARNINGS
 
 if(MCF_STRICT)
     list(APPEND MCF_WARNINGS -Wconversion -Wsign-conversion -Wdouble-promotion)
+endif()
+
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+    list(APPEND MCF_WARNINGS
+        -Werror=return-type
+        -Wformat=2
+        -Wvla
+        -Wwrite-strings)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        list(APPEND MCF_WARNINGS -Wcast-function-type)
+    endif()
 endif()
 
 if(MSVC)
@@ -137,6 +148,11 @@ if(MCF_BUILD_TESTS)
     target_link_libraries(hal_concurrency_test PRIVATE microfoam)
     target_compile_options(hal_concurrency_test PRIVATE ${MCF_WARNINGS})
     add_test(NAME hal_concurrency_test COMMAND hal_concurrency_test)
+
+    add_executable(custom_codec_test tests/custom_codec_test.c)
+    target_link_libraries(custom_codec_test PRIVATE microfoam)
+    target_compile_options(custom_codec_test PRIVATE ${MCF_WARNINGS})
+    add_test(NAME custom_codec_test COMMAND custom_codec_test)
 
     add_executable(microfoam_tests tests/test_microfoam.c)
     target_link_libraries(microfoam_tests PRIVATE microfoam)

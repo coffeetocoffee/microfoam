@@ -4,7 +4,7 @@
 #include <stdlib.h>
 
 static int32_t erase(void *ctx, uint32_t a, uint32_t n) { (void)ctx; (void)a; (void)n; return 0; }
-static int32_t write_(void *ctx, uint32_t a, const uint8_t *p, uint32_t n) { (void)ctx; (void)a; (void)p; return (int32_t)n; }
+static int32_t write_(void *ctx, uint32_t a, const uint8_t *p, uint32_t n) { (void)ctx; (void)a; (void)p; (void)n; return MCF_OK; }
 static int32_t read_(void *ctx, uint32_t a, uint8_t *p, uint32_t n) { (void)ctx; (void)a; memset(p, 0, n); return (int32_t)n; }
 static uint32_t block(void *ctx) { (void)ctx; return 1024u; }
 static uint32_t product_a(void *ctx) { (void)ctx; return 0xA1u; }

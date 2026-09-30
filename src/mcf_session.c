@@ -87,9 +87,13 @@ static int32_t mcf_sess_refill(void *ctx, uint8_t *buf, uint32_t cap, uint32_t *
     s->io.raw_origin = s->io.payload_pos;
 
     r = s->ops->decode(s->codec, buf, cap, &produced, src, avail, &consumed);
-    if (r < 0) {
+    if (r != MCF_OK) {
         s->site = MCF_SITE_CODEC_DECODE;
-        return r;
+        return (r < 0) ? r : (int32_t)MCF_E_CORRUPT;
+    }
+    if (produced > cap || consumed > avail || (produced == 0u && consumed == 0u && avail != 0u)) {
+        s->site = MCF_SITE_CODEC_DECODE;
+        return (int32_t)MCF_E_CORRUPT;
     }
     s->io.payload_pos += consumed;
     *n = produced;
@@ -124,9 +128,9 @@ static int32_t mcf_sess_emit(void *ctx, const uint8_t *p, uint32_t len)
             uint32_t end   = start + s->flash_block;
 
             r = hal->flash_erase(hal->ctx, start, end - start);
-            if (r < 0) {
+            if (r != MCF_OK) {
                 s->site = MCF_SITE_FLASH_ERASE;
-                return r;
+                return (r < 0) ? r : (int32_t)MCF_E_FLASH;
             }
             s->dst_erased_upto = end;
         }
@@ -144,9 +148,9 @@ static int32_t mcf_sess_emit(void *ctx, const uint8_t *p, uint32_t len)
         }
 
         r = hal->flash_write(hal->ctx, addr, p, chunk);
-        if (r < 0) {
+        if (r != MCF_OK) {
             s->site = MCF_SITE_FLASH_WRITE;
-            return r;
+            return (r < 0) ? r : (int32_t)MCF_E_FLASH;
         }
 
         /* Read-back verification in small chunks. This uses a local buffer, not
@@ -169,6 +173,10 @@ static int32_t mcf_sess_emit(void *ctx, const uint8_t *p, uint32_t len)
                 if (r < 0) {
                     s->site = MCF_SITE_FLASH_VERIFY;
                     return r;
+                }
+                if ((uint32_t)r != n) {
+                    s->site = MCF_SITE_FLASH_VERIFY;
+                    return (int32_t)MCF_E_IO;
                 }
                 if (memcmp(verify, &p[off], n) != 0) {
                     s->site = MCF_SITE_FLASH_VERIFY;
@@ -235,9 +243,15 @@ static int32_t mcf_journal_read(const mcf_config_t *cfg, const mcf_hal_t *hal,
     if (hal == NULL || hal->flash_read == NULL) {
         return (int32_t)MCF_E_PARAM;
     }
-    if (hal->flash_read(hal->ctx, cfg->journal_addr, (uint8_t *)j,
-                        (uint32_t)sizeof(*j)) < 0) {
-        return (int32_t)MCF_E_IO;
+    {
+        int32_t got = hal->flash_read(hal->ctx, cfg->journal_addr, (uint8_t *)j,
+                                      (uint32_t)sizeof(*j));
+        if (got < 0) {
+            return (int32_t)MCF_E_IO;
+        }
+        if ((uint32_t)got != (uint32_t)sizeof(*j)) {
+            return (int32_t)MCF_E_IO;
+        }
     }
     return (int32_t)MCF_OK;
 }
@@ -251,19 +265,22 @@ static int32_t mcf_journal_write(const mcf_config_t *cfg, const mcf_hal_t *hal,
 
     /* Erase then program: a journal update is a fresh record, not a patch. */
     r = hal->flash_erase(hal->ctx, cfg->journal_addr, (uint32_t)sizeof(*j));
-    if (r < 0) {
-        return r;
+    if (r != MCF_OK) {
+        return (r < 0) ? r : (int32_t)MCF_E_FLASH;
     }
     r = hal->flash_write(hal->ctx, cfg->journal_addr, (const uint8_t *)j,
                          (uint32_t)sizeof(*j));
-    if (r < 0) {
-        return r;
+    if (r != MCF_OK) {
+        return (r < 0) ? r : (int32_t)MCF_E_FLASH;
     }
     if (hal->flash_read != NULL) {
         uint8_t back[sizeof(mcf_journal_t)];
         r = hal->flash_read(hal->ctx, cfg->journal_addr, back, (uint32_t)sizeof(back));
         if (r < 0) {
             return r;
+        }
+        if ((uint32_t)r != (uint32_t)sizeof(back)) {
+            return (int32_t)MCF_E_IO;
         }
         if (memcmp(back, j, sizeof(back)) != 0) {
             return (int32_t)MCF_E_FLASH;
@@ -293,6 +310,9 @@ static int32_t mcf_prefix_crc(const mcf_config_t *cfg, const mcf_hal_t *hal,
         r = hal->flash_read(hal->ctx, cfg->dst_addr + off, tmp, n);
         if (r < 0) {
             return r;
+        }
+        if ((uint32_t)r != n) {
+            return (int32_t)MCF_E_IO;
         }
         crc = mcf_crc32_update(crc, tmp, n);
         off += n;
@@ -552,8 +572,11 @@ mcf_status_t mcf_session_begin(mcf_session_t *s)
                 if (n > (uint32_t)sizeof(tmp)) {
                     n = (uint32_t)sizeof(tmp);
                 }
-                if (s->cfg->old_read(s->cfg->old_ctx, off, tmp, n) < 0) {
-                    return mcf_fail(s, MCF_E_IO, MCF_SITE_OLD_READ);
+                {
+                    int32_t got = s->cfg->old_read(s->cfg->old_ctx, off, tmp, n);
+                    if (got < 0 || (uint32_t)got != n) {
+                        return mcf_fail(s, MCF_E_IO, MCF_SITE_OLD_READ);
+                    }
                 }
                 crc = mcf_crc32_update(crc, tmp, n);
                 off += n;
@@ -602,7 +625,10 @@ mcf_status_t mcf_session_begin(mcf_session_t *s)
     s->codec = NULL;
     st = s->ops->init(&s->codec, s->hdr.props, s->hdr.props_len, s->codec_ws);
     if (st != MCF_OK || s->codec == NULL) {
-        return mcf_fail(s, (mcf_status_t)st, MCF_SITE_CODEC_INIT);
+        if (st >= MCF_OK) {
+            st = MCF_E_CORRUPT;
+        }
+        return mcf_fail(s, st, MCF_SITE_CODEC_INIT);
     }
 
     /* 8. Engine. */
@@ -713,8 +739,9 @@ mcf_status_t mcf_session_finish(mcf_session_t *s)
      *    image. */
     s->state = MCF_ST_VERIFY;
     r = s->ops->finish(s->codec);
-    if (r < 0) {
-        return mcf_fail(s, (mcf_status_t)r, MCF_SITE_CODEC_FINISH);
+    if (r != MCF_OK) {
+        return mcf_fail(s, (r < 0) ? (mcf_status_t)r : MCF_E_CORRUPT,
+                        MCF_SITE_CODEC_FINISH);
     }
 
     /* 2. Whole-image CRC, read back from flash rather than trusted from the
@@ -734,6 +761,9 @@ mcf_status_t mcf_session_finish(mcf_session_t *s)
             }
             r = s->hal->flash_read(s->hal->ctx, s->cfg->dst_addr + off, tmp, n);
             if (r < 0) {
+                return mcf_fail(s, MCF_E_IO, MCF_SITE_FLASH_VERIFY);
+            }
+            if ((uint32_t)r != n) {
                 return mcf_fail(s, MCF_E_IO, MCF_SITE_FLASH_VERIFY);
             }
             crc = mcf_crc32_update(crc, tmp, n);
