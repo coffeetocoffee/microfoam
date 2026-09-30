@@ -76,10 +76,11 @@ jobs:
                  -Iinclude -Isrc"
           # The libsodium adapter is opt-in and requires a host crypto library;
           # keep it out of the bare-metal core compile unless a provider-specific
-          # embedded integration supplies its own implementation.
+          # embedded integration supplies its own implementation. The LZMA codec
+          # is compiled separately below, where the SDK include path is set.
           for f in src/*.c; do
             case "$f" in
-              src/mcf_sodium.c) continue ;;
+              src/mcf_sodium.c|src/mcf_lzma.c) continue ;;
             esac
             echo "  $f"
             arm-none-eabi-gcc $FLAGS -c "$f" -o "build-arm/$(basename "$f" .c).o"
@@ -89,13 +90,18 @@ jobs:
         run: |
           set -e
           # The LZMA codec is opt-in but supported; compile it and the vendored
-          # SDK for every core so enabling it can never break a target.
-          FLAGS="-mcpu=${{ matrix.cortex }} -mthumb -std=c99 -Os \
-                 -ffunction-sections -fdata-sections -Wall -Wextra \
+          # SDK for every core so enabling it can never break a target. Our own
+          # adapter keeps the strict warning set; the vendored SDK is built
+          # with the same relaxed flags CMake uses for it.
+          STRICT="-mcpu=${{ matrix.cortex }} -mthumb -std=c99 -Os \
+                 -ffunction-sections -fdata-sections -Wall -Wextra -Werror \
                  -Wconversion -Wsign-conversion -Wshadow -Wcast-qual \
                  -Iinclude -Isrc -Ithird_party/lzma-sdk -DMCF_ENABLE_LZMA=1"
-          arm-none-eabi-gcc $FLAGS -c src/mcf_lzma.c -o build-arm/mcf_lzma.o
-          arm-none-eabi-gcc $FLAGS -c third_party/lzma-sdk/LzmaDec.c \
+          RELAXED="-mcpu=${{ matrix.cortex }} -mthumb -std=c99 -Os \
+                 -ffunction-sections -fdata-sections -Wall -Wextra \
+                 -Ithird_party/lzma-sdk"
+          arm-none-eabi-gcc $STRICT -c src/mcf_lzma.c -o build-arm/mcf_lzma.o
+          arm-none-eabi-gcc $RELAXED -c third_party/lzma-sdk/LzmaDec.c \
             -o build-arm/lzma_sdk_LzmaDec.o
           arm-none-eabi-size build-arm/mcf_lzma.o build-arm/lzma_sdk_LzmaDec.o \
             >> "$GITHUB_STEP_SUMMARY"
