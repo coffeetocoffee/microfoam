@@ -331,11 +331,16 @@ static void test_failures(void)
         g_codec_mode = modes[i];
         g_codec_ws = WORKSPACE_SIZE;
         patch_size = build_patch();
-        status = run_case(&ops, patch_size, 256u, session, &storage, &cfg);
+        status = run_case(&ops, patch_size, 1024u, session, &storage, &cfg);
+        if (status != expected[i]) {
+            fprintf(stderr, "mode %u: got %d at site %u, want %d\n",
+                    modes[i], (int)status, (unsigned)mcf_session_error_site(session),
+                    (int)expected[i]);
+        }
         CHECK(status == expected[i], "provider status propagates without remapping");
         CHECK(mcf_session_state(session) == MCF_ST_FAILED, "provider failure marks session failed");
-    CHECK(mcf_session_error_site(session) == expected_site[i], "provider stage is recorded");
-    CHECK(g_free_calls >= freed_before, "workspace cleanup is observable after provider failure");
+        CHECK(mcf_session_error_site(session) == expected_site[i], "provider stage is recorded");
+        CHECK(g_free_calls >= freed_before, "workspace cleanup is observable after provider failure");
         if (modes[i] != MODE_INIT_FAIL) {
             CHECK(g_destroy_calls == destroyed_before + 1u, "initialized codec is destroyed on failure");
         } else {
