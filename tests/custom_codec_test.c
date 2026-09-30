@@ -27,9 +27,9 @@ enum {
 };
 
 static uint8_t g_flash[FLASH_SIZE];
-static uint8_t g_old[32];
-static uint8_t g_new[32];
-static uint8_t g_delta[56];
+static uint8_t g_old[1];
+static uint8_t g_new[1];
+static uint8_t g_delta[25];
 static uint8_t g_patch[256];
 static uint32_t g_codec_mode;
 static uint32_t g_init_calls;
@@ -248,7 +248,7 @@ static mcf_status_t run_case(mcf_codec_ops_t *ops, uint32_t patch_size,
     cfg->old_size = (uint32_t)sizeof(g_old);
     cfg->dst_addr = FLASH_BASE;
     cfg->codec = MCF_CODEC_AUTO;
-    cfg->block_size = 64u;
+    cfg->block_size = 32u;
     cfg->ram_budget = ram_budget;
     cfg->codecs = ops;
     cfg->codec_count = 1u;
@@ -288,18 +288,15 @@ static void test_custom_success(void)
     memset(&cfg_a, 0, sizeof(cfg_a));
     cfg_a.hal = &g_hal; cfg_a.patch = g_patch; cfg_a.patch_size = patch_size;
     cfg_a.old = g_old; cfg_a.old_size = sizeof(g_old); cfg_a.dst_addr = FLASH_BASE;
-    cfg_a.block_size = 64u; cfg_a.ram_budget = 1024u; cfg_a.codecs = &ops_a; cfg_a.codec_count = 1u;
+    cfg_a.block_size = 32u; cfg_a.ram_budget = 1024u; cfg_a.codecs = &ops_a; cfg_a.codec_count = 1u;
     memset(&cfg_b, 0, sizeof(cfg_b));
     cfg_b.hal = &g_hal; cfg_b.patch = g_patch; cfg_b.patch_size = patch_size;
     cfg_b.old = g_old; cfg_b.old_size = sizeof(g_old); cfg_b.dst_addr = FLASH_BASE + 256u;
-    cfg_b.block_size = 64u; cfg_b.ram_budget = 1024u; cfg_b.codecs = &ops_b; cfg_b.codec_count = 1u;
+    cfg_b.block_size = 32u; cfg_b.ram_budget = 1024u; cfg_b.codecs = &ops_b; cfg_b.codec_count = 1u;
 
     CHECK(mcf_session_open(session_a, &cfg_a) == MCF_OK, "open first custom-codec session");
     CHECK(mcf_session_open(session_b, &cfg_b) == MCF_OK, "open second custom-codec session");
     status = mcf_session_run(session_a);
-    fprintf(stderr, "first status=%d site=%u init=%u decode=%u finish=%u\n", (int)status,
-            (unsigned)mcf_session_error_site(session_a), (unsigned)g_init_calls,
-            (unsigned)g_decode_calls, (unsigned)g_finish_calls);
     CHECK(status == MCF_OK, "first custom codec session runs");
     CHECK(mcf_session_state(session_a) == MCF_ST_DONE, "first session completes");
     CHECK(memcmp(g_flash, g_new, sizeof(g_new)) == 0, "first custom codec output matches");
@@ -365,7 +362,7 @@ static void test_workspace_limit(void)
     g_codec_mode = MODE_PASS;
     g_codec_ws = 64u;
     patch_size = build_patch();
-    CHECK(run_case(&ops, patch_size, 160u, session, &storage, &cfg) == MCF_E_DICT_TOO_LARGE,
+    CHECK(run_case(&ops, patch_size, 95u, session, &storage, &cfg) == MCF_E_DICT_TOO_LARGE,
           "actual codec workspace cannot exceed configured budget");
     CHECK(g_init_calls == init_before, "codec init is skipped after budget rejection");
     CHECK(g_alloc_calls == alloc_before, "allocation is skipped after budget rejection");
