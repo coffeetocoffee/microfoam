@@ -248,7 +248,7 @@ static mcf_status_t run_case(mcf_codec_ops_t *ops, uint32_t patch_size,
     cfg->old_size = (uint32_t)sizeof(g_old);
     cfg->dst_addr = FLASH_BASE;
     cfg->codec = MCF_CODEC_AUTO;
-    cfg->block_size = 16u;
+    cfg->block_size = 32u;
     cfg->ram_budget = ram_budget;
     cfg->codecs = ops;
     cfg->codec_count = 1u;
@@ -288,11 +288,11 @@ static void test_custom_success(void)
     memset(&cfg_a, 0, sizeof(cfg_a));
     cfg_a.hal = &g_hal; cfg_a.patch = g_patch; cfg_a.patch_size = patch_size;
     cfg_a.old = g_old; cfg_a.old_size = sizeof(g_old); cfg_a.dst_addr = FLASH_BASE;
-    cfg_a.block_size = 16u; cfg_a.ram_budget = 1024u; cfg_a.codecs = &ops_a; cfg_a.codec_count = 1u;
+    cfg_a.block_size = 32u; cfg_a.ram_budget = 1024u; cfg_a.codecs = &ops_a; cfg_a.codec_count = 1u;
     memset(&cfg_b, 0, sizeof(cfg_b));
     cfg_b.hal = &g_hal; cfg_b.patch = g_patch; cfg_b.patch_size = patch_size;
     cfg_b.old = g_old; cfg_b.old_size = sizeof(g_old); cfg_b.dst_addr = FLASH_BASE + 256u;
-    cfg_b.block_size = 16u; cfg_b.ram_budget = 1024u; cfg_b.codecs = &ops_b; cfg_b.codec_count = 1u;
+    cfg_b.block_size = 32u; cfg_b.ram_budget = 1024u; cfg_b.codecs = &ops_b; cfg_b.codec_count = 1u;
 
     CHECK(mcf_session_open(session_a, &cfg_a) == MCF_OK, "open first custom-codec session");
     CHECK(mcf_session_open(session_b, &cfg_b) == MCF_OK, "open second custom-codec session");
