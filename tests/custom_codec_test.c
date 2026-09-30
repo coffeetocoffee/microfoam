@@ -27,9 +27,9 @@ enum {
 };
 
 static uint8_t g_flash[FLASH_SIZE];
-static uint8_t g_old[32];
-static uint8_t g_new[32];
-static uint8_t g_delta[56];
+static uint8_t g_old[24];
+static uint8_t g_new[24];
+static uint8_t g_delta[48];
 static uint8_t g_patch[256];
 static uint32_t g_codec_mode;
 static uint32_t g_init_calls;
@@ -297,10 +297,6 @@ static void test_custom_success(void)
     CHECK(mcf_session_open(session_a, &cfg_a) == MCF_OK, "open first custom-codec session");
     CHECK(mcf_session_open(session_b, &cfg_b) == MCF_OK, "open second custom-codec session");
     status = mcf_session_run(session_a);
-    if (status != MCF_OK) {
-        fprintf(stderr, "first session status=%d site=%u\n", (int)status,
-                (unsigned)mcf_session_error_site(session_a));
-    }
     CHECK(status == MCF_OK, "first custom codec session runs");
     CHECK(mcf_session_state(session_a) == MCF_ST_DONE, "first session completes");
     CHECK(memcmp(g_flash, g_new, sizeof(g_new)) == 0, "first custom codec output matches");
@@ -343,10 +339,6 @@ static void test_failures(void)
         }
         CHECK(status == expected[i], "provider status propagates without remapping");
         CHECK(mcf_session_state(session) == MCF_ST_FAILED, "provider failure marks session failed");
-        if (mcf_session_error_site(session) != expected_site[i]) {
-            fprintf(stderr, "mode %u site=%u expected=%u\n", modes[i],
-                    (unsigned)mcf_session_error_site(session), expected_site[i]);
-        }
         CHECK(mcf_session_error_site(session) == expected_site[i], "provider stage is recorded");
         CHECK(g_free_calls >= freed_before, "workspace cleanup is observable after provider failure");
         if (modes[i] != MODE_INIT_FAIL) {
