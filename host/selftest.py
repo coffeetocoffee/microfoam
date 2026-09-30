@@ -358,6 +358,64 @@ def test_signing() -> None:
             check(True, f"host rejects {label}")
 
 
+def test_lzma() -> None:
+    print("lzma make / apply round-trip")
+    try:
+        import lzma  # noqa: F401
+    except ImportError:
+        print("  SKIP  stdlib lzma not available")
+        return
+
+    old, new = make_firmware(77)
+    patch = M.Patch(old=old, new=new, product_id=0x1234, fw_version=0x00020000,
+                    old_version=0x00010000, codec=M.CODEC_LZMA).build()
+
+    h = M.parse_header(patch)
+    check(h.codec_id == M.CODEC_LZMA, "codec id is LZMA")
+    check(bool(h.flags & M.FLAG_CODEC_LZMA), "codec flag is LZMA")
+    check(not (h.flags & M.FLAG_CODEC_LZ4), "LZ4 flag is not set")
+
+    payload = patch[h.hdr_len:h.hdr_len + h.payload_size]
+    props, stream = payload[:M.LZMA_PROPS_LEN], payload[M.LZMA_PROPS_LEN:]
+    check(M.crc32(stream) == h.payload_crc32, "payload crc covers the LZMA stream")
+
+    v = props[0]
+    check(v % 9 == M.LZMA_DEFAULT_LC and (v // 9) % 5 == M.LZMA_DEFAULT_LP
+          and v // 45 == M.LZMA_DEFAULT_PB, "props encode lc/lp/pb")
+    check(struct.unpack_from("<I", props, 1)[0] == M.LZMA_DEFAULT_DICT,
+          "props carry the dictionary size")
+    check(h.workspace_req == M.lzma_workspace_req(
+        M.LZMA_DEFAULT_LC, M.LZMA_DEFAULT_LP, M.LZMA_DEFAULT_DICT),
+        "workspace_req matches the mirrored device formula")
+
+    delta = M.lzma_decompress(stream, props)
+    check(len(delta) == struct.unpack_from("<I", props, 5)[0],
+          "props content size matches the decoded delta")
+    check(M.bspatch(old, delta, h.new_size) == new,
+          "LZMA reconstruction is byte-exact")
+
+    patch_b = M.Patch(old=old, new=new, product_id=0x1234, fw_version=0x00020000,
+                      old_version=0x00010000, codec=M.CODEC_LZMA).build()
+    check(patch == patch_b, "LZMA make is deterministic")
+
+    ratio = len(patch) / len(new)
+    print(f"       image {len(new)} bytes -> lzma patch {len(patch)} bytes "
+          f"({ratio * 100:.1f}%)")
+    check(ratio < 0.20, "LZMA patch is under 20% of the image")
+
+    # A dictionary smaller than the default must still round-trip and must
+    # lower the declared workspace.
+    small = M.Patch(old=old, new=new, product_id=0x1234, fw_version=0x00020000,
+                    old_version=0x00010000, codec=M.CODEC_LZMA,
+                    dict_size=4096).build()
+    hs = M.parse_header(small)
+    check(hs.workspace_req < h.workspace_req, "smaller dictionary lowers workspace")
+    sp = small[hs.hdr_len:hs.hdr_len + hs.payload_size]
+    sdelta = M.lzma_decompress(sp[M.LZMA_PROPS_LEN:], sp[:M.LZMA_PROPS_LEN])
+    check(M.bspatch(old, sdelta, hs.new_size) == new,
+          "4 KB dictionary round-trips byte-exact")
+
+
 def main() -> int:
     layout_only = "--layout-only" in sys.argv
     print("Microfoam host tool self-test\n")
@@ -370,6 +428,7 @@ def main() -> int:
     test_bsdiff()
     test_lz4()
     test_pipeline()
+    test_lzma()
     test_signing()
 
     print(f"\n{PASS} checks, {FAIL} failures")

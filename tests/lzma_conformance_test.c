@@ -13,12 +13,12 @@
  * because the probability table size and the literal state index both depend on
  * those fields.
  *
- * Usage: lzma_test <vectors.bin> <plaintexts-dir>
+ * Usage: lzma_conformance_test <vectors.bin>
  *   vectors carry properties, compressed data, and a CRC of the expected
  *   plaintext, so the harness is self-contained.
  */
 
-#include "mcf_internal.h"
+#include "microfoam.h"
 #include "mcf_lzma.h"
 
 #include <stdio.h>
@@ -145,7 +145,7 @@ int main(int argc, char **argv)
     static const uint32_t blocks[] = { 256u, 512u, 1024u, 4096u, 65536u };
 
     if (argc != 2) {
-        printf("usage: lzma_test <vectors.bin>\n");
+        printf("usage: lzma_conformance_test <vectors.bin>\n");
         return 2;
     }
     f = fopen(argv[1], "rb");

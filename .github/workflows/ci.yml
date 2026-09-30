@@ -85,6 +85,21 @@ jobs:
             arm-none-eabi-gcc $FLAGS -c "$f" -o "build-arm/$(basename "$f" .c).o"
           done
 
+      - name: Compile the LZMA codec for ${{ matrix.cortex }}
+        run: |
+          set -e
+          # The LZMA codec is opt-in but supported; compile it and the vendored
+          # SDK for every core so enabling it can never break a target.
+          FLAGS="-mcpu=${{ matrix.cortex }} -mthumb -std=c99 -Os \
+                 -ffunction-sections -fdata-sections -Wall -Wextra \
+                 -Wconversion -Wsign-conversion -Wshadow -Wcast-qual \
+                 -Iinclude -Isrc -Ithird_party/lzma-sdk -DMCF_ENABLE_LZMA=1"
+          arm-none-eabi-gcc $FLAGS -c src/mcf_lzma.c -o build-arm/mcf_lzma.o
+          arm-none-eabi-gcc $FLAGS -c third_party/lzma-sdk/LzmaDec.c \
+            -o build-arm/lzma_sdk_LzmaDec.o
+          arm-none-eabi-size build-arm/mcf_lzma.o build-arm/lzma_sdk_LzmaDec.o \
+            >> "$GITHUB_STEP_SUMMARY"
+
       - name: Link and report size
         run: |
           set -e
@@ -112,6 +127,29 @@ jobs:
           mkdir -p build-py
           python host/selftest.py
 
+  lzma:
+    name: LZMA codec (host tests)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Configure with LZMA enabled
+        run: cmake -B build-lzma -DCMAKE_BUILD_TYPE=Debug -DMCF_ENABLE_LZMA=ON
+
+      - name: Build
+        run: cmake --build build-lzma --config Debug
+
+      - name: Test
+        # Includes lzma_conformance_test (67 liblzma vectors x 5 block sizes)
+        # and cross_test_lzma (host-produced LZMA patch applied by the C
+        # library). Both are the acceptance gates for calling LZMA supported.
+        run: ctest --test-dir build-lzma --output-on-failure -C Debug
+
   headers:
     name: licence headers
     runs-on: ubuntu-latest
@@ -123,7 +161,9 @@ jobs:
         run: |
           set -e
           missing=0
-          for f in $(git ls-files '*.c' '*.h' '*.py'); do
+          # third_party/ is vendored unmodified; those files carry their own
+          # upstream SPDX identifiers (LZMA-SDK-9.22), not ours.
+          for f in $(git ls-files '*.c' '*.h' '*.py' | grep -v '^third_party/'); do
             if ! head -3 "$f" | grep -q 'SPDX-License-Identifier: MIT'; then
               echo "missing SPDX header: $f"
               missing=1

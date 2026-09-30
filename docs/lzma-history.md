@@ -1,21 +1,25 @@
-# LZMA decoder - work in progress, not shipped
+# The retired from-scratch LZMA decoder
 
-**Status: 133 of 335 vector/block-size combinations decode correctly, up from 0.**
-Not in the CMake build. A patch declaring LZMA is rejected with `MCF_E_UNSUPPORTED`, which
-is the correct fail-closed behaviour.
+**Status: retired. Superseded by the vendored LZMA SDK (`third_party/lzma-sdk`).**
+The decoder reached 133 of 335 vector/block-size combinations and was not shipped.
+Rather than continue chasing the remaining defect, the project adopted the reviewed
+upstream implementation, which passes 335/335 (`tests/lzma_conformance_test.c`).
+This page is kept as a record of the defect classes and the method lessons, because
+they are the argument for using a reviewed range coder instead of a hand-written one.
 
-Whole classes now decode exactly: random data 9000/9000, a zero run 20000/20000, a
-repetitive case 16000/16000, and the `lc=0 lp=3 pb=4` sweep decodes 3000/3000 at every
-block size.
+The original work-in-progress files (`mcf_lzma.c`, `mcf_lzma.h`, `lzma_test.c`,
+`lz_callprobe.c`, `lz_oracle.py`) were removed when the SDK was adopted. The vector
+generator lives on as `host/lzma_vectors.py` and the harness as
+`tests/lzma_conformance_test.c`.
 
-## Contents
+## Contents (as they existed before retirement)
 
 | File | Purpose |
 |---|---|
-| `mcf_lzma.c` / `mcf_lzma.h` | From-scratch LZMA1 decoder: range coder, literal state machine, length and distance decoders, dictionary ring |
-| `lzma_test.c` | Conformance harness: 67 vectors x 5 block sizes |
-| `lz_callprobe.c` | Per-call state dump, for locating a divergence |
-| `../host/lzma_vectors.py` | Generates the vectors using Python's `lzma` module, i.e. liblzma |
+| `mcf_lzma.c` / `mcf_lzma.h` | From-scratch LZMA1 decoder: range coder, literal state machine, length and distance decoders, dictionary ring (removed; now `third_party/lzma-sdk` + `src/mcf_lzma.c`) |
+| `lzma_test.c` | Conformance harness: 67 vectors x 5 block sizes (now `tests/lzma_conformance_test.c`) |
+| `lz_callprobe.c` | Per-call state dump, for locating a divergence (removed) |
+| `../host/lzma_vectors.py` | Generates the vectors using Python's `lzma` module, i.e. liblzma (retained) |
 
 The **vector generator is the valuable part.** 67 vectors from liblzma covering the literal
 state machine in both its plain and match-byte forms, repeated distances, the position-slot

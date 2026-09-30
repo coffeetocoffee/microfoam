@@ -131,7 +131,9 @@ int main(int argc, char **argv)
     cfg.dst_addr   = FLASH_BASE;
     cfg.codec      = MCF_CODEC_AUTO;
     cfg.block_size = 1024u;
-    cfg.ram_budget = 8192u;
+    /* Host test: RAM is free. Must cover LZMA's probability table (~16 KB at
+     * lc=3) + dictionary (16 KB default) + the two block buffers. */
+    cfg.ram_budget = 65536u;
 
     st = mcf_session_open(s, &cfg);
     if (st == MCF_OK) { st = mcf_session_run(s); }

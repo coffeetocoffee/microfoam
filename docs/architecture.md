@@ -714,7 +714,10 @@ Let `B` = block size (default 1024), `W` = codec workspace, `S` = session state,
 | Codec | Formula | Default configuration |
 |---|---|---|
 | **LZ4** | `~256 B + ring_size` | `ring = 4·B` ⇒ **~4.3 KB** @ B=1024 |
-| **LZMA** | `probs + dict` where `probs = (1846 + 768·2^(lc+lp))·2 B` | `lc=3,lp=0` ⇒ 15,980 B; `dict=16 KB` ⇒ **~32 KB** |
+| **LZMA** | `state + probs + dict` where `probs = (1984 + 768·2^(lc+lp))·2 B` | `lc=3,lp=0` ⇒ 16,256 B; `dict=16 KB` ⇒ **~32.9 KB** |
+
+(The shipped LZMA decoder is the vendored LZMA SDK; the `1984` base-probability count and the
+dictionary rounding are mirrored in `mcf_lzma_workspace()`. See `src/mcf_lzma.h`.)
 
 The LZMA probability table is the reason the reference implementation cannot target a
 Cortex-M0: it is an unconditional floor set by the codec, not by buffer sizing. This is the
@@ -1287,6 +1290,8 @@ LZMA SDK
   Author: Igor Pavlov
   The LZMA SDK is placed in the public domain. Where a copy of the 7-Zip licence
   is retained in the distribution, its terms continue to apply to those files.
+  Vendored (unmodified) in third_party/lzma-sdk/; those files carry the SPDX
+  identifier LZMA-SDK-9.22 rather than MIT.
 ```
 
 Source files carry a single-line SPDX identifier (`SPDX-License-Identifier: MIT`) plus, where

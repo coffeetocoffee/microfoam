@@ -62,12 +62,16 @@ Matthew Endsley, itself derived from bsdiff by Colin Percival.
 LZMA SDK
 --------------------------------------------------------------------------------
 
-Referenced as the historical origin of the BSDIFF43 `offtin` sign-magnitude
-integer encoding used by the delta format. The LZMA decoder is not vendored in
-this repository; when the LZMA codec is enabled, the LZMA SDK is included as a
-separate optional component and its terms apply to those files.
+The LZMA decoder is vendored from the LZMA SDK and lives in
+third_party/lzma-sdk/ (LzmaDec.c, LzmaDec.h, 7zTypes.h, Precomp.h,
+Compiler.h). Those files are incorporated unmodified and remain subject to
+their own terms; the source files carry the SPDX identifier LZMA-SDK-9.22.
+Provenance and per-file checksums are recorded in third_party/lzma-sdk/README.md.
 
   LZMA SDK is placed in the public domain by its author, Igor Pavlov.
   Where a copy of the 7-Zip licence is retained in the distribution, its terms
   continue to apply to those files.
+
+The SDK is also the historical origin of the BSDIFF43 `offtin` sign-magnitude
+integer encoding used by the delta format.
 ================================================================================

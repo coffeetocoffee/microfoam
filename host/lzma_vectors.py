@@ -337,9 +337,14 @@ class Decoder:
 
 
 def main():
-    out = os.path.join(HERE, "lzma_vectors.bin")
+    import argparse
+    ap = argparse.ArgumentParser(description="Generate LZMA conformance vectors")
+    ap.add_argument("--out", default=os.path.join(HERE, "lzma_vectors.bin"),
+                    help="output file (default: host/lzma_vectors.bin)")
+    args = ap.parse_args()
+    out = args.out
     cases = build_vectors(out)
-    print("wrote %d vectors to %s" % (len(cases), os.path.basename(out)))
+    print("wrote %d vectors to %s" % (len(cases), out))
     total_in = total_out = 0
     for name, props, comp, raw, _ in cases:
         total_in += len(comp)

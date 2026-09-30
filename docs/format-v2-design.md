@@ -18,7 +18,7 @@ This document is a normative proposal for the next implementation phase. It inte
 
 ### Non-goals
 
-- No repair or production use of `contrib/lzma-wip/mcf_lzma.c`.
+- No change to the shipped v1 LZMA profile; the v2 profile below is new, not a revision of it.
 - No arbitrary seeking into one continuous LZMA stream.
 - No claim that encryption hides metadata in the container header. Product/version/size/codec metadata remains visible.
 - No key derivation, password handling, key storage, key rotation, or recipient management inside Microfoam. The integrator owns those policies.

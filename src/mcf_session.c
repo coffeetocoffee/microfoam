@@ -71,9 +71,8 @@ static int32_t mcf_sess_refill(void *ctx, uint8_t *buf, uint32_t cap, uint32_t *
 
     /* A stateless codec is handed the sliding window: the current position and
      * the bytes remaining from it. A codec with internal state across calls -
-     * an LZMA range coder, for instance - cannot use this and must define its
-     * own input convention; see contrib/lzma-wip/README.md. LZ4, the only
-     * shipped codec, is stateless. */
+     * an LZMA range coder, for instance - cannot use this and defines its own
+     * input convention; see src/mcf_lzma.h. LZ4 is stateless. */
     src   = s->hdr.payload + s->io.payload_pos;
     avail = s->hdr.payload_stream_len - s->io.payload_pos;
     if (avail == 0u) {

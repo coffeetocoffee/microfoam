@@ -76,6 +76,35 @@ LZ4_PROPS_LEN = 4
 # The device's LZ4 state block. Must be >= sizeof(mcf_lz4_t) in the C build.
 WS_LZ4 = 16
 
+# LZMA codec properties are 9 bytes: encoded lc/lp/pb, dictionary size, and
+# exact decompressed length. Mirrors mcf_lzma.h.
+LZMA_PROPS_LEN = 9
+LZMA_DEFAULT_LC = 3
+LZMA_DEFAULT_LP = 0
+LZMA_DEFAULT_PB = 2
+LZMA_MIN_DICT = 4096
+LZMA_DEFAULT_DICT = 16384
+# The vendored SDK's probability table: 1984 + (768 << (lc + lp)) entries of
+# 2 bytes, plus the dictionary rounded by the SDK's own mask ladder. Must match
+# src/mcf_lzma.c; the conformance test cross-checks the two.
+LZMA_NUM_BASE_PROBS = 1984
+LZMA_LIT_SIZE = 0x300
+# Fixed reservation for the decoder state block; mirrors MCF_LZMA_STATE_BYTES
+# in src/mcf_lzma.h, which is pinned so 32- and 64-bit builds agree.
+LZMA_STATE_BYTES = 256
+
+def lzma_workspace_req(lc: int, lp: int, dict_size: int) -> int:
+    probs = (LZMA_NUM_BASE_PROBS + (LZMA_LIT_SIZE << (lc + lp))) * 2
+    size = max(dict_size, LZMA_MIN_DICT)
+    if size >= (1 << 30):
+        mask = (1 << 22) - 1
+    elif size >= (1 << 22):
+        mask = (1 << 20) - 1
+    else:
+        mask = (1 << 12) - 1
+    dict_buf = (size + mask) & ~mask
+    return ((LZMA_STATE_BYTES + probs + 7) & ~7) + dict_buf
+
 DEFAULT_BLOCK_LOG2 = 10
 
 # Header layout before the signature, as (name, struct code) in wire order.
@@ -380,6 +409,48 @@ def lz4_frame(data: bytes, block_size: int) -> bytes:
 
 
 # --------------------------------------------------------------------------
+# LZMA. The encoder is Python's stdlib lzma module (liblzma), which is the
+# reference implementation for the format the device decoder consumes. The
+# device side is the vendored LZMA SDK decoder; agreement between liblzma
+# output and the SDK decoder is what the conformance vectors prove.
+# --------------------------------------------------------------------------
+
+
+def lzma_compress(delta: bytes, dict_size: int) -> bytes:
+    import lzma as _lzma
+
+    filters = [{"id": _lzma.FILTER_LZMA1, "lc": LZMA_DEFAULT_LC,
+                "lp": LZMA_DEFAULT_LP, "pb": LZMA_DEFAULT_PB,
+                "dict_size": dict_size}]
+    return _lzma.compress(delta, format=_lzma.FORMAT_RAW, filters=filters)
+
+
+def lzma_decompress(stream: bytes, props: bytes) -> bytes:
+    import lzma as _lzma
+
+    if len(props) < LZMA_PROPS_LEN:
+        raise ValueError("LZMA properties truncated")
+    v = props[0]
+    if v >= 9 * 5 * 5:
+        raise ValueError("invalid LZMA properties byte")
+    lc, lp, pb = v % 9, (v // 9) % 5, v // 45
+    dict_size = struct.unpack_from("<I", props, 1)[0]
+    content_size = struct.unpack_from("<I", props, 5)[0]
+    filters = [{"id": _lzma.FILTER_LZMA1, "lc": lc, "lp": lp, "pb": pb,
+                "dict_size": max(dict_size, LZMA_MIN_DICT)}]
+    d = _lzma.LZMADecompressor(format=_lzma.FORMAT_RAW, filters=filters)
+    out = d.decompress(stream, max_length=content_size)
+    if len(out) != content_size:
+        raise ValueError(
+            f"LZMA stream produced {len(out)} bytes, expected {content_size}")
+    return out
+
+
+def props_len_for(codec_id: int) -> int:
+    return LZMA_PROPS_LEN if codec_id == CODEC_LZMA else LZ4_PROPS_LEN
+
+
+# --------------------------------------------------------------------------
 # Signing. Ed25519 via hashlib where available, so the tool has no third-party
 # dependency. The device's built-in verifier arrives in a later phase; until
 # then the integrator supplies mcf_verify_fn.
@@ -430,14 +501,34 @@ class Patch:
     block_log2: int = DEFAULT_BLOCK_LOG2
     flags: int = 0
     private_key: Optional[bytes] = None
+    codec: int = CODEC_LZ4
+    dict_size: int = LZMA_DEFAULT_DICT
 
     def build(self) -> bytes:
         delta = bsdiff(self.old, self.new)
-        # The device decodes into a block_size buffer and rejects anything that
-        # would overflow, so the framing must respect the same field the device
-        # reads out of the header.
-        stream = lz4_frame(delta, 1 << self.block_log2)
-        payload = struct.pack("<I", len(delta)) + stream
+
+        if self.codec == CODEC_LZMA:
+            props = self._lzma_props(delta)
+            stream = props + lzma_compress(delta, self.dict_size)
+            payload_size = len(stream)
+            codec_id = CODEC_LZMA
+            codec_flag = FLAG_CODEC_LZMA
+            workspace_req = lzma_workspace_req(LZMA_DEFAULT_LC, LZMA_DEFAULT_LP,
+                                               self.dict_size)
+            # The signature covers the stream, which here excludes the props
+            # block; the props are covered by the payload CRC instead.
+            signed_stream = stream[LZMA_PROPS_LEN:]
+        else:
+            # The device decodes into a block_size buffer and rejects anything
+            # that would overflow, so the framing must respect the same field
+            # the device reads out of the header.
+            framed = lz4_frame(delta, 1 << self.block_log2)
+            stream = struct.pack("<I", len(delta)) + framed
+            payload_size = len(stream)
+            codec_id = CODEC_LZ4
+            codec_flag = FLAG_CODEC_LZ4
+            workspace_req = WS_LZ4
+            signed_stream = framed
 
         header = bytearray(HDR_LEN)
         struct.pack_into(
@@ -447,29 +538,34 @@ class Patch:
             MAGIC,
             HDR_LEN,
             (HDR_VER_MAJOR << 8) | HDR_VER_MINOR,
-            self.flags | FLAG_CODEC_LZ4,
+            self.flags | codec_flag,
             self.product_id,
             self.fw_version,
             len(self.old),
             len(self.new),
-            len(payload),
+            payload_size,
             crc32(self.old),
             crc32(self.new),
-            crc32(stream),
-            WS_LZ4,
+            crc32(signed_stream),
+            workspace_req,
             self.old_version,
-            CODEC_LZ4,
+            codec_id,
             self.block_log2,
             0,
         )
 
-        patch = bytes(header) + payload
+        patch = bytes(header) + stream
 
         if self.flags & FLAG_SIGNED:
-            sig = sign(self.private_key, patch[:SIGNED_HEADER_LEN] + stream)
+            sig = sign(self.private_key, patch[:SIGNED_HEADER_LEN] + signed_stream)
             patch = patch[:OFF_SIGNATURE] + sig + patch[OFF_SIGNATURE + SIG_SIZE:]
 
         return patch
+
+    def _lzma_props(self, delta: bytes) -> bytes:
+        encoded = (LZMA_DEFAULT_PB * 45) + (LZMA_DEFAULT_LP * 9) + LZMA_DEFAULT_LC
+        return bytes([encoded]) + struct.pack("<I", self.dict_size) + \
+            struct.pack("<I", len(delta))
 
 
 @dataclass
@@ -517,8 +613,8 @@ def parse_header(blob: bytes) -> HeaderView:
         raise SystemExit("LZ4 patch is missing FLAG_CODEC_LZ4")
     if h.codec_id == CODEC_LZMA and not (h.flags & FLAG_CODEC_LZMA):
         raise SystemExit("LZMA patch is missing FLAG_CODEC_LZMA")
-    if h.codec_id != CODEC_LZ4:
-        raise SystemExit("unsupported codec: only LZ4 is supported by the host tool")
+    if h.codec_id not in (CODEC_LZ4, CODEC_LZMA):
+        raise SystemExit("unsupported codec id in header")
     return h
 
 
@@ -628,22 +724,33 @@ def cmd_make(args: argparse.Namespace) -> int:
     new = open(args.new, "rb").read()
     key = open(args.key, "rb").read() if args.key else None
 
+    codec = {"lz4": CODEC_LZ4, "lzma": CODEC_LZMA}[args.codec]
+    if args.dict_size < LZMA_MIN_DICT:
+        raise SystemExit(f"--dict-size must be at least {LZMA_MIN_DICT}")
+
     patch = Patch(
         old=old, new=new,
         product_id=args.product, fw_version=args.version,
         old_version=args.old_version, block_log2=args.block_log2,
-        flags=(FLAG_SIGNED if key else 0) | FLAG_CODEC_LZ4,
+        flags=(FLAG_SIGNED if key else 0),
         private_key=key,
+        codec=codec,
+        dict_size=args.dict_size,
     ).build()
 
     with open(args.out, "wb") as f:
         f.write(patch)
 
     ratio = (len(patch) / len(new) * 100.0) if new else 0.0
+    workspace = (lzma_workspace_req(LZMA_DEFAULT_LC, LZMA_DEFAULT_LP, args.dict_size)
+                 if codec == CODEC_LZMA else WS_LZ4)
     print(f"old      {len(old):>9} bytes")
     print(f"new      {len(new):>9} bytes")
     print(f"patch    {len(patch):>9} bytes  ({ratio:.1f}% of new)")
-    print(f"workspace{'':>5} {WS_LZ4:>9} bytes  (LZ4)")
+    print(f"codec    {args.codec:>9}")
+    if codec == CODEC_LZMA:
+        print(f"dict     {args.dict_size:>9} bytes")
+    print(f"workspace{'':>5} {workspace:>9} bytes")
     print(f"signed   {'yes' if key else 'no'}")
     return 0
 
@@ -671,10 +778,23 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     print(f"codec          {codec}")
     print(f"block          {1 << h.block_log2} bytes")
 
+    props_len = props_len_for(h.codec_id)
     payload = blob[h.hdr_len:]
-    stream = payload[LZ4_PROPS_LEN:]
+    props = payload[:props_len]
+    stream = payload[props_len:]
     ok = crc32(stream) == h.payload_crc32
     print(f"payload crc    {'ok' if ok else 'MISMATCH'}")
+
+    if h.codec_id == CODEC_LZMA:
+        v = props[0]
+        lc, lp, pb = v % 9, (v // 9) % 5, v // 45
+        dict_size = struct.unpack_from("<I", props, 1)[0]
+        content_size = struct.unpack_from("<I", props, 5)[0]
+        print(f"lzma lc/lp/pb  {lc}/{lp}/{pb}")
+        print(f"lzma dict      {dict_size}")
+        print(f"lzma content   {content_size} bytes (decompressed delta)")
+        need = lzma_workspace_req(lc, lp, dict_size)
+        print(f"lzma workspace {need} bytes (device figure)")
     return 0 if (h.magic == MAGIC and ok) else 1
 
 
@@ -687,7 +807,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
         print("patch is not signed")
         return 1
     pub = open(args.pub, "rb").read()
-    message = blob[:SIGNED_HEADER_LEN] + blob[h.hdr_len + LZ4_PROPS_LEN:]
+    stream = blob[h.hdr_len + props_len_for(h.codec_id):h.hdr_len + h.payload_size]
+    message = blob[:SIGNED_HEADER_LEN] + stream
     if verify(pub, h.signature, message):
         print("signature ok")
         return 0
@@ -705,8 +826,12 @@ def cmd_apply(args: argparse.Namespace) -> int:
     if crc32(old[:h.old_size]) != h.old_crc32:
         raise SystemExit("base image does not match the patch")
 
-    stream = blob[h.hdr_len + LZ4_PROPS_LEN:h.hdr_len + h.payload_size]
-    delta = lz4_decompress(stream)
+    props_len = props_len_for(h.codec_id)
+    payload = blob[h.hdr_len:h.hdr_len + h.payload_size]
+    if h.codec_id == CODEC_LZMA:
+        delta = lzma_decompress(payload[props_len:], payload[:props_len])
+    else:
+        delta = lz4_decompress(payload[props_len:])
     new = bspatch(old, delta, h.new_size)
 
     if crc32(new) != h.new_crc32:
@@ -754,6 +879,11 @@ def main(argv: Optional[list] = None) -> int:
     m.add_argument("--version", type=lambda s: int(s, 0), required=True)
     m.add_argument("--old-version", type=lambda s: int(s, 0), default=0)
     m.add_argument("--block-log2", type=int, default=DEFAULT_BLOCK_LOG2)
+    m.add_argument("--codec", choices=("lz4", "lzma"), default="lz4",
+                   help="lz4 (default, smallest RAM) or lzma (smaller patch)")
+    m.add_argument("--dict-size", type=lambda s: int(s, 0), default=LZMA_DEFAULT_DICT,
+                   help=f"LZMA dictionary in bytes (default {LZMA_DEFAULT_DICT}); "
+                        "the device must have RAM for the probability table plus this")
     m.add_argument("--key", help="32- or 64-byte Ed25519 private key")
     m.set_defaults(func=cmd_make)
 

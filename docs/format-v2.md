@@ -104,13 +104,25 @@ cannot cause an allocation smaller than the codec needs.
 |---:|---:|---|
 | 0 | 4 | `content_size`, exact decompressed length |
 
-### LZMA — experimental and unsupported
+### LZMA — 9 bytes
 
-The handwritten LZMA decoder is a non-shippable WIP under `contrib/lzma-wip/` and
-currently passes only 133/335 conformance cases. Its 9-byte properties block is an
-internal experiment, not a stable wire-format contract. Production builds must leave
-`MCF_ENABLE_LZMA` off and reject LZMA patches; use a reviewed liblzma integration and
-a new format revision before standardizing LZMA.
+| Offset | Size | Field |
+|---:|---:|---|
+| 0 | 1 | encoded properties, `pb*45 + lp*9 + lc` |
+| 1 | 4 | dictionary size, little-endian |
+| 5 | 4 | `content_size`, exact decompressed length |
+
+The 9-byte block is a stable wire contract. The device decoder is the vendored LZMA SDK
+(`third_party/lzma-sdk`); it decodes raw LZMA1 with these parameters. The dictionary size
+is part of the stream's meaning — a match reaching further back cannot be resolved — so
+the host tool compresses with a dictionary the device can hold, and the declared size is
+what the device allocates. The exact `content_size` is the truncation guard:
+`mcf_lzma_finish()` reports `MCF_E_TRUNCATED` unless the decoder produced exactly that many
+bytes. The device workspace is `2 * (1984 + (768 << (lc + lp)))` (probability table) plus
+the SDK-rounded dictionary plus 256 bytes of decoder state; the host tool writes that figure
+into `workspace_req`, and a build without `-DMCF_ENABLE_LZMA=ON` rejects the patch as
+`MCF_E_UNSUPPORTED` before any allocation. See the README's Codecs section for the host
+tool's `--codec lzma` usage and `docs/lzma-history.md` for why the decoder is the SDK.
 
 ## LZ4 stream
 

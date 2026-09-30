@@ -19,7 +19,7 @@ kilobytes of RAM.
 | **Language** | C99, MISRA-friendly, `-Wall -Wextra -Wconversion` clean | |
 | **Targets verified** | arm-none-eabi-gcc: M0, M0+, M3, M4, M7, M33 | |
 | **Licence** | MIT | |
-| **Status** | 1.1.0 — see [Status](#status) | |
+| **Status** | 1.2.0 — see [Status](#status) | |
 
 ---
 
@@ -171,8 +171,9 @@ rejected if no verifier is available, never accepted unverified.
 ## Packaging
 
 A minimal Conan 2 recipe is provided in `conanfile.py` for the stabilized core library.
-It deliberately builds with experimental LZMA and optional libsodium disabled; the recipe
-is packaging support, not evidence that those optional paths are production-ready.
+It builds with LZMA and optional libsodium disabled; the recipe is packaging support, and
+both optional paths are enabled explicitly by consumers (`MCF_ENABLE_LZMA`,
+`MCF_ENABLE_SODIUM`).
 
 ## The HAL contract
 
@@ -215,12 +216,27 @@ per-session descriptor.
 | Codec | Decoder state | RAM | Ratio vs LZMA | Default |
 |---|---|---|---|---|
 | **LZ4** | ~16 B | + block buffers | −5% to −15% on binary diffs | **yes** |
-| LZMA | ~16 KB probability tables | +16–32 KB | baseline | no (`-DMCF_ENABLE_LZMA`) |
+| LZMA | probability table + dictionary | see below | baseline | no (`-DMCF_ENABLE_LZMA=ON`) |
 
-LZMA is deliberately not vendored. Its probability table is an unconditional RAM floor that
-this architecture exists to remove, so it is an opt-in component and the LZMA SDK is linked
-separately. A patch declaring LZMA on a build without it is rejected as
-`MCF_E_UNSUPPORTED` rather than handed to a stub.
+LZMA is opt-in because its probability table is an unconditional RAM floor that this
+architecture exists to remove — but when enabled it is a fully supported, CI-tested codec.
+The decoder is the vendored **LZMA SDK** (`third_party/lzma-sdk`, public domain, Igor
+Pavlov), the same implementation shipped in 7-Zip, U-Boot, and EDK2. A patch declaring LZMA
+on a build without it is rejected as `MCF_E_UNSUPPORTED` rather than handed to a stub.
+
+LZMA workspace, as reported by `mcf_lzma_workspace()` and declared in the patch header:
+
+```
+2 * (1984 + (768 << (lc + lp)))    probability table   (16,256 B at lc=3, lp=0)
++ dicBufSize                      dictionary, SDK-rounded (default 16,384 B)
++ 256 B                           decoder state
+```
+
+At the host tool's defaults (`lc=3`, `lp=0`, `pb=2`, 16 KB dictionary) that is **32,896
+bytes** of workspace — a Cortex-M4/M7-class figure, not a Cortex-M0 one. The host tool
+computes the same number and writes it to `workspace_req`, so the device refuses an
+over-budget LZMA patch during header validation, before allocating anything. Use
+`--dict-size 4096` to trade ratio for RAM (≈20 KB total).
 
 Register your own codec through `mcf_codec_ops_t`; the descriptor is caller-owned and resolved per
 session. `workspace_size` must not allocate, `init`/`decode`/`finish` return `MCF_OK` or a
@@ -262,11 +278,12 @@ different multiply routines; the library's own code is essentially identical acr
 **Constrained profile: 216 + 528 = 744 bytes of RAM**, plus a small stack for the integrity
 chunks. No heap needed, on a part with 8 KB.
 
-The LZMA codec, when enabled, adds roughly 16 KB of probability tables before any buffer.
-That is why it is opt-in and why LZ4 is the default.
+The LZMA codec, when enabled, adds its probability table (16 KB at the default
+`lc=3`) plus a dictionary (16 KB default, `--dict-size` to change) — see the
+[Codecs](#codecs) section for the exact formula. That is why it is opt-in and why
+LZ4 is the default.
 
-## Build
-ing
+## Building
 
 ```sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -280,10 +297,12 @@ ctest --test-dir build
 | `custom_codec_test` | Caller-owned codec validation, isolation, budget enforcement, and failure propagation |
 | `host_selftest` | The Python tool against an independent reference implementation |
 | `cross_test` | A Python-produced patch applied by the C library |
+| `lzma_conformance_test` | 67 liblzma vectors × 5 block sizes against the LZMA decoder (with `MCF_ENABLE_LZMA=ON`) |
+| `cross_test_lzma` | A Python-produced **LZMA** patch applied by the C library (with `MCF_ENABLE_LZMA=ON`) |
 
 | Option | Default | Effect |
 |---|---|---|
-| `MCF_ENABLE_LZMA` | `OFF` | Compile in the LZMA codec |
+| `MCF_ENABLE_LZMA` | `OFF` | Build the LZMA codec (vendored LZMA SDK) |
 | `MCF_BUILD_TESTS` | `ON` | Build the host test suite |
 | `MCF_WERROR` | `ON` | Warnings are errors |
 | `MCF_STRICT` | `ON` | Add `-Wconversion -Wsign-conversion` |
@@ -306,18 +325,23 @@ src/mcf_container.c        header parse and validation (the only place it's inte
 src/mcf_engine.c           BSDIFF43 delta loop, resumable, 32-bit clean
 src/mcf_session.c          state machine, workspace, flash write path
 src/mcf_codec_lz4.c        LZ4 block decoder
+src/mcf_lzma.c             LZMA codec adapter (opt-in)
 src/mcf_codec.c            codec registry
 src/mcf_hal.c              HAL registration, workspace allocation
 src/mcf_util.c             CRC-32, version, diagnostics
+third_party/lzma-sdk/      vendored LZMA SDK decoder (public domain)
 host/microfoam.py          patch generator, inspector, verifier, reference decoder
 host/selftest.py           host tool self-test
+host/lzma_vectors.py       generates the LZMA conformance vectors via liblzma
 tests/test_microfoam.c     fault-injection and round-trip tests
+tests/lzma_conformance_test.c  LZMA conformance harness (67 vectors x 5 block sizes)
 tests/cross_test.c         host-tool patch applied by the C library
 tests/fixtures/            deterministic firmware pair and a test key
 contrib/ed25519-wip/       rejected verifier, defect log, and conformance harness
 docs/architecture.md       the design this implements, and why
 docs/format-v2.md          the shipped v1 on-flash patch format
-docs/format-v2-design.md   proposed v2 format/API for reviewed LZMA, AEAD, and codec checkpoints
+docs/format-v2-design.md   proposed v2 format/API for AEAD and codec checkpoints
+docs/lzma-history.md       the retired from-scratch LZMA decoder's defect log
 include/microfoam_v2.h     experimental MFP2 structural inspection API (no session execution yet)
 ```
 
@@ -335,8 +359,9 @@ and all three test suites pass in both Debug and Release:
 | Suite | What it proves |
 |---|---|
 | `microfoam_tests` | 71 checks: round trip, **resume journal**, and fault injection at every stage |
-| `host_selftest` | 48 checks: 500 randomised delta round-trips, LZ4 round-trips, format layout agreement, signing |
+| `host_selftest` | 64 checks: 500 randomised delta round-trips, LZ4 and LZMA round-trips, format layout agreement, signing |
 | `cross_test` | The Python host tool's patch, applied by the C library, byte-exact |
+| `lzma_conformance_test` | 335 checks: 67 liblzma vectors at five block sizes each (opt-in build) |
 
 The cross test is the one that matters most: a library verified only against its own
 encoder proves nothing about the format. Two independently written implementations agreeing
@@ -387,11 +412,6 @@ is corruption and interruption, not forgery.
 
 **Not yet done**
 
-- **LZMA.** A from-scratch decoder was written and **not shipped**: six real defects fixed
-  and end-to-end decoding still diverges. Work, defect log, and the 67-vector liblzma
-  conformance suite are in [`contrib/lzma-wip/`](contrib/lzma-wip/README.md). A patch
-  declaring LZMA is rejected with `MCF_E_UNSUPPORTED`, which is correct fail-closed behaviour.
-  If the ratio is needed sooner, lower the LZ4 dictionary and accept a few percent.
 - **Device-side Ed25519.** A from-scratch verifier was written and **rejected**: after fixing
   twelve real defects, every primitive tested correct in isolation yet end-to-end
   verification still failed — and partway through, a transposed comparison made *forged*
@@ -409,6 +429,27 @@ is corruption and interruption, not forgery.
   The verified embedded compiler path is ARM GCC; armclang/IAR support remains an
   unverified portability target pending licensed toolchain builds.
 
+## LZMA
+
+The LZMA decoder is the vendored **LZMA SDK** — the reviewed implementation, not a
+from-scratch one. An earlier from-scratch decoder was written, fixed through fifteen
+real defects, and retired at 133/335 conformance; the defect log is preserved in
+[`docs/lzma-history.md`](docs/lzma-history.md) as a record of why the SDK is the
+recommendation for a range coder.
+
+- **Wire format.** The 9-byte properties block: encoded `lc/lp/pb`, dictionary size, exact
+  decompressed length. The exact length is what makes truncation detectable.
+- **Encode (host).** `python host/microfoam.py make ... --codec lzma [--dict-size N]`.
+  Compression is Python's stdlib `lzma` module (liblzma), the format's reference
+  implementation.
+- **Verify (device).** `tests/lzma_conformance_test.c` decodes 67 liblzma-generated vectors
+  (the full legal `lc/lp/pb` range, ring-wrap dictionaries, both literal forms, repeated
+  distances, the position-slot and align trees) at five block sizes each: **335/335**.
+  `cross_test_lzma` additionally proves a host-produced LZMA patch applies byte-exact
+  through the C session.
+- **Fail closed.** A build without `-DMCF_ENABLE_LZMA=ON` rejects an LZMA patch with
+  `MCF_E_UNSUPPORTED` during header validation, before any allocation.
+
 ## Codec vtable
 
 `decode` takes capacity and produced as **separate** parameters, and `init` returns its
@@ -422,10 +463,11 @@ int32_t (*decode)(mcf_codec_t *c,
                   const uint8_t *in, uint32_t in_avail, uint32_t *consumed);
 ```
 
-A stateless codec is handed the sliding window: current position and bytes remaining. A
-codec with internal state across calls — an LZMA range coder — cannot use that convention
-and must define its own; see `contrib/lzma-wip/README.md`. LZ4, the only shipped codec, is
-stateless.
+A stateless codec (LZ4) is handed the sliding window: current position and bytes remaining.
+A stateful codec — LZMA's range coder — cannot use that convention and defines its own:
+it captures the stream base and total length on the first call and keeps its own cursor;
+`consumed` reports the per-call delta. Both conventions are documented in their headers
+(`mcf_codec_lz4.h`, `mcf_lzma.h`).
 
 ## Known issues
 
