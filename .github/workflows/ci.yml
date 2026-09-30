@@ -134,7 +134,7 @@ jobs:
           python host/selftest.py
 
   sodium:
-    name: libsodium MFP2 boundary and tamper tests
+    name: libsodium RFC and MFP2 parser-boundary tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -150,7 +150,7 @@ jobs:
         run: cmake -B build-sodium -DCMAKE_BUILD_TYPE=Debug -DMCF_ENABLE_SODIUM=ON
       - name: Build
         run: cmake --build build-sodium --config Debug
-      - name: Test
+      - name: Test registered sodium targets
         run: ctest --test-dir build-sodium --output-on-failure -C Debug
 
   lzma:

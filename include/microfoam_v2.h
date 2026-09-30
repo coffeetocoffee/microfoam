@@ -16,6 +16,7 @@ extern "C" {
 #define MCF_V2_FLAG_ENCRYPTED 0x00000002u
 #define MCF_V2_FLAG_CODEC_LZMA 0x00000004u /* Reserved; forbidden in executable v2 profile. */
 #define MCF_V2_FLAG_CODEC_LZ4 0x00000008u
+/* Resume/chunk checkpoint execution is intentionally disabled in v2. */
 #define MCF_V2_FLAG_RESUME_CHUNKS 0x00000010u
 #define MCF_V2_KNOWN_FLAGS (MCF_V2_FLAG_SIGNED | MCF_V2_FLAG_ENCRYPTED | \
                            MCF_V2_FLAG_CODEC_LZMA | MCF_V2_FLAG_CODEC_LZ4 | \
@@ -139,7 +140,8 @@ typedef struct mcf_v2_config {
 
 /* Caller-owned bounded v2 session. The implementation authenticates the whole
  * container, decrypts records into the supplied workspace, then hands the
- * authenticated LZ4 stream to the unchanged MFP1 engine. */
+ * authenticated LZ4 stream to the unchanged MFP1 engine. Resume/checkpoint
+ * execution is disabled; MCF_V2_FLAG_RESUME_CHUNKS is rejected by the parser. */
 typedef struct mcf_v2_session {
     mcf_session_storage_t inner_storage;
     mcf_session_t *inner;

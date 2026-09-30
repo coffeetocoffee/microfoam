@@ -308,9 +308,9 @@ LZ4 is the default.
 ## Building
 
 ```sh
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-ctest --test-dir build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+ctest --test-dir build --output-on-failure -C Release
 ```
 
 | Test | What it checks |
@@ -323,12 +323,13 @@ ctest --test-dir build
 | `lzma_policy_test` | Dictionary / `lc+lp` policy rejections and diagnostics (with `MCF_ENABLE_LZMA=ON`) |
 | `lzma_conformance_test` | 67 liblzma vectors × 5 block sizes against the LZMA decoder (with `MCF_ENABLE_LZMA=ON`) |
 | `cross_test_lzma` | A Python-produced **LZMA** patch applied by the C library (with `MCF_ENABLE_LZMA=ON`) |
-| `mfp2_host_to_parser` | Sodium/PyNaCl-produced signed+encrypted MFP2 patch: structural parse succeeds, MFP1 session rejects before RAM-flash mutation |
+| `sodium_rfc_test` | libsodium adapter against published RFC 8032 values and AEAD tamper cases (with `MCF_ENABLE_SODIUM=ON`) |
+| `mfp2_host_to_session` | PyNaCl-produced signed+encrypted MFP2 patch: libsodium-backed C session applies it and checks signature/ciphertext tamper rejection before flash mutation (sodium + PyNaCl required). |
 
 | Option | Default | Effect |
 |---|---|---|
 | `MCF_ENABLE_LZMA` | `OFF` | Build the LZMA codec (vendored LZMA SDK) |
-| `MCF_ENABLE_SODIUM` | `OFF` | Build libsodium adapters and MFP2 host-to-parser boundary tests |
+| `MCF_ENABLE_SODIUM` | `OFF` | Build libsodium adapters and MFP2 host-to-session integration tests |
 | `MCF_BUILD_TESTS` | `ON` | Build the host test suite |
 | `MCF_WERROR` | `ON` | Warnings are errors |
 | `MCF_STRICT` | `ON` | Add `-Wconversion -Wsign-conversion` |
@@ -380,11 +381,13 @@ Honest accounting of what exists and what does not.
 
 **Working and tested**
 
-The production/session path supports MFP1 only. MFP2 is deliberately deferred: its public
-inspection parser validates container shape, but no MFP2 patch can be applied by a session.
+The production/session path supports MFP1 only. MFP2 remains inspection-only: its public
+parser validates container shape, and the optional sodium/PyNaCl CI test checks the producer-to-parser
+boundary plus MFP1 rejection before mutation. It does not exercise MFP2 authenticated execution;
+no MFP2 patch is applied by a session.
 
 The build is warning-clean under `-Wall -Wextra -Wconversion -Wsign-conversion -Werror`,
-and all three test suites pass in both Debug and Release:
+and the standard test configurations pass in both Debug and Release; the sodium configuration additionally requires libsodium and PyNaCl:
 
 | Suite | What it proves |
 |---|---|
@@ -404,14 +407,15 @@ version mismatch, over-budget workspace, unknown codec, future format version, w
 new-image CRC, abort, and signed-without-verifier. Each asserts a *specific* status code, and
 none may return `MCF_OK`.
 
-The resume journal is covered too: interrupt-and-continue, cleared-on-success, and four
-rejection paths — torn record, foreign patch, corrupted flash prefix, and absent journal —
-each of which must fall back to a cold start that still succeeds.
+The resume journal is covered in `microfoam_tests`: interrupt-and-continue, cleared-on-success,
+four invalid-record fallback cases, and the default-disabled behavior. Resume remains opt-in at
+runtime: both journal configuration fields are zero by default; a zero `journal_addr` means no
+checkpointing, and `mcf_resume_probe()` returns `MCF_E_NOT_FOUND`.
 
 ### Resume
 
 ```c
-cfg.journal_addr     = 0x0F000000u;  /* your NVM; 0 disables resume */
+cfg.journal_addr     = 0x0F000000u;  /* your NVM; leave zero to disable resume */
 cfg.journal_interval = 32;           /* blocks between checkpoints, 0 = 32 */
 ...
 mcf_session_open(s, &cfg);
@@ -419,10 +423,10 @@ if (mcf_resume_probe(s, &cfg) != MCF_OK) { /* no usable resume point */ }
 mcf_session_begin(s);
 ```
 
-Set `journal_addr` and the session records a resume point at every control-triple boundary.
-After a reset, `mcf_resume_probe()` validates the record and the reconstructed prefix, and
-`begin()` continues from there. A damaged, stale, or mismatched record is not an error — it
-returns `MCF_E_NOT_FOUND` and the update starts clean.
+Resume is disabled by default. Only when `journal_addr` points to a caller-provided NVM
+region does the session record checkpoints at control-triple boundaries. After a reset,
+`mcf_resume_probe()` validates the record and reconstructed prefix, and `begin()` continues
+from there. With no valid checkpoint it returns `MCF_E_NOT_FOUND` and the update starts clean.
 
 **What resume saves and what it does not.** The prefix is re-derived from the start of the
 delta stream and discarded, so the work saved is *flash programming*, not CPU. That is the
@@ -452,7 +456,10 @@ is corruption and interruption, not forgery.
   The arithmetic remains quarantined and is never part of `MCF_SOURCES`. Signed patches
   are rejected with `MCF_E_SIGNATURE` unless the application supplies a vetted provider
   through `mcf_verify_fn`. An optional libsodium adapter is available with
-  `-DMCF_ENABLE_SODIUM=ON`; its RFC 8032 test uses published TEST 1 values. Do not link
+  `-DMCF_ENABLE_SODIUM=ON`; `sodium_rfc_test` checks published RFC 8032 TEST 1 values and AEAD
+  tamper rejection. Separately, `mfp2_host_to_parser` uses PyNaCl to produce a signed+encrypted
+  patch, confirms structural parsing, then confirms MFP1 rejects it before mutation; it is not
+  an MFP2 execution test. Do not link
   `contrib/ed25519-wip/mcf_ed25519.c` into production.
 - **armclang and IAR.** The code is written with portability to both in mind (C99, no GNU
   extensions, no VLAs, no designated-initialiser dependence in the public header,

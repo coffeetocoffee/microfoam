@@ -209,5 +209,10 @@ advertised as supported only when a caller-owned v2 session implements the
 validation order above, uses vetted streaming Ed25519ph and XChaCha20-Poly1305
 providers, authenticates each record before decode/application, wipes key and
 plaintext scratch on all exits, and passes the mandatory tamper and
-host-to-device integration tests. Until then, parser success remains
-inspection-only and no MFP2 patch may be applied.
+host-to-device integration tests. The current sodium CI job runs
+`sodium_rfc_test` (RFC 8032 and AEAD tamper coverage) plus the conditionally
+registered `mfp2_host_to_parser` test. The latter generates a signed/encrypted
+patch with PyNaCl, checks structural parsing, and confirms the existing MFP1
+session rejects it before mutation; it is a parser-boundary test, not MFP2
+execution coverage. Until the v2 execution acceptance boundary is met, parser
+success remains inspection-only and no MFP2 patch may be applied by a session.

@@ -155,6 +155,7 @@ if(MCF_BUILD_TESTS)
         # provider and host PyNaCl are both available.
         add_executable(mfp2_boundary_test tests/mfp2_boundary_test.c)
         target_link_libraries(mfp2_boundary_test PRIVATE microfoam)
+        target_include_directories(mfp2_boundary_test PRIVATE ${SODIUM_INCLUDE_DIR})
         target_compile_options(mfp2_boundary_test PRIVATE ${MCF_WARNINGS})
     endif()
 
@@ -225,18 +226,20 @@ if(MCF_BUILD_TESTS)
                 RESULT_VARIABLE MCF_PYNACL_RESULT
                 OUTPUT_QUIET ERROR_QUIET)
             if(MCF_PYNACL_RESULT EQUAL 0)
-                add_test(NAME mfp2_host_to_parser
+                add_test(NAME mfp2_host_to_session
                     COMMAND ${CMAKE_COMMAND}
                         -DOLD=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/old.bin
                         -DNEW=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/new.bin
                         -DSIGNING_KEY=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/key.priv
+                        -DPUB=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/key.pub
+                        -DKEY=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/key.priv
                         -DMCF=$<TARGET_FILE:mfp2_boundary_test>
                         -DPY=${Python3_EXECUTABLE}
                         -DTOOL=${CMAKE_CURRENT_SOURCE_DIR}/host/microfoam.py
                         -DWORK=${CMAKE_CURRENT_BINARY_DIR}/mfp2
                         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/mfp2_boundary_test.cmake)
             else()
-                message(STATUS "PyNaCl unavailable: MFP2 host-to-parser test is not registered")
+                message(STATUS "PyNaCl unavailable: MFP2 host-to-session test is not registered")
             endif()
         endif()
 
