@@ -122,6 +122,10 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
     memcpy(nonce,&c->patch[MCF_V2_OFF_NONCE_PREFIX],16u);
     ad[0]='M';ad[1]='C';ad[2]='F';ad[3]='2';ad[4]='R';ad[5]='E';ad[6]='C';ad[7]=0;
     memcpy(&ad[8],hdr,v.header_len);
+    /* The payload CRC covers the ciphertext, so the producer could not have
+     * had it inside the AAD that produces that ciphertext; both sides carry
+     * this field as zero in the AAD. The stored CRC remains signature-covered. */
+    memset(&ad[8u + MCF_V2_OFF_PAYLOAD_CRC], 0, 4u);
     for(i=0u;i<v.record_count;i++) {
         uint32_t len; const uint8_t *rec;
         if(v.payload_size-pos<4u) return v2_fail(s,MCF_E_FORMAT);
@@ -129,7 +133,8 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
         if(len==0u || len>(1u<<v.record_log2) || len>v.payload_size-pos || v.payload_size-pos-len<16u) return v2_fail(s,MCF_E_FORMAT);
         rec=&c->patch[v.header_len+pos];
         v2_wr32(&ad[8u+v.header_len],i); v2_wr32(&ad[12u+v.header_len],len);
-        { uint32_t k; for(k=0u;k<8u;k++) nonce[16u+k]=(uint8_t)(i>>(8u*k)); }
+        { uint32_t k; for(k=0u;k<4u;k++) nonce[16u+k]=(uint8_t)(i>>(8u*k));
+          for(k=4u;k<8u;k++) nonce[16u+k]=0u; } /* LE64(i): high half is zero */
         r=c->aead(c->aead_ctx,s->key,nonce,rec,len,rec+len,16u,ad,16u+v.header_len,&buf[124u+out]);
         if(r!=MCF_OK) return v2_fail(s,(r<0 && r!=MCF_E_AUTH)?(mcf_status_t)r:MCF_E_AUTH);
         if (out > UINT32_MAX-len || pos > UINT32_MAX-len-16u) return v2_fail(s,MCF_E_CORRUPT);
@@ -142,16 +147,36 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
     v2_wr32(&buf[8],MCF_FLAG_CODEC_LZ4); memcpy(&buf[12],&c->patch[12],4u); memcpy(&buf[16],&c->patch[16],4u);
     memcpy(&buf[20],&c->patch[20],4u);memcpy(&buf[24],&c->patch[24],4u);v2_wr32(&buf[28],out+4u);
     memcpy(&buf[32],&c->patch[32],4u);memcpy(&buf[36],&c->patch[36],4u);
-    v2_wr32(&buf[44],c->ram_budget);memcpy(&buf[48],&c->patch[48],4u);buf[52]=MCF_CODEC_LZ4;buf[53]=10u;buf[54]=0u;buf[55]=0u;memset(&buf[56],0,64u);
+    /* The synthetic header must declare what the inner session will actually
+     * consume from ITS workspace slice: two decode/apply blocks plus the LZ4
+     * state. Declaring the caller's whole budget here makes the inner session's
+     * own budget check (block_size > (budget - workspace_req)/2) reject. */
+    {
+        uint32_t log2, inner_ws;
+        /* The producer chunks the framed LZ4 stream at (1<<record_log2)-64, so
+         * each framed block decodes to at most 1<<record_log2 bytes. The inner
+         * decode window must therefore be the MFP2 record size, not the caller's
+         * MFP1 block_size and not the ciphertext length. */
+        log2 = v.record_log2;
+        inner_ws = 2u * ((uint32_t)1u << log2) + 16u; /* 2 blocks + LZ4 state */
+        v2_wr32(&buf[44], inner_ws);
+        need = c->workspace_size - total_need;
+        if (need < inner_ws) return v2_fail(s, MCF_E_DICT_TOO_LARGE);
+        /* Codec id and block_log2 must agree with the framed stream. */
+        buf[52] = (uint8_t)MCF_CODEC_LZ4;
+        buf[53] = (uint8_t)log2;
+        buf[54] = 0u; buf[55] = 0u;
+        memset(&buf[56], 0, 64u);
+    }
     v2_wr32(&buf[120],delta_size);
-    v2_wr32(&buf[28],out+4u); v2_wr32(&buf[40],mcf_crc32(&buf[120],out+4u));
+    v2_wr32(&buf[28],out+4u); /* MFP1 payload_crc32 covers the framed stream only, not the props block */
     if (!v2_add_u32(124u, out, &total_need) || total_need > c->workspace_size ||
-        v.workspace_req > c->ram_budget || c->ram_budget - v.workspace_req < 124u) return v2_fail(s,MCF_E_DICT_TOO_LARGE);
-    need=c->workspace_size-total_need;
+        v.workspace_req > c->ram_budget) return v2_fail(s,MCF_E_DICT_TOO_LARGE);
+    v2_wr32(&buf[40],mcf_crc32(&buf[124u],out));
     memset(&s->inner_cfg,0,sizeof(s->inner_cfg)); s->inner_cfg.hal=c->hal;s->inner_cfg.patch=buf;s->inner_cfg.patch_size=124u+out;
     s->inner_cfg.old=c->old;s->inner_cfg.old_read=c->old_read;s->inner_cfg.old_ctx=c->old_ctx;s->inner_cfg.old_size=c->old_size;s->inner_cfg.dst_addr=c->dst_addr;
-    s->inner_cfg.codec=MCF_CODEC_LZ4;s->inner_cfg.block_size=c->block_size;s->inner_cfg.ram_budget=(need<c->ram_budget)?need:c->ram_budget;
-    s->inner_cfg.workspace=(need!=0u)?&buf[124u+out]:NULL;s->inner_cfg.workspace_size=need;s->inner_cfg.progress=c->progress;s->inner_cfg.progress_ctx=c->progress_ctx;s->inner_cfg.commit=c->commit;s->inner_cfg.commit_ctx=c->commit_ctx;
+    s->inner_cfg.codec=MCF_CODEC_LZ4;s->inner_cfg.block_size=(uint32_t)1u<<v.record_log2;s->inner_cfg.ram_budget=need;
+    s->inner_cfg.workspace=&buf[124u+out];s->inner_cfg.workspace_size=need;s->inner_cfg.progress=c->progress;s->inner_cfg.progress_ctx=c->progress_ctx;s->inner_cfg.commit=c->commit;s->inner_cfg.commit_ctx=c->commit_ctx;
     s->inner=(mcf_session_t *)(void *)&s->inner_storage; r=mcf_session_open(s->inner,&s->inner_cfg); if(r!=MCF_OK) return v2_fail(s,(mcf_status_t)r);
     r=mcf_session_begin(s->inner); if(r!=MCF_OK) return v2_fail(s,(mcf_status_t)r);
     v2_wipe(s->key,(uint32_t)sizeof(s->key)); s->state=MCF_ST_HEADER; s->status=MCF_OK; return MCF_OK;

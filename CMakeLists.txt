@@ -230,9 +230,6 @@ if(MCF_BUILD_TESTS)
                     COMMAND ${CMAKE_COMMAND}
                         -DOLD=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/old.bin
                         -DNEW=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/new.bin
-                        -DSIGNING_KEY=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/key.priv
-                        -DPUB=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/key.pub
-                        -DKEY=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/key.priv
                         -DMCF=$<TARGET_FILE:mfp2_boundary_test>
                         -DPY=${Python3_EXECUTABLE}
                         -DTOOL=${CMAKE_CURRENT_SOURCE_DIR}/host/microfoam.py

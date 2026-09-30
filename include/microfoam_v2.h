@@ -76,6 +76,9 @@ typedef struct mcf_v2_view {
     uint16_t tlv_len;
     uint32_t record_count;
     uint32_t codec_profile;
+    /* Largest single record ciphertext the framing walk observed; execution
+     * uses it to size the inner decode window. Zero until parse succeeds. */
+    uint32_t record_max_block;
     const uint8_t *tlvs;
     const uint8_t *records;
 } mcf_v2_view_t;

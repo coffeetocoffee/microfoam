@@ -42,7 +42,7 @@ int main(void)
     uint8_t key[crypto_aead_xchacha20poly1305_ietf_KEYBYTES];
     uint8_t nonce[crypto_aead_xchacha20poly1305_ietf_NPUBBYTES];
     uint8_t msg[] = "MFP2 authenticated record";
-    uint8_t ad[] = "MCF2REC\\0header";
+    uint8_t ad[] = {'M','C','F','2','R','E','C',0,'h','e','a','d','e','r'};
     uint8_t cipher[sizeof(msg) - 1u];
     uint8_t plain[sizeof(msg) - 1u];
     uint8_t tag[crypto_aead_xchacha20poly1305_ietf_ABYTES];
@@ -50,6 +50,12 @@ int main(void)
     mcf_sodium_aead_ctx_t aead;
     mcf_sodium_verify_ctx_t ctx;
     int ok = 1;
+    int check_no = 0;
+#define CHECK(expr, label) do { \
+    int passed = (expr); \
+    check_no++; \
+    if (!passed) { fprintf(stderr, "FAIL %d: %s\n", check_no, label); ok = 0; } \
+} while (0)
 
     if (sodium_init() < 0 || !from_hex(pk, sizeof(pk), pk_hex) ||
         !from_hex(sig, sizeof(sig), sig_hex)) return 2;
@@ -58,30 +64,34 @@ int main(void)
     ctx.alloc = test_alloc;
     ctx.free = test_free;
 
-    ok &= (mcf_sodium_verify(&ctx, sig, sizeof(sig), &dummy, 0u,
-                             &dummy, 0u) == MCF_OK);
+    CHECK(mcf_sodium_verify(&ctx, sig, sizeof(sig), &dummy, 0u,
+                            &dummy, 0u) == MCF_OK, "Ed25519 valid signature");
     sig[0] ^= 1u;
-    ok &= (mcf_sodium_verify(&ctx, sig, sizeof(sig), &dummy, 0u,
-                             &dummy, 0u) == MCF_E_SIGNATURE);
+    CHECK(mcf_sodium_verify(&ctx, sig, sizeof(sig), &dummy, 0u,
+                            &dummy, 0u) == MCF_E_SIGNATURE, "Ed25519 tampered signature");
 
     memset(key, 0x31, sizeof(key));
     memset(nonce, 0x42, sizeof(nonce));
     aead.key = key;
     aead.nonce = nonce;
-    ok &= (crypto_aead_xchacha20poly1305_ietf_encrypt_detached(
-               cipher, tag, &clen, msg, sizeof(msg) - 1u, ad, sizeof(ad) - 1u,
-               NULL, nonce, key) == 0);
-    ok &= (clen == sizeof(tag));
-    ok &= (mcf_sodium_xchacha20poly1305_decrypt(
-               &aead, cipher, sizeof(cipher), tag, sizeof(tag), ad,
-               sizeof(ad) - 1u, plain) == MCF_OK);
-    ok &= (memcmp(plain, msg, sizeof(plain)) == 0);
+    CHECK(crypto_aead_xchacha20poly1305_ietf_encrypt_detached(
+              cipher, tag, &clen, msg, sizeof(msg) - 1u, ad, sizeof(ad) - 1u,
+              NULL, nonce, key) == 0, "AEAD encrypt");
+    CHECK(clen == (unsigned long long)crypto_aead_xchacha20poly1305_ietf_ABYTES,
+          "detached encrypt reports the tag length");
+    CHECK(mcf_sodium_xchacha20poly1305_decrypt(
+              &aead, cipher, sizeof(cipher), tag, sizeof(tag), ad,
+              sizeof(ad) - 1u, plain) == MCF_OK, "AEAD valid tag");
+    CHECK(memcmp(plain, msg, sizeof(plain)) == 0, "AEAD plaintext round trip");
     tag[0] ^= 1u;
     memset(plain, 0xA5, sizeof(plain));
-    ok &= (mcf_sodium_xchacha20poly1305_decrypt(
-               &aead, cipher, sizeof(cipher), tag, sizeof(tag), ad,
-               sizeof(ad) - 1u, plain) == MCF_E_AUTH);
-    ok &= (plain[0] == 0xA5u);
+    CHECK(mcf_sodium_xchacha20poly1305_decrypt(
+              &aead, cipher, sizeof(cipher), tag, sizeof(tag), ad,
+              sizeof(ad) - 1u, plain) == MCF_E_AUTH, "AEAD tampered tag");
+    /* libsodium wipes the plaintext output on authentication failure; the
+     * contract the adapter documents is that no plaintext is exposed. */
+    CHECK(plain[0] != msg[0], "AEAD failure exposes no plaintext");
+#undef CHECK
     if (!ok) {
         fprintf(stderr, "libsodium RFC/tamper tests failed\n");
         return 1;

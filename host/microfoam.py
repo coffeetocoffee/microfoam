@@ -533,9 +533,20 @@ def _sodium():
         raise SystemExit("MFP2 requires PyNaCl/libsodium with Ed25519ph and XChaCha20-Poly1305") from exc
 
 
-def _v2_header_for_auth(header: bytes) -> bytes:
+def _v2_header_for_sig(header: bytes) -> bytes:
     h = bytearray(header)
-    h[V2_OFF_SIGNATURE:V2_OFF_SIGNATURE + SIG_SIZE] = b"\\0" * SIG_SIZE
+    h[V2_OFF_SIGNATURE:V2_OFF_SIGNATURE + SIG_SIZE] = b"\0" * SIG_SIZE
+    return bytes(h)
+
+
+def _v2_header_for_aad(header: bytes) -> bytes:
+    # AEAD associated data covers the header with the signature zeroed and the
+    # payload CRC field carried as zero: that CRC covers the ciphertext, which
+    # depends on this AAD, so the stored value cannot appear here. Both sides
+    # construct the AAD this way; the stored CRC remains signature-covered.
+    h = bytearray(header)
+    h[V2_OFF_SIGNATURE:V2_OFF_SIGNATURE + SIG_SIZE] = b"\0" * SIG_SIZE
+    h[40:44] = b"\0" * 4
     return bytes(h)
 
 
@@ -559,7 +570,7 @@ def _ed25519ph_verify(public_key: bytes, signature: bytes, message: bytes) -> bo
             return False
         st = s["crypto_sign_ed25519ph_state"]()
         s["crypto_sign_ed25519ph_update"](st, message)
-        return s["crypto_sign_ed25519ph_final_verify"](st, signature, public_key) == 0
+        return bool(s["crypto_sign_ed25519ph_final_verify"](st, signature, public_key))
     except Exception:
         return False
 
@@ -611,7 +622,7 @@ def parse_v2_header(blob: bytes) -> V2HeaderView:
     if tlv_len != hlen - V2_HEADER_MIN or flags != V2_REQUIRED_FLAGS or codec != CODEC_LZ4 or not 8 <= rlog2 <= 13: raise SystemExit("unsupported MFP2 profile")
     record_count = struct.unpack_from("<I", blob, 160)[0]
     if not record_count or struct.unpack_from("<I", blob, 164)[0] != 0: raise SystemExit("invalid MFP2 record/profile fields")
-    if blob[168:192] != b"\\0" * 24 or not blob[120:136].strip(b"\\0") or not blob[136+16:160] == b"\\0" * 8: raise SystemExit("invalid MFP2 reserved/key fields")
+    if blob[168:192] != b"\0" * 24 or not blob[120:136].strip(b"\0") or not blob[136+16:160] == b"\0" * 8: raise SystemExit("invalid MFP2 reserved/key fields")
     tlvs = blob[192:hlen]
     if any(tlvs[i] for i in range(0, len(tlvs), 4) if i + 3 >= len(tlvs)): raise SystemExit("nonzero MFP2 TLV padding")
     return V2HeaderView(hlen, ver, flags, product, fw, oldsz, newsz, psz, oldcrc, newcrc, pcrc, ws, oldver, codec, rlog2, tlv_len, blob[56:120], blob[120:136], blob[136:160], struct.unpack_from("<I", blob, 160)[0], struct.unpack_from("<I", blob, 164)[0], blob[192:hlen])
@@ -641,13 +652,23 @@ class V2Patch:
         struct.pack_into("<BBH", hdr, 52, CODEC_LZ4, self.record_log2, len(self.tlvs))
         hdr[120:136] = self.key_id; hdr[136:152] = self.nonce_prefix
         struct.pack_into("<II", hdr, 160, len(records), 0); hdr[192:] = self.tlvs
+        # The record area length is fixed by the plaintext record sizes, and
+        # the payload CRC is computed over the ciphertext, so both are written
+        # to the header only AFTER encryption. For the per-record AAD the CRC
+        # field is therefore zero (the value the device also sees when it
+        # rebuilds the header before this field exists in its view); the final
+        # stored CRC is covered by the Ed25519ph signature.
+        area_len = sum(4 + len(r) + 16 for r in records)
+        struct.pack_into("<I", hdr, 28, area_len)
+        struct.pack_into("<I", hdr, 40, 0)
         area = bytearray()
         for i, plain in enumerate(records):
-            clen = len(plain); aad = b"MCF2REC\\0" + _v2_header_for_auth(hdr) + struct.pack("<II", i, clen)
-            enc = _v2_aead(self.key, self.nonce_prefix + struct.pack("<Q", i), plain, aad)
+            clen = len(plain); aad = b"MCF2REC\0" + _v2_header_for_aad(hdr) + struct.pack("<II", i, clen)
+            enc = _v2_aead(self.key, self.nonce_prefix[:V2_NONCE_PREFIX_SIZE] + struct.pack("<Q", i), plain, aad)
             area += struct.pack("<I", clen) + enc
-        struct.pack_into("<II", hdr, 28, len(area), crc32(area))
-        sigmsg = b"MCF2SIG\\0" + _v2_header_for_auth(hdr) + area
+        assert len(area) == area_len, "record area length drifted"
+        struct.pack_into("<I", hdr, 40, crc32(area))
+        sigmsg = b"MCF2SIG\0" + _v2_header_for_sig(hdr) + area
         hdr[56:120] = _ed25519ph_sign(self.private_key, sigmsg)
         return bytes(hdr) + bytes(area)
 
@@ -657,7 +678,7 @@ def verify_v2(blob: bytes, public_key: bytes, key: Optional[bytes] = None, apply
     if h.payload_size != len(blob) - h.header_len: raise SystemExit("MFP2 payload length mismatch")
     area = blob[h.header_len:]
     if crc32(area) != h.payload_crc32: raise SystemExit("MFP2 payload CRC mismatch")
-    if not _ed25519ph_verify(public_key, h.signature, b"MCF2SIG\\0" + _v2_header_for_auth(blob[:h.header_len]) + area): raise SystemExit("MFP2 signature invalid")
+    if not _ed25519ph_verify(public_key, h.signature, b"MCF2SIG\0" + _v2_header_for_sig(blob[:h.header_len]) + area): raise SystemExit("MFP2 signature invalid")
     if key is None: return b""
     if len(key) != 32: raise SystemExit("MFP2 symmetric key must be 32 bytes")
     stream = bytearray(); pos = 0
@@ -666,8 +687,8 @@ def verify_v2(blob: bytes, public_key: bytes, key: Optional[bytes] = None, apply
         clen = struct.unpack_from("<I", area, pos)[0]; pos += 4
         if not 1 <= clen <= (1 << h.record_log2) or pos + clen + 16 > len(area): raise SystemExit("invalid MFP2 record length")
         enc = area[pos:pos + clen + 16]; pos += clen + 16
-        aad = b"MCF2REC\\0" + _v2_header_for_auth(blob[:h.header_len]) + struct.pack("<II", i, clen)
-        try: stream += _v2_open(key, h.nonce_prefix + struct.pack("<Q", i), enc, aad)
+        aad = b"MCF2REC\0" + _v2_header_for_aad(blob[:h.header_len]) + struct.pack("<II", i, clen)
+        try: stream += _v2_open(key, h.nonce_prefix[:V2_NONCE_PREFIX_SIZE] + struct.pack("<Q", i), enc, aad)
         except Exception as exc: raise SystemExit("MFP2 record authentication failed") from exc
     if pos != len(area): raise SystemExit("MFP2 trailing record bytes")
     delta = lz4_decompress(bytes(stream)); result = bspatch(old, delta, h.new_size)

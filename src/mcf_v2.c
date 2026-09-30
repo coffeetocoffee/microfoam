@@ -68,7 +68,8 @@ static mcf_status_t mcf_v2_walk_records(const uint8_t *records,
                                         uint32_t payload_size,
                                         uint32_t record_count,
                                         uint32_t record_log2,
-                                        int encrypted)
+                                        int encrypted,
+                                        uint32_t *max_block)
 {
     uint32_t pos = 0u;
     uint32_t i;
@@ -83,6 +84,9 @@ static mcf_status_t mcf_v2_walk_records(const uint8_t *records,
         pos += 4u;
         if (len == 0u || len > (1u << record_log2) || len > payload_size - pos) {
             return MCF_E_FORMAT;
+        }
+        if (len > *max_block) {
+            *max_block = len;
         }
         pos += len;
         if (encrypted) {
@@ -162,8 +166,10 @@ mcf_status_t mcf_v2_parse(const uint8_t *patch, uint32_t patch_size,
 
     /* The record area must frame exactly. Done here, not lazily, so a validated
      * view is a guarantee rather than an invitation to re-scan. */
+    out->record_max_block = 0u;
     st = mcf_v2_walk_records(&patch[header_len], payload_size, records, log2,
-                             (flags & MCF_V2_FLAG_ENCRYPTED) != 0u);
+                             (flags & MCF_V2_FLAG_ENCRYPTED) != 0u,
+                             &out->record_max_block);
     if (st != MCF_OK) {
         return st;
     }
