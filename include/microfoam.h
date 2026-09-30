@@ -27,7 +27,7 @@ extern "C" {
  * ======================================================================== */
 
 #define MCF_VERSION_MAJOR 1u
-#define MCF_VERSION_MINOR 3u
+#define MCF_VERSION_MINOR 4u
 #define MCF_VERSION_PATCH 0u
 
 /* Packed as (major << 16) | (minor << 8) | patch. */
