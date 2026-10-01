@@ -19,7 +19,7 @@ kilobytes of RAM.
 | **Language** | C99, MISRA-friendly, `-Wall -Wextra -Wconversion` clean | |
 | **Targets verified** | arm-none-eabi-gcc: M0, M0+, M3, M4, M7, M33 | |
 | **Licence** | MIT | |
-| **Status** | 1.5.1 — see [Status](#status) | |
+| **Status** | 1.5.2 — see [Status](#status) | |
 
 ---
 

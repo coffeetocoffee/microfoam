@@ -479,6 +479,40 @@ def test_v2() -> None:
     else: check(False, "MFP2 tamper rejected")
 
 
+def test_v2_kat() -> None:
+    """Pinned known-answer test for the exact MFP2 signed byte sequence.
+
+    Fixed keys, fixed images, fixed nonce: rebuilds the patch and compares the
+    Ed25519ph signature and header CRC figures against values generated and
+    cross-verified once. End-to-end agreement (sign here, verify there) proves
+    both sides read the same bytes; this additionally proves the bytes do not
+    drift over time.
+    """
+    print("MFP2 pinned known-answer test")
+    try:
+        from nacl.signing import SigningKey
+    except Exception as exc:
+        print(f"  SKIP  PyNaCl unavailable: {exc}")
+        return
+    seed = bytes(range(32))       # Ed25519 signing seed
+    key = bytes(range(32, 64))    # XChaCha20-Poly1305 symmetric key
+    pub = bytes(SigningKey(seed).verify_key)
+    old = bytes((i * 7 + 3) & 0xFF for i in range(1500))
+    new = bytes((i * 5 + 11) & 0xFF for i in range(1600))
+    patch = M.V2Patch(old, new, product_id=0x1234, fw_version=2, old_version=1,
+                      private_key=seed, key=key, key_id=bytes(range(16)),
+                      nonce_prefix=bytes(range(16, 32)), record_log2=8).build()
+    h = M.parse_v2_header(patch)
+    check(h.payload_size == 1870 and h.record_count == 10, "KAT structure")
+    check(M.crc32(old) == 3091840966 and M.crc32(new) == 3330603793, "KAT image CRCs")
+    check(h.payload_crc32 == 2643552063, "KAT payload CRC")
+    check(h.signature.hex() ==
+          "4cc98a0492159465aec27a1c247417255a356aaf954ff958daa4c2addcab8dbd"
+          "e661c067ee745e4b0cd18ec4ae091da6be5e5973f13cf192fd1733acc9b5bd0d",
+          "KAT Ed25519ph signature")
+    check(M.verify_v2(patch, pub, key=key, old=old) == new, "KAT round-trip")
+
+
 def test_lzma_policy_guard() -> None:
     """The host side of the LZMA props contract.
 
@@ -522,6 +556,7 @@ def main() -> int:
     test_lzma_policy_guard()
     test_signing()
     test_v2()
+    test_v2_kat()
 
     print(f"\n{PASS} checks, {FAIL} failures")
     return 0 if FAIL == 0 else 1
