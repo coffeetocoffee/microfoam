@@ -219,16 +219,35 @@ typedef struct mcf_v2_session {
     uint32_t next_ckpt_out;     /*!< Output offset of the next checkpoint.    */
     uint32_t flash_block;       /*!< Erase granularity, from the HAL.         */
 
-    /* Checkpoint walk cursor: the record whose plaintext starts at decoded
-     * offset wk_d, the plaintext offset of that record within the feed, and
-     * the running decoded base. The decoded length of a record cannot be read
-     * from the framing (it is the LZ4 blocks' output length), so the walk
-     * re-parses block headers from the plaintext. It starts where the feed
-     * starts: (0, 0, 0) for a cold run, the resume record otherwise. */
-    uint32_t wk_index;
-    uint32_t wk_plain;
-    uint32_t wk_d;
-    uint32_t feed_len;          /*!< Bytes of record plaintext in the feed.   */
+    /* Streaming feed state. The framed LZ4 stream is decrypted one record at a
+     * time into `win` and consumed as the engine asks for it, so the whole
+     * payload is never resident. `win` is win_cap bytes: two maximum-size
+     * records plus the four-byte terminal marker, enough for the sliding
+     * window and to synthesise the end-of-stream block. */
+    uint8_t *win;
+    uint32_t win_cap;
+    uint32_t win_base;          /*!< Framed-stream offset of `win[0]`.        */
+    uint32_t win_len;           /*!< Framed-stream bytes currently in `win`.  */
+    uint32_t win_end;           /*!< Set once the terminal marker is appended. */
+    uint32_t cur_record;        /*!< Next record to decrypt into the window.  */
+    uint32_t feed_off;          /*!< Framing offset of that record's length.  */
+    uint32_t hdr_len;           /*!< Real MFP2 header length; AAD rebuild.    */
+    uint8_t *ad;                /*!< AAD buffer: "MCF2REC\0" + header body
+                                 *    (signature and payload-CRC zeroed) +
+                                 *    index + length. Lives in the workspace.  */
+    uint32_t ad_len;            /*!< 16 + header_len.                          */
+    uint8_t  nonce_pre[MCF_V2_NONCE_SIZE];
+    uint32_t d_base;            /*!< Decoded offset the next record starts at.*/
+
+    /* Recently decrypted records, so the checkpoint can name the record
+     * containing an engine position without resident plaintext. The engine
+     * trails the feed by at most one window, so the containing record is
+     * always among the newest few. `ring[0]` is the oldest entry. */
+    struct {
+        uint32_t index;         /*!< Record index, or 0xFFFFFFFF if empty.    */
+        uint32_t base_d;        /*!< Decoded offset its plaintext starts at.  */
+        uint32_t dlen;          /*!< Decoded length of its plaintext.         */
+    } ring[4];
 
     mcf_v2_view_t view;         /*!< Parsed container view; valid after open().*/
 } mcf_v2_session_t;

@@ -73,8 +73,19 @@ static int32_t mcf_sess_refill(void *ctx, uint8_t *buf, uint32_t cap, uint32_t *
      * the bytes remaining from it. A codec with internal state across calls -
      * an LZMA range coder, for instance - cannot use this and defines its own
      * input convention; see src/mcf_lzma.h. LZ4 is stateless. */
-    src   = s->hdr.payload + s->io.payload_pos;
-    avail = s->hdr.payload_stream_len - s->io.payload_pos;
+    if (s->feed != NULL) {
+        /* MFP2 streaming: the framed stream is produced record by record and is
+         * never wholly resident. The feed answers with the run starting at the
+         * requested framed-stream position. */
+        int32_t fs = s->feed(s->feed_ctx, s->io.payload_pos, &src, &avail);
+        if (fs != MCF_OK) {
+            s->site = MCF_SITE_CODEC_DECODE;
+            return (fs < 0) ? fs : (int32_t)MCF_E_CORRUPT;
+        }
+    } else {
+        src   = s->hdr.payload + s->io.payload_pos;
+        avail = s->hdr.payload_stream_len - s->io.payload_pos;
+    }
     if (avail == 0u) {
         s->io.stream_end = 1;
         *eof = 1;
@@ -508,10 +519,18 @@ mcf_status_t mcf_session_begin(mcf_session_t *s)
     }
 
     /* 1. Parse and validate the container. The only place the header is
-     *    interpreted; everything below trusts the result. */
-    st = mcf_hdr_parse(s->hal, s->cfg, s->cfg->patch, s->cfg->patch_size, &s->hdr, &site);
-    if (st != MCF_OK) {
-        return mcf_fail(s, st, site);
+     *    interpreted; everything below trusts the result. A streaming caller
+     *    (MFP2) supplies a view it has already validated and authenticated, so
+     *    parsing and the resident-signature check are skipped for it. */
+    if (s->hdr_ready) {
+        /* The streamed payload is not the resident patch, so the signed-stream
+         * verification that mcf_hdr_verify performs does not apply; the caller
+         * authenticated the equivalent bytes itself. */
+    } else {
+        st = mcf_hdr_parse(s->hal, s->cfg, s->cfg->patch, s->cfg->patch_size, &s->hdr, &site);
+        if (st != MCF_OK) {
+            return mcf_fail(s, st, site);
+        }
     }
 
     s->state      = MCF_ST_VALIDATE;
@@ -525,8 +544,9 @@ mcf_status_t mcf_session_begin(mcf_session_t *s)
     }
 
     /* 2. Signature, when the patch claims to be signed. Fails closed: with no
-     *    verifier available the patch is rejected, never accepted unverified. */
-    if ((s->hdr.flags & MCF_FLAG_SIGNED) != 0u) {
+     *    verifier available the patch is rejected, never accepted unverified.
+     *    A streamed MFP2 run has already verified its own signed container. */
+    if (!s->hdr_ready && (s->hdr.flags & MCF_FLAG_SIGNED) != 0u) {
         st = mcf_hdr_verify(s->hal, s->cfg->verify, s->cfg->verify_ctx,
                             s->cfg->patch, &s->hdr);
         if (st != MCF_OK) {
@@ -535,8 +555,10 @@ mcf_status_t mcf_session_begin(mcf_session_t *s)
     }
 
     /* 3. Payload integrity, for every patch, signed or not. Streamed in small
-     *    chunks so the cost does not scale with patch size. */
-    {
+     *    chunks so the cost does not scale with patch size. A streaming caller
+     *    has already checked integrity over the authenticated ciphertext, so
+     *    the walk is skipped for it. */
+    if (!s->skip_payload_crc) {
         uint32_t crc = mcf_crc32_init();
         uint32_t off = 0u;
         uint8_t  tmp[64];
@@ -720,6 +742,23 @@ void mcf_session_set_stop(mcf_session_t *s, uint32_t out_off)
     if (s != NULL) {
         s->engine.stop_at = out_off;
     }
+}
+
+void mcf_session_set_streamed(mcf_session_t *s, const mcf_hdr_view_t *hdr,
+                              mcf_payload_feed_fn feed, void *ctx)
+{
+    if (s == NULL || hdr == NULL || feed == NULL) {
+        return;
+    }
+    /* The caller owns validation and authentication of both the header and the
+     * streamed payload, so the resident parse, signature check, and payload-CRC
+     * walk are all bypassed; the view is copied because the caller's storage
+     * need not outlive this call. */
+    s->hdr              = *hdr;
+    s->feed             = feed;
+    s->feed_ctx         = ctx;
+    s->hdr_ready        = 1;
+    s->skip_payload_crc = 1;
 }
 
 void mcf_session_restore(mcf_session_t *s, const mcf_resume_point_t *pt)

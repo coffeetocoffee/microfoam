@@ -119,6 +119,14 @@ mcf_status_t mcf_hdr_verify(const mcf_hal_t *hal, mcf_verify_fn verify,
 /* Refill the engine's raw buffer with decompressed delta bytes. Sets *n to the
  * number produced and *eof once the stream is fully consumed. */
 typedef int32_t (*mcf_refill_fn)(void *ctx, uint8_t *buf, uint32_t cap, uint32_t *n, int *eof);
+
+/* Source of compressed payload bytes, used by the MFP2 streaming layer in place
+ * of the resident hdr.payload span. `pos` is the framed-stream offset of the
+ * first byte the session wants next; the callback returns a pointer to the
+ * contiguous run that starts exactly there, with its length. A zero length
+ * means end of stream. It never requires the whole stream to be resident. */
+typedef int32_t (*mcf_payload_feed_fn)(void *ctx, uint32_t pos,
+                                       const uint8_t **src, uint32_t *avail);
 /* Emit reconstructed bytes. */
 typedef int32_t (*mcf_emit_fn)(void *ctx, const uint8_t *p, uint32_t len);
 /* Read `len` base-image bytes at `off`. */
@@ -336,6 +344,18 @@ struct mcf_session {
 
     mcf_engine_t engine;
     int          engine_finished;
+
+    /* Streamed-feed path (MFP2). When `feed` is non-NULL the compressed stream
+     * is obtained from the callback instead of the resident hdr.payload span,
+     * and `hdr_ready` tells begin() to trust a caller-supplied header view
+     * (already validated and authenticated) rather than parsing the patch.
+     * `skip_payload_crc` suppresses the resident payload-CRC walk, which the
+     * streaming caller has already performed on authenticated bytes. All three
+     * are inert on the MFP1 path. */
+    mcf_payload_feed_fn feed;
+    void               *feed_ctx;
+    int                 hdr_ready;
+    int                 skip_payload_crc;
 };
 
 /* ------------------------------------------------------------------------ *
@@ -372,6 +392,14 @@ void mcf_session_restore(mcf_session_t *s, const mcf_resume_point_t *pt);
  * pass 0 to run free. Used by the MFP2 layer to stop on erase-block
  * boundaries. */
 void mcf_session_set_stop(mcf_session_t *s, uint32_t out_off);
+
+/* Arrange for the next begin() to consume the compressed stream from `feed`
+ * rather than from the resident patch payload, and to trust `hdr` (which the
+ * caller has already validated and authenticated) in place of re-parsing the
+ * patch. Used by the MFP2 streaming layer. Must be called between open() and
+ * begin(); with it unused the session behaves exactly as before. */
+void mcf_session_set_streamed(mcf_session_t *s, const mcf_hdr_view_t *hdr,
+                              mcf_payload_feed_fn feed, void *ctx);
 
 
 

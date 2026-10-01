@@ -121,6 +121,63 @@ static int run_patch(const uint8_t *patch, uint32_t patch_len, const uint8_t *ol
     return st;
 }
 
+/* Differential proof of the streaming design: the same patch must apply
+ * byte-exact in a workspace far smaller than the whole decrypted payload,
+ * which the pre-streaming "decrypt every record into scratch" design
+ * required. The computed `old_need` is the size that design needed. */
+static int streaming_workspace_case(const uint8_t *patch, uint32_t patch_len,
+                                    const uint8_t *old, uint32_t old_len,
+                                    const uint8_t *expected, uint32_t new_len,
+                                    crypto_ctx_t *crypto)
+{
+    static uint8_t small[4096];
+    mcf_v2_view_t view;
+    mcf_v2_config_t cfg; mcf_v2_session_t s; mcf_status_t st;
+    uint32_t win, ad, inner_ws, need, old_need;
+
+    if (mcf_v2_parse(patch, patch_len, &view) != MCF_OK) return 0;
+    win      = (2u * (1u << view.record_log2)) + 4u;
+    ad       = 8u + (uint32_t)view.header_len + 8u;
+    inner_ws = (2u * (1u << view.record_log2)) + 16u;
+    need     = 124u + win + ad + inner_ws;
+    old_need = 124u + view.payload_size + inner_ws;
+    if (need >= old_need) {
+        fprintf(stderr, "streaming workspace %u is not below whole-payload %u\n",
+                (unsigned)need, (unsigned)old_need);
+        return 0;
+    }
+    if (need > sizeof(small) || old_need <= sizeof(small)) {
+        fprintf(stderr, "workspace case not discriminating (need=%u old=%u buf=%u)\n",
+                (unsigned)need, (unsigned)old_need, (unsigned)sizeof(small));
+        return 0;
+    }
+
+    memset(flash, 0xFF, sizeof(flash)); mutations = 0;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.hal = &hal; cfg.patch = patch; cfg.patch_size = patch_len;
+    cfg.old = old; cfg.old_size = old_len; cfg.dst_addr = FLASH_BASE;
+    cfg.block_size = BLOCK_SIZE;
+    cfg.ram_budget = (uint32_t)sizeof(small);
+    cfg.workspace = small; cfg.workspace_size = (uint32_t)sizeof(small);
+    cfg.key_provider = provide_key; cfg.key_ctx = crypto;
+    cfg.verify = verify_ed25519ph; cfg.verify_ctx = crypto;
+    cfg.aead = decrypt_aead; cfg.aead_ctx = crypto;
+    st = mcf_v2_session_open(&s, &cfg);
+    if (st == MCF_OK) st = mcf_v2_session_run(&s);
+    mcf_v2_session_close(&s);
+    if (st != MCF_OK) {
+        fprintf(stderr, "streaming-workspace run failed: status %d\n", (int)st);
+        return 0;
+    }
+    if (memcmp(flash, expected, new_len) != 0) {
+        fprintf(stderr, "streaming-workspace image is not byte-exact\n");
+        return 0;
+    }
+    printf("  ok  applies in %u-byte workspace (whole-payload design needed %u)\n",
+           (unsigned)need, (unsigned)old_need);
+    return 1;
+}
+
 static int expect_case(const char *name, const uint8_t *patch, uint32_t patch_len,
                        const uint8_t *flash_fill, mcf_status_t want, crypto_ctx_t *crypto,
                        const uint8_t *old, uint32_t old_len)
@@ -295,6 +352,11 @@ int main(int argc, char **argv)
         fprintf(stderr, "MFP2 positive path failed\n"); return 1;
     }
     puts("  ok  valid patch applies byte-exact");
+
+    /* The same patch in a workspace far smaller than the decrypted payload. */
+    if (!streaming_workspace_case(patch, patch_len, old, old_len, expected, new_len, &crypto)) {
+        return 1;
+    }
 
     /* Wrong symmetric key: signature passes, key provider matches the id,
      * every record AEAD must fail authentication. */

@@ -3,6 +3,8 @@
 #include "mcf_internal.h"
 #include <string.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 static int v2_ranges_overlap(const void *a, uint32_t an, const void *b, uint32_t bn)
 {
@@ -37,41 +39,9 @@ static mcf_status_t v2_fail(mcf_v2_session_t *s, mcf_status_t st)
     v2_wipe(s->key, (uint32_t)sizeof(s->key));
     if (s->scratch != NULL) v2_wipe(s->scratch, s->scratch_len);
     s->scratch = NULL; s->scratch_len = 0u;
+    if (s->win != NULL) v2_wipe(s->win, s->win_cap);
+    s->win = NULL; s->win_len = 0u;
     return st;
-}
-
-/* Return the exact decoded delta size of the authenticated LZ4 framing. */
-static mcf_status_t v2_lz4_size(const uint8_t *p, uint32_t n, uint32_t *out)
-{
-    uint32_t pos=0u, total=0u;
-    while (pos < n) {
-        uint32_t len, ip, end, produced=0u;
-        if (n-pos < 4u) return MCF_E_TRUNCATED;
-        len=mcf_rd32(&p[pos]); pos+=4u;
-        if (len==0u) { if (pos != n) return MCF_E_CORRUPT; *out=total; return total ? MCF_OK : MCF_E_CORRUPT; }
-        if (len > n-pos) return MCF_E_TRUNCATED;
-        ip=pos; end=pos+len;
-        while (ip < end) {
-            uint32_t lit, match, off; uint8_t token, x;
-            token=p[ip++]; lit=(uint32_t)(token>>4);
-            if (lit==15u) { do { if (ip>=end) return MCF_E_CORRUPT; x=p[ip++]; if (lit > UINT32_MAX-(uint32_t)x) return MCF_E_CORRUPT; lit+=(uint32_t)x; } while (x==255u); }
-            if (lit > end-ip) return MCF_E_CORRUPT;
-            ip+=lit; produced+=lit;
-            if (ip==end) break;
-            if (end-ip<2u) return MCF_E_CORRUPT;
-            off=mcf_rd16(&p[ip]); ip+=2u;
-            if (off==0u || off>produced) return MCF_E_CORRUPT;
-            match=(uint32_t)(token&15u);
-            if (match==15u) { do { if (ip>=end) return MCF_E_CORRUPT; x=p[ip++]; if (match > UINT32_MAX-(uint32_t)x) return MCF_E_CORRUPT; match+=(uint32_t)x; } while (x==255u); }
-            if (match > UINT32_MAX-4u) return MCF_E_CORRUPT;
-            match+=4u;
-            if (UINT32_MAX-produced < match) return MCF_E_CORRUPT;
-            produced+=match;
-        }
-        if (UINT32_MAX-total < produced) return MCF_E_CORRUPT;
-        total+=produced; pos=end;
-    }
-    return MCF_E_TRUNCATED;
 }
 
 /* ---------------------------------------------------------------------- *
@@ -84,35 +54,6 @@ static mcf_status_t v2_lz4_size(const uint8_t *p, uint32_t n, uint32_t *out)
  * phase - no work is repeated beyond one record's plaintext, and nothing
  * below the block boundary is rewritten.
  * ---------------------------------------------------------------------- */
-
-/* Offset of record `index`'s framing within the record area and its plaintext
- * length (ciphertext length equals plaintext length). The parse that preceded
- * this call already proved the framing; these checks are belt-and-braces for
- * a path that never trusts memory alone. */
-static int v2_record_at(const mcf_v2_view_t *v, const uint8_t *patch,
-                        uint32_t index, uint32_t *out_off, uint32_t *out_len)
-{
-    uint32_t pos = 0u;
-    uint32_t i;
-    const uint8_t *area = &patch[v->header_len];
-
-    if (index >= v->record_count) return 0;
-    for (i = 0u; i < index; i++) {
-        uint32_t len;
-        if (v->payload_size - pos < 4u) return 0;
-        len = mcf_rd32(&area[pos]); pos += 4u;
-        if (len == 0u || len > (1u << v->record_log2) ||
-            len > v->payload_size - pos || v->payload_size - pos - len < MCF_V2_RECORD_TAG_SIZE) return 0;
-        pos += len + MCF_V2_RECORD_TAG_SIZE;
-    }
-    if (v->payload_size - pos < 4u) return 0;
-    *out_len = mcf_rd32(&area[pos]);
-    *out_off = pos;
-    if (*out_len == 0u || *out_len > (1u << v->record_log2) ||
-        *out_len > v->payload_size - pos - 4u ||
-        v->payload_size - pos - 4u - *out_len < MCF_V2_RECORD_TAG_SIZE) return 0;
-    return 1;
-}
 
 /* Decoded (delta) length of one record's plaintext: the sum of its complete
  * LZ4 blocks' output lengths. The plaintext is authenticated; a malformed
@@ -152,6 +93,151 @@ static mcf_status_t v2_record_dlen(const uint8_t *plain, uint32_t len, uint32_t 
     }
     *out = total;
     return MCF_OK;
+}
+
+/* ---------------------------------------------------------------------- *
+ * Streaming feed. See docs/mfp2-streaming-decryption-design.md.
+ *
+ * The framed LZ4 stream is never wholly resident. Records are decrypted into a
+ * sliding window as the engine asks for bytes; each record is wiped as the
+ * window compacts past it. The stream is terminated by the four-byte zero
+ * marker the LZ4 framing requires, produced once the records are exhausted.
+ *
+ * One record's plaintext may be arbitrary bytes - the producer only guarantees
+ * a record *boundary* falls on a frame boundary - so a frame may straddle a
+ * record boundary and the consumer may need bytes from both. The window is
+ * therefore two maximum-size records plus the marker, and the feed always
+ * tries to materialise a complete frame before reporting.
+ * ---------------------------------------------------------------------- */
+
+/* Decrypt record `s->cur_record` into the window at its current end and
+ * advance. The window always holds whole records from the stream start, so
+ * appending is safe while win_len + (1<<record_log2) fits. */
+static mcf_status_t v2_feed_pull_record(mcf_v2_session_t *s)
+{
+    const mcf_v2_config_t *c = s->cfg;
+    const mcf_v2_view_t *v = &s->view;
+    uint32_t off, len;
+    int32_t i;
+    uint8_t *ad = s->ad;
+
+    /* The framing cursor advances one record at a time, so decrypting the
+     * whole stream is linear rather than a re-walk from record zero. */
+    if (s->cur_record >= v->record_count) return MCF_E_FORMAT;
+    off = s->feed_off;
+    if (v->payload_size - off < 4u) return MCF_E_FORMAT;
+    len = mcf_rd32(&c->patch[v->header_len + off]);
+    if (len == 0u || len > (1u << v->record_log2) ||
+        len > v->payload_size - off - 4u ||
+        v->payload_size - off - 4u - len < MCF_V2_RECORD_TAG_SIZE) return MCF_E_FORMAT;
+    if (s->win_len + len > s->win_cap) return MCF_E_CORRUPT;
+
+    /* AAD = "MCF2REC\0" || header(sig and payload-CRC zeroed) || LE32(i) || LE32(len).
+     * The header body is copied once in begin(); only the two trailing words
+     * change per record. */
+    v2_wr32(&ad[8u + s->hdr_len], s->cur_record);
+    v2_wr32(&ad[12u + s->hdr_len], len);
+    { uint32_t k; for (k = 0u; k < 4u; k++) s->nonce_pre[16u + k] = (uint8_t)(s->cur_record >> (8u * k)); }
+    s->nonce_pre[20u] = 0u; s->nonce_pre[21u] = 0u;
+    s->nonce_pre[22u] = 0u; s->nonce_pre[23u] = 0u; /* LE64(i): high half zero */
+
+    i = c->aead(c->aead_ctx, s->key, s->nonce_pre,
+                &c->patch[s->view.header_len + off + 4u], len,
+                &c->patch[s->view.header_len + off + 4u + len], MCF_V2_RECORD_TAG_SIZE,
+                ad, 16u + s->hdr_len, &s->win[s->win_len]);
+    if (i != MCF_OK) return (i < 0) ? (mcf_status_t)i : MCF_E_AUTH;
+
+    /* Remember where this record's plaintext sits in decoded coordinates, so
+     * the checkpoint can name a record whose plaintext is no longer resident.
+     * A small ring suffices: the engine trails the feed by at most one window. */
+    {
+        uint32_t dlen, k;
+        mcf_status_t ds = v2_record_dlen(&s->win[s->win_len], len, &dlen);
+        if (ds != MCF_OK) return ds;
+        for (k = 0u; k + 1u < 4u; k++) s->ring[k] = s->ring[k + 1u];
+        s->ring[3].index  = s->cur_record;
+        s->ring[3].base_d = s->d_base;
+        s->ring[3].dlen   = dlen;
+        s->d_base += dlen;
+    }
+
+    s->cur_record++;
+    s->feed_off += 4u + len + MCF_V2_RECORD_TAG_SIZE;
+    s->win_len += len;
+    return MCF_OK;
+}
+
+/* Length of the largest prefix of win[] that is a whole number of complete
+ * framed blocks (ending with the terminal zero marker, when present). The
+ * codec must never be handed a partial block, so this is what the feed
+ * reports. */
+static uint32_t v2_feed_avail(const mcf_v2_session_t *s)
+{
+    uint32_t off = 0u;
+    for (;;) {
+        uint32_t blen, need;
+        if (s->win_len - off < 4u) break;
+        blen = mcf_rd32(&s->win[off]);
+        if (blen == 0u) { off += 4u; break; }
+        need = 4u + blen;
+        if (s->win_len - off < need) break;
+        off += need;
+    }
+    return off;
+}
+
+/* Answer the session's request for the run of framed stream starting at `pos`,
+ * which is always a framed block boundary (the codec consumes whole blocks). */
+static int32_t v2_feed_run(void *ctx, uint32_t pos, const uint8_t **src, uint32_t *avail)
+{
+    mcf_v2_session_t *s = (mcf_v2_session_t *)ctx;
+    uint32_t rlog = 1u << s->view.record_log2;
+
+    *src = NULL;
+    *avail = 0u;
+    if (pos < s->win_base) return (int32_t)MCF_E_PARAM;
+
+    /* Drop bytes the codec has passed, wiping them as they go. */
+    if (pos > s->win_base) {
+        uint32_t drop = pos - s->win_base;
+        if (drop > s->win_len) return (int32_t)MCF_E_PARAM;
+        v2_wipe(s->win, drop);
+        if (drop < s->win_len) memmove(s->win, &s->win[drop], s->win_len - drop);
+        s->win_len -= drop;
+        s->win_base  = pos;
+    }
+
+    /* Pull records until at least one complete block is resident, then keep
+     * pulling while there is room and more records to come. */
+    for (;;) {
+        if (v2_feed_avail(s) > 0u) {
+            if (s->cur_record >= s->view.record_count) break;   /* no more records */
+            if (s->win_len + rlog > s->win_cap) break;          /* window nearly full */
+        } else if (s->cur_record >= s->view.record_count) {
+            break;                                              /* nothing left to pull */
+        }
+        {
+            mcf_status_t st = v2_feed_pull_record(s);
+            if (st != MCF_OK) return (int32_t)st;
+        }
+    }
+
+    /* Terminate the framing once every record is in the window. The producer's
+     * framing ends with a zero block marker; the last record's plaintext may
+     * not carry it, so it is synthesised here. */
+    if (s->cur_record >= s->view.record_count && !s->win_end) {
+        s->win_end = 1u;
+        if (s->win_len + 4u <= s->win_cap) {
+            v2_wr32(&s->win[s->win_len], 0u);
+            s->win_len += 4u;
+        }
+    }
+
+    /* Report only complete blocks. A partial block at the tail is left for the
+     * next call, once more records have been pulled. */
+    *src   = s->win;
+    *avail = v2_feed_avail(s);
+    return 0;
 }
 
 static uint32_t v2_journal_crc(const mcf_v2_journal_t *j)
@@ -279,30 +365,32 @@ static void v2_checkpoint(mcf_v2_session_t *s)
 {
     mcf_resume_point_t pt;
     mcf_v2_journal_t j;
-    uint32_t dlen, plen, off, step;
+    uint32_t step, rec_index = 0u, rec_base = 0u;
+    uint32_t i, found = 0u;
     int32_t r;
 
     if (s->journal_interval == 0u) return;
     if (mcf_session_snapshot(s->inner, &pt) == 0) return;
     if (pt.out_off != s->next_ckpt_out) return; /* still mid-block */
 
-    /* Advance the walk to the record containing pt.d_off. The decoded length
-     * of a record cannot be read from the framing (it is the LZ4 blocks'
-     * output length), so the walk re-parses block headers from the plaintext
-     * slice in the scratch area. */
-    for (;;) {
-        if (s->wk_index >= s->view.record_count) return; /* past the end */
-        if (!v2_record_at(&s->view, s->cfg->patch, s->wk_index, &off, &plen)) return;
-        (void)off;
-        if (v2_record_dlen(&s->scratch[124u + s->wk_plain], plen, &dlen) != MCF_OK) {
-            goto degrade;
-        }
-        if (pt.d_off < s->wk_d + dlen || s->wk_index + 1u >= s->view.record_count) {
+    /* Name the record whose plaintext contains pt.d_off. The plaintext is not
+     * resident - the feed has moved past it - so the mapping comes from the
+     * ring of recently decrypted records. The engine only consumes bytes the
+     * feed has already produced and trails it by at most one window, so the
+     * containing record is always among the newest entries; if it is not, this
+     * is not a resumable point and the update simply continues unresumable. */
+    for (i = 0u; i < 4u; i++) {
+        if (s->ring[i].index != 0xFFFFFFFFu &&
+            pt.d_off >= s->ring[i].base_d &&
+            pt.d_off < s->ring[i].base_d + s->ring[i].dlen) {
+            rec_index = s->ring[i].index;
+            rec_base  = s->ring[i].base_d;
+            found = 1u;
             break;
         }
-        s->wk_d     += dlen;
-        s->wk_plain += plen;
-        s->wk_index += 1u;
+    }
+    if (!found) {
+        goto degrade;
     }
 
     memset(&j, 0, sizeof(j));
@@ -311,8 +399,8 @@ static void v2_checkpoint(mcf_v2_session_t *s)
     j.out_off         = pt.out_off;
     j.old_off         = (uint32_t)pt.old_off;
     j.d_off           = pt.d_off;
-    j.record_index    = s->wk_index;
-    j.record_base_d   = s->wk_d;
+    j.record_index    = rec_index;
+    j.record_base_d   = rec_base;
     j.phase           = pt.phase;
     j.diff_remaining  = (uint32_t)pt.diff_remaining;
     j.extra_remaining = (uint32_t)pt.extra_remaining;
@@ -342,10 +430,10 @@ degrade:
 mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
 {
     const mcf_v2_config_t *c; mcf_v2_view_t v; uint8_t *buf; uint8_t *hdr;
-    uint8_t nonce[MCF_V2_NONCE_SIZE]; uint8_t ad[8u+MCF_V2_HEADER_MAX+8u];
-    uint32_t pos=0u, out=0u, i, start=0u, delta_size, need, total_need;
-    uint32_t crc; int32_t r;
+    uint32_t pos=0u, i, start=0u, delta_size, need, win, ad, start_off=0u;
+    uint32_t crc, framed_total, rec_dlen; int32_t r;
     mcf_resume_point_t pt;
+    mcf_hdr_view_t hv;
     if (s==NULL || s->cfg==NULL) return MCF_E_PARAM;
     if (s->state!=MCF_ST_IDLE) return v2_fail(s,MCF_E_STATE);
     c=s->cfg;
@@ -356,36 +444,49 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
     if (v.old_version!=c->hal->get_fw_version(c->hal->ctx) || v.old_size!=c->old_size) return v2_fail(s,MCF_E_MISMATCH);
     crc=mcf_crc32(&c->patch[v.header_len],v.payload_size);
     if (crc!=mcf_rd32(&c->patch[MCF_V2_OFF_PAYLOAD_CRC])) return v2_fail(s,MCF_E_CORRUPT);
-    if (v.workspace_req == 0u || v.workspace_req > c->ram_budget ||
-        v.workspace_req > c->workspace_size ||
-        !v2_add_u32(124u, v.payload_size, &total_need) ||
-        total_need > c->workspace_size || total_need > c->ram_budget) return v2_fail(s,MCF_E_DICT_TOO_LARGE);
+
+    /* Streaming workspace:
+     *   [0, 124)                        synthetic MFP1 header
+     *   [124, 124+win)                  record window (two records + marker)
+     *   [124+win, 124+win+ad)           AAD scratch: "MCF2REC\0" + header + 8
+     *   [124+win+ad, ...)               inner session workspace
+     * The decrypted payload is never wholly resident; the whole-delta size is
+     * computed below by decrypting record by record through this window. */
+    ad  = 8u + (uint32_t)v.header_len + 8u;
+    win = (2u * ((uint32_t)1u << v.record_log2)) + 4u;
+    if (!v2_add_u32(124u, win, &need) || !v2_add_u32(need, ad, &need) ||
+        need > c->workspace_size || need > c->ram_budget) return v2_fail(s,MCF_E_DICT_TOO_LARGE);
+    if (v.workspace_req == 0u || v.workspace_req > c->ram_budget) return v2_fail(s,MCF_E_DICT_TOO_LARGE);
     buf=(uint8_t *)c->workspace;
-    s->scratch = buf; s->scratch_len = total_need;
-    if (v2_ranges_overlap(c->patch, c->patch_size, buf, total_need) ||
-        (c->old != NULL && v2_ranges_overlap(c->old, c->old_size, buf, total_need))) return v2_fail(s,MCF_E_PARAM);
+    s->scratch = buf; s->scratch_len = need;
+    s->win = &buf[124u]; s->win_cap = win;
+    s->ad  = &buf[124u + win]; s->ad_len = ad;
+    if (v2_ranges_overlap(c->patch, c->patch_size, buf, need) ||
+        (c->old != NULL && v2_ranges_overlap(c->old, c->old_size, buf, need))) return v2_fail(s,MCF_E_PARAM);
     hdr=buf; memcpy(hdr,c->patch,v.header_len); memset(&hdr[MCF_V2_OFF_SIGNATURE],0,MCF_SIG_SIZE);
+    /* The signature covers the ciphertext record area, which is always
+     * resident in the patch, so it is verified here in full before any
+     * decryption. The streaming feed later re-authenticates each record. */
     r=c->verify(c->verify_ctx,&c->patch[MCF_V2_OFF_SIGNATURE],MCF_SIG_SIZE,
                 (const uint8_t *)MCF_V2_SIGNATURE_DOMAIN,8u,hdr,v.header_len,
                 &c->patch[v.header_len],v.payload_size);
     if (r!=MCF_OK) return v2_fail(s,(r<0 && r!=MCF_E_SIGNATURE)?(mcf_status_t)r:MCF_E_SIGNATURE);
     r=(int32_t)c->key_provider(c->key_ctx,&c->patch[MCF_V2_OFF_KEY_ID],s->key);
     if (r!=MCF_OK) return v2_fail(s,(r<0)?(mcf_status_t)r:MCF_E_IO);
-    memcpy(nonce,&c->patch[MCF_V2_OFF_NONCE_PREFIX],16u);
-    ad[0]='M';ad[1]='C';ad[2]='F';ad[3]='2';ad[4]='R';ad[5]='E';ad[6]='C';ad[7]=0;
-    memcpy(&ad[8],hdr,v.header_len);
-    /* The payload CRC covers the ciphertext, so the producer could not have
-     * had it inside the AAD that produces that ciphertext; both sides carry
-     * this field as zero in the AAD. The stored CRC remains signature-covered. */
-    memset(&ad[8u + MCF_V2_OFF_PAYLOAD_CRC], 0, 4u);
 
-    /* A resume feeds the codec from the record the journal names; the records
-     * before it were already authenticated and their output programmed by the
-     * interrupted run, so they are neither re-fed nor re-authenticated. */
+    /* A resume feeds the codec from the record the journal names; earlier
+     * records were already authenticated and their output programmed. */
     if (s->resume_positioned) {
         if (s->resume_record >= v.record_count) return v2_fail(s, MCF_E_PARAM);
         start = s->resume_record;
     }
+
+    /* Walk the feed from `start`, decrypting one record at a time into the
+     * window, to obtain the exact decoded delta size the synthetic MFP1 header
+     * must declare. CPU cost only: no flash is touched and each record is
+     * overwritten by the next. */
+    framed_total = 0u; delta_size = 0u;
+    s->hdr_len = v.header_len;
     for (i=0u;i<start;i++) {
         uint32_t len;
         if(v.payload_size-pos<4u) return v2_fail(s,MCF_E_FORMAT);
@@ -393,27 +494,56 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
         if(len==0u || len>(1u<<v.record_log2) || len>v.payload_size-pos || v.payload_size-pos-len<16u) return v2_fail(s,MCF_E_FORMAT);
         pos+=len+16u;
     }
-    for(i=start;i<v.record_count;i++) {
-        uint32_t len; const uint8_t *rec;
-        if(v.payload_size-pos<4u) return v2_fail(s,MCF_E_FORMAT);
-        len=mcf_rd32(&c->patch[v.header_len+pos]); pos+=4u;
-        if(len==0u || len>(1u<<v.record_log2) || len>v.payload_size-pos || v.payload_size-pos-len<16u) return v2_fail(s,MCF_E_FORMAT);
-        rec=&c->patch[v.header_len+pos];
-        v2_wr32(&ad[8u+v.header_len],i); v2_wr32(&ad[12u+v.header_len],len);
-        { uint32_t k; for(k=0u;k<4u;k++) nonce[16u+k]=(uint8_t)(i>>(8u*k));
-          for(k=4u;k<8u;k++) nonce[16u+k]=0u; } /* LE64(i): high half is zero */
-        r=c->aead(c->aead_ctx,s->key,nonce,rec,len,rec+len,16u,ad,16u+v.header_len,&buf[124u+out]);
-        if(r!=MCF_OK) return v2_fail(s,(r<0 && r!=MCF_E_AUTH)?(mcf_status_t)r:MCF_E_AUTH);
-        if (out > UINT32_MAX-len || pos > UINT32_MAX-len-16u) return v2_fail(s,MCF_E_CORRUPT);
-        out+=len; pos+=len+16u;
+    start_off = pos;   /* framing offset of record `start`'s length field */
+    /* AAD body, built once: "MCF2REC\0" || header (signature and payload-CRC
+     * fields zeroed). The per-record index and length are written into the
+     * trailing 8 bytes by the feed before each AEAD call. */
+    memcpy(s->ad, MCF_V2_AEAD_AD_PREFIX, 8u);
+    memcpy(&s->ad[8u], hdr, v.header_len);
+    memset(&s->ad[8u + MCF_V2_OFF_SIGNATURE], 0, MCF_SIG_SIZE);
+    memset(&s->ad[8u + MCF_V2_OFF_PAYLOAD_CRC], 0, 4u);
+    memcpy(s->nonce_pre, &c->patch[MCF_V2_OFF_NONCE_PREFIX], 16u);
+    {
+        uint32_t rlog = 1u << v.record_log2;
+        for (i=start;i<v.record_count;i++) {
+            uint32_t len, off;
+            if(v.payload_size-pos<4u) return v2_fail(s,MCF_E_FORMAT);
+            len=mcf_rd32(&c->patch[v.header_len+pos]); pos+=4u;
+            if(len==0u || len>rlog || len>v.payload_size-pos || v.payload_size-pos-len<16u) return v2_fail(s,MCF_E_FORMAT);
+            off = pos;
+            { uint32_t k; for(k=0u;k<4u;k++) s->nonce_pre[16u+k]=(uint8_t)(i>>(8u*k)); }
+            s->nonce_pre[20u]=0u; s->nonce_pre[21u]=0u; s->nonce_pre[22u]=0u; s->nonce_pre[23u]=0u;
+            v2_wr32(&s->ad[8u+v.header_len],i); v2_wr32(&s->ad[12u+v.header_len],len);
+            r=c->aead(c->aead_ctx,s->key,s->nonce_pre,&c->patch[v.header_len+off],len,
+                      &c->patch[v.header_len+off+len],16u,s->ad,s->ad_len,s->win);
+            if(r!=MCF_OK) return v2_fail(s,(r<0 && r!=MCF_E_AUTH)?(mcf_status_t)r:MCF_E_AUTH);
+            r=(int32_t)v2_record_dlen(s->win,len,&rec_dlen);
+            if(r!=MCF_OK) return v2_fail(s,MCF_E_CORRUPT);
+            if (delta_size > UINT32_MAX-rec_dlen) return v2_fail(s,MCF_E_CORRUPT);
+            delta_size += rec_dlen;
+            if (framed_total > UINT32_MAX-len) return v2_fail(s,MCF_E_CORRUPT);
+            framed_total += len;
+            pos+=len+16u;
+        }
     }
     if(pos!=v.payload_size) return v2_fail(s,MCF_E_FORMAT);
-    s->feed_len = out;
-    r=(int32_t)v2_lz4_size(&buf[124u],out,&delta_size); if(r!=MCF_OK) return v2_fail(s,(mcf_status_t)r);
-    if(delta_size==0u || out>UINT32_MAX-124u) return v2_fail(s,MCF_E_CORRUPT);
+    if(delta_size==0u) return v2_fail(s,MCF_E_CORRUPT);
+    /* The walk used win[] as scratch; the feed starts clean at the stream
+     * head and re-decrypts as the engine asks. */
+    v2_wipe(s->win, win);
+    s->win_len = 0u; s->win_base = 0u; s->win_end = 0u;
+    s->cur_record = start;
+    s->feed_off   = start_off;
+    /* On a resume the feed begins at the journal's record, whose decoded base
+     * is not zero: the ring records absolute decoded offsets, so seed it. */
+    s->d_base     = s->resume_positioned ? s->resume_record_base_d : 0u;
+    for (i = 0u; i < 4u; i++) s->ring[i].index = 0xFFFFFFFFu;
+    /* The decrypted records are wiped inside the walk; the whole scratch area
+     * (header + window) is wiped again on close. */
+
     v2_wr32(&buf[0],MCF_HDR_MAGIC); buf[4]=120u;buf[5]=0u;buf[6]=0u;buf[7]=1u;
     v2_wr32(&buf[8],MCF_FLAG_CODEC_LZ4); memcpy(&buf[12],&c->patch[12],4u); memcpy(&buf[16],&c->patch[16],4u);
-    memcpy(&buf[20],&c->patch[20],4u);memcpy(&buf[24],&c->patch[24],4u);v2_wr32(&buf[28],out+4u);
+    memcpy(&buf[20],&c->patch[20],4u);memcpy(&buf[24],&c->patch[24],4u);v2_wr32(&buf[28],framed_total+4u);
     memcpy(&buf[32],&c->patch[32],4u);memcpy(&buf[36],&c->patch[36],4u);
     /* The synthetic header must declare what the inner session will actually
      * consume from ITS workspace slice: two decode/apply blocks plus the LZ4
@@ -421,34 +551,42 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
      * own budget check (block_size > (budget - workspace_req)/2) reject. */
     {
         uint32_t log2, inner_ws;
-        /* The producer chunks the framed LZ4 stream at (1<<record_log2)-64, so
-         * each framed block decodes to at most 1<<record_log2 bytes. The inner
-         * decode window must therefore be the MFP2 record size, not the caller's
-         * MFP1 block_size and not the ciphertext length. */
         log2 = v.record_log2;
         inner_ws = 2u * ((uint32_t)1u << log2) + 16u; /* 2 blocks + LZ4 state */
         v2_wr32(&buf[44], inner_ws);
-        need = c->workspace_size - total_need;
+        if (need > c->workspace_size) return v2_fail(s, MCF_E_DICT_TOO_LARGE);
+        need = c->workspace_size - need;              /* remainder for the inner session */
         if (need < inner_ws) return v2_fail(s, MCF_E_DICT_TOO_LARGE);
-        /* Codec id and block_log2 must agree with the framed stream. */
         buf[52] = (uint8_t)MCF_CODEC_LZ4;
         buf[53] = (uint8_t)log2;
         buf[54] = 0u; buf[55] = 0u;
         memset(&buf[56], 0, 64u);
     }
     v2_wr32(&buf[120],delta_size);
-    v2_wr32(&buf[28],out+4u); /* MFP1 payload_crc32 covers the framed stream only, not the props block */
-    if (!v2_add_u32(124u, out, &total_need) || total_need > c->workspace_size ||
-        v.workspace_req > c->ram_budget) return v2_fail(s,MCF_E_DICT_TOO_LARGE);
-    v2_wr32(&buf[40],mcf_crc32(&buf[124u],out));
-    memset(&s->inner_cfg,0,sizeof(s->inner_cfg)); s->inner_cfg.hal=c->hal;s->inner_cfg.patch=buf;s->inner_cfg.patch_size=124u+out;
+    v2_wr32(&buf[40],0u); /* streaming: the inner CRC walk is suppressed */
+
+    /* Hand the inner session a validated, authenticated view and a callback
+     * that feeds the framed stream record by record. */
+    memset(&hv,0,sizeof(hv));
+    hv.hdr_len = 120u; hv.hdr_ver = 1u; hv.flags = MCF_FLAG_CODEC_LZ4;
+    hv.product_id = v.product_id; hv.fw_version = v.fw_version;
+    hv.old_size = v.old_size; hv.new_size = v.new_size;
+    hv.payload_size = framed_total + 4u; hv.old_crc32 = mcf_rd32(&c->patch[32]);
+    hv.new_crc32 = mcf_rd32(&c->patch[36]); hv.payload_crc32 = 0u;
+    hv.workspace_req = 2u*((uint32_t)1u<<v.record_log2)+16u; hv.old_version = v.old_version;
+    hv.codec_id = (uint8_t)MCF_CODEC_LZ4; hv.block_log2 = v.record_log2;
+    hv.props = &buf[120]; hv.props_len = 4u;
+    /* The payload pointer is deliberately NULL: the stream is not resident and
+     * only the feed may produce it. */
+    hv.payload = NULL; hv.payload_stream_len = framed_total;
+
+    memset(&s->inner_cfg,0,sizeof(s->inner_cfg)); s->inner_cfg.hal=c->hal;s->inner_cfg.patch=buf;s->inner_cfg.patch_size=124u;
     s->inner_cfg.old=c->old;s->inner_cfg.old_read=c->old_read;s->inner_cfg.old_ctx=c->old_ctx;s->inner_cfg.old_size=c->old_size;s->inner_cfg.dst_addr=c->dst_addr;
     s->inner_cfg.codec=MCF_CODEC_LZ4;s->inner_cfg.block_size=(uint32_t)1u<<v.record_log2;s->inner_cfg.ram_budget=need;
-    s->inner_cfg.workspace=&buf[124u+out];s->inner_cfg.workspace_size=need;s->inner_cfg.progress=c->progress;s->inner_cfg.progress_ctx=c->progress_ctx;s->inner_cfg.commit=c->commit;s->inner_cfg.commit_ctx=c->commit_ctx;
+    s->inner_cfg.workspace=&buf[124u+ad+win];s->inner_cfg.workspace_size=need;s->inner_cfg.progress=c->progress;s->inner_cfg.progress_ctx=c->progress_ctx;s->inner_cfg.commit=c->commit;s->inner_cfg.commit_ctx=c->commit_ctx;
     s->inner=(mcf_session_t *)(void *)&s->inner_storage; r=mcf_session_open(s->inner,&s->inner_cfg); if(r!=MCF_OK) return v2_fail(s,(mcf_status_t)r);
+    mcf_session_set_streamed(s->inner, &hv, v2_feed_run, (void *)s);
     if (s->resume_positioned) {
-        /* Restore the engine exactly where the journal recorded it - phase and
-         * outstanding counts included - and let begin() position it. */
         memset(&pt, 0, sizeof(pt));
         pt.d_off           = s->resume_d_off;
         pt.out_off         = s->resume_out_off;
@@ -461,11 +599,9 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
     }
     r=mcf_session_begin(s->inner); if(r!=MCF_OK) return v2_fail(s,(mcf_status_t)r);
 
-    /* Checkpoint cursor and the first armed boundary. The walk starts where
-     * the feed starts: record `start` at its decoded base. */
-    s->wk_index = start;
-    s->wk_plain = 0u;
-    s->wk_d     = s->resume_positioned ? s->resume_record_base_d : 0u;
+    /* Checkpoint cursor and the first armed boundary. The record ring starts
+     * empty and is filled as the feed decrypts. */
+    s->d_base = s->resume_positioned ? s->resume_record_base_d : 0u;
     s->next_ckpt_out = 0u;
     if (s->journal_interval != 0u) {
         uint32_t step = s->flash_block * s->journal_interval;
@@ -478,7 +614,7 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
             mcf_session_set_stop(s->inner, s->next_ckpt_out);
         }
     }
-    v2_wipe(s->key,(uint32_t)sizeof(s->key)); s->state=MCF_ST_HEADER; s->status=MCF_OK; return MCF_OK;
+    s->state=MCF_ST_HEADER; s->status=MCF_OK; return MCF_OK;
 }
 
 mcf_status_t mcf_v2_session_step(mcf_v2_session_t *s)
@@ -502,6 +638,10 @@ mcf_status_t mcf_v2_session_finish(mcf_v2_session_t *s)
     if(s->inner==NULL)return MCF_E_STATE;
     st=mcf_session_finish(s->inner);
     if(st!=MCF_OK)return v2_fail(s,st);
+    /* The key was needed for every record the feed decrypted, so it is wiped
+     * only here, at the end of the last step, and on close(). */
+    v2_wipe(s->key,(uint32_t)sizeof(s->key));
+    if (s->win != NULL) { v2_wipe(s->win, s->win_cap); s->win_len = 0u; }
     s->state=MCF_ST_DONE;s->status=MCF_OK;
     /* A finished update must not leave a resume point behind. */
     (void)mcf_v2_resume_clear(s);

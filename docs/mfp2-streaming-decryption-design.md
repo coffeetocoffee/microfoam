@@ -1,7 +1,9 @@
 # Streaming MFP2 Record Decryption — Design Note
 
-**Status: PROPOSED (2026-10-01). Not implemented. No wire change. Read this
-before touching `mcf_v2_session.c` in this direction.**
+**Status: IMPLEMENTED (2026-10-01). No wire change.** The design below is what
+`src/mcf_v2_session.c` now does; see section 6 for what actually shipped and
+where it deviates from the original sketch. Supersedes the earlier "PROPOSED"
+state of this note.
 
 ## 1. Problem
 
@@ -206,3 +208,46 @@ streaming design preserves both:
   streaming window would multiply that problem, not solve it.
 - Do not implement this opportunistically inside a bugfix. It is a
   begin()/refill restructure with its own verification burden (§4).
+
+## 6. What shipped (2026-10-01)
+
+Implemented in `src/mcf_v2_session.c` with an inert hook in
+`src/mcf_session.c`. All four verification items above pass: UCRT64 sodium 9/9,
+MSVC no-sodium 7/7, the tamper matrix with **identical statuses and zero flash
+mutations**, the 6 resume scenarios, and the pinned KAT unchanged.
+
+Concretely:
+
+- **Workspace** is now `124 + (2*(1<<record_log2) + 4) + (16 + header_len)`,
+  then the inner session's slice. For the CI fixture (record_log2 = 8,
+  header_len = 192) that is **1376 bytes** where the resident-payload design
+  needed **9412** — the boundary test asserts both numbers and runs the patch
+  in the smaller workspace.
+- **The feed** (`v2_feed_run`) is the whole mechanism: it keeps a sliding
+  window of framed-stream bytes, decrypts records into it as the codec asks,
+  compacts and wipes consumed bytes, and synthesises the four-byte terminal
+  zero block that ends the framing. It reports only *complete* LZ4 blocks,
+  because `mcf_lz4_decode` rejects a block that is not wholly present.
+- **The inner session** gained a streamed-feed mode: `mcf_session_set_streamed`
+  supplies an already-validated header view plus the feed callback, and
+  `mcf_sess_refill` consults it instead of `hdr.payload`. With it unused the
+  MFP1 path is byte-identical (all pre-existing MFP1 tests pass unchanged).
+- **The payload-CRC walk is skipped** on this path (§3.3b), and the synthetic
+  header carries a zero CRC field. The v2 ciphertext CRC is still checked in
+  `begin()` against signature-covered bytes, so nothing is weakened.
+- **`begin()` keeps its walk** (§3.3a, Option A) — one record at a time, so
+  RAM stays O(record) while the exact `delta_size` is still known before any
+  flash erase. The cost is one extra plaintext decrypt pass over the payload
+  (CPU only; flash-bound workloads are unaffected).
+- **The checkpoint** names the containing record from a small ring of recently
+  decrypted `(index, decoded base, decoded length)` entries instead of
+  re-parsing resident plaintext. Journal format and resume semantics are
+  unchanged, and the resume tests pass untouched.
+- **Key lifetime changed**: the key can no longer be wiped at the end of
+  `begin()`, because the feed decrypts during `step()`. It is wiped in
+  `v2_fail`, in `mcf_v2_session_finish`, and in `mcf_v2_session_close`.
+  (This was the one bug the port introduced — an end-of-`begin()` wipe made
+  every record fail authentication mid-run.)
+
+Note the struct `mcf_v2_session_t` grew fields, so this is an ABI change for
+callers compiled against v1.6.0; recompile against the new header.

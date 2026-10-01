@@ -384,8 +384,9 @@ Honest accounting of what exists and what does not.
 The production/session path supports MFP1 and MFP2. MFP2 execution is a caller-owned session
 (`mcf_v2_session_*`, libsodium-backed through the application's Ed25519ph and
 XChaCha20-Poly1305 providers): it verifies the signature before key lookup, authenticates
-every record before decode, rebuilds the delta stream in the caller's workspace, and hands it
-to the unchanged MFP1 engine. Resume is opt-in via `journal_addr` and record-aligned. The
+every record before decode, decrypts records one at a time into a small sliding window (the
+whole decrypted payload is never resident), and hands the reconstructed delta stream to the
+unchanged MFP1 engine. Resume is opt-in via `journal_addr` and record-aligned. The
 optional sodium/PyNaCl CI test applies a host-produced encrypted patch end to end, byte-exact,
 and rejects every tamper variant with zero flash mutations.
 

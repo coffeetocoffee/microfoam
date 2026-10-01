@@ -207,14 +207,21 @@ Validation order:
 MFP2 execution is implemented in `src/mcf_v2_session.c`: a caller-owned session
 performs the validation order above, uses vetted streaming Ed25519ph and
 XChaCha20-Poly1305 providers, authenticates each record before
-decode/application, and wipes key and plaintext scratch on all exits. The
+decode/application, and wipes key and plaintext scratch on all exits. Records are
+decrypted one at a time into a small sliding window and consumed as the engine
+asks for them, so the decrypted payload is never wholly resident; workspace is
+O(record), not O(payload). `begin()` walks every record once to obtain the exact
+decoded delta size the synthetic MFP1 header must declare, so a record-level AEAD
+failure is still detected before the first flash erase. The
 acceptance evidence is the sodium CI job, which runs `sodium_rfc_test`
 (RFC 8032 and AEAD tamper coverage) plus the `mfp2_host_to_session` test: a
 PyNaCl-produced signed/encrypted patch is applied end to end by the C session,
 byte-compared to the target image, and rejected under every tamper variant
 (signature, ciphertext, key, key id, tag, truncation, header, reordering,
-nonce prefix) with zero flash mutations. Parser success alone remains
-inspection-only; execution is the session path.
+nonce prefix) with zero flash mutations. That test also applies the same patch in
+a workspace far smaller than the decrypted payload, which the resident-payload
+design could not. Parser success alone remains inspection-only; execution is the
+session path.
 
 ## 8. Resume (record-aligned)
 
