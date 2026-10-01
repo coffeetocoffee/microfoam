@@ -177,6 +177,33 @@ void mcf_engine_resume(mcf_engine_t *e, uint32_t skip)
     e->phase           = MCF_EP_CTRL;
     e->safe            = 0;
     e->discard         = (int32_t)skip;
+    e->in_discard      = 0u;
+}
+
+void mcf_engine_resume_at(mcf_engine_t *e, uint32_t out_off, int32_t old_off,
+                          uint32_t in_skip, mcf_engine_phase_t phase,
+                          int32_t diff_remaining, int32_t extra_remaining)
+{
+    /* Positioning resume: the caller has arranged for the fed stream to begin
+     * at the frame boundary the resume point recorded and states how many
+     * decompressed bytes to drop before the byte that point named. Unlike
+     * mcf_engine_resume(), nothing is re-derived: the engine restarts in the
+     * exact recorded phase - which may be mid-triple, so the remaining diff
+     * and literal counts are restored too. Output coordinates remain absolute,
+     * so the engine stops at the original newsize and never rewrites anything
+     * below out_off. */
+    e->newpos          = (int32_t)out_off;
+    e->oldpos          = old_off;
+    e->diff_remaining  = diff_remaining;
+    e->extra_remaining = extra_remaining;
+    e->raw_pos         = 0u;
+    e->raw_len         = 0u;
+    e->raw_eof         = 0;
+    e->phase           = phase;
+    e->safe            = 0;
+    e->discard         = 0;
+    e->in_discard      = in_skip;
+    e->stop_at         = 0u;
 }
 
 mcf_status_t mcf_engine_step(mcf_engine_t *e, int *finished)
@@ -184,6 +211,32 @@ mcf_status_t mcf_engine_step(mcf_engine_t *e, int *finished)
     uint32_t budget = e->out_cap; /* bounded work per call */
 
     *finished = 0;
+
+    /* Consume-and-drop the positioning prefix first, if any. Charged against
+     * the step budget like every other unit of work, so a single call still
+     * cannot run longer than out_cap bytes; a short remainder simply continues
+     * on the next step. */
+    while (e->in_discard > 0u && budget > 0u) {
+        int32_t  avail = mcf_engine_ensure(e, 1u);
+        uint32_t n;
+
+        if (avail < 0) {
+            return (mcf_status_t)avail;
+        }
+        n = (uint32_t)avail;
+        if (n > budget) {
+            n = budget;
+        }
+        if (n > e->in_discard) {
+            n = e->in_discard;
+        }
+        e->raw_pos    += n;
+        e->in_discard -= n;
+        budget        -= n;
+    }
+    if (e->in_discard > 0u) {
+        return MCF_OK;
+    }
 
     if (e->newpos >= (int32_t)e->newsize) {
         e->phase  = MCF_EP_DONE;
@@ -193,6 +246,11 @@ mcf_status_t mcf_engine_step(mcf_engine_t *e, int *finished)
     }
 
     while (budget > 0u) {
+        /* The requested stop offset was reached exactly on a previous pass. */
+        if (e->stop_at != 0u && (uint32_t)e->newpos >= e->stop_at) {
+            e->stop_at = 0u;
+            return MCF_OK;
+        }
         switch (e->phase) {
 
         case MCF_EP_CTRL: {
@@ -276,6 +334,10 @@ mcf_status_t mcf_engine_step(mcf_engine_t *e, int *finished)
             if ((int32_t)n > e->diff_remaining) {
                 n = (uint32_t)e->diff_remaining;
             }
+            if (e->stop_at != 0u && (uint32_t)e->newpos < e->stop_at &&
+                n > e->stop_at - (uint32_t)e->newpos) {
+                n = e->stop_at - (uint32_t)e->newpos;
+            }
 
             /* Fetch the overlapping base-image run in one call rather than one
              * call per byte. The base bytes land in out[]; the delta bytes are
@@ -351,6 +413,10 @@ mcf_status_t mcf_engine_step(mcf_engine_t *e, int *finished)
                     mcf_engine_mark_safe(e);
                 }
             }
+            if (e->stop_at != 0u && (uint32_t)e->newpos >= e->stop_at) {
+                e->stop_at = 0u;
+                return MCF_OK;
+            }
             if (e->newpos >= (int32_t)e->newsize) {
                 e->phase  = MCF_EP_DONE;
                 mcf_engine_mark_safe(e);
@@ -387,6 +453,10 @@ mcf_status_t mcf_engine_step(mcf_engine_t *e, int *finished)
             if ((int32_t)n > e->extra_remaining) {
                 n = (uint32_t)e->extra_remaining;
             }
+            if (e->stop_at != 0u && (uint32_t)e->newpos < e->stop_at &&
+                n > e->stop_at - (uint32_t)e->newpos) {
+                n = e->stop_at - (uint32_t)e->newpos;
+            }
 
             memcpy(e->out, &e->raw[e->raw_pos], n);
             e->raw_pos += n;
@@ -416,6 +486,10 @@ mcf_status_t mcf_engine_step(mcf_engine_t *e, int *finished)
                 }
                 e->phase = MCF_EP_CTRL;
                 mcf_engine_mark_safe(e);
+            }
+            if (e->stop_at != 0u && (uint32_t)e->newpos >= e->stop_at) {
+                e->stop_at = 0u;
+                return MCF_OK;
             }
             break;
         }

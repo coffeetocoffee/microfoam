@@ -94,6 +94,7 @@ static int32_t mcf_sess_refill(void *ctx, uint8_t *buf, uint32_t cap, uint32_t *
         s->site = MCF_SITE_CODEC_DECODE;
         return (int32_t)MCF_E_CORRUPT;
     }
+    s->io.produced_total += produced;
     s->io.payload_pos += consumed;
     *n = produced;
 
@@ -204,6 +205,7 @@ static void mcf_sess_shift(void *ctx, uint32_t consumed)
     s->engine.raw_len = rem;
     s->engine.raw_pos  = 0u;
     s->io.raw_origin += consumed;
+    s->io.raw_D      += consumed;
 }
 
 /* Unified base-image access over the direct-memory and callback paths. */
@@ -638,6 +640,10 @@ mcf_status_t mcf_session_begin(mcf_session_t *s)
     s->io.payload_pos  = 0u;
     s->io.stream_end   = 0;
 
+    s->io.feed_base      = 0u;
+    s->io.raw_D          = 0u;
+    s->io.produced_total = 0u;
+
     s->eio.refill    = mcf_sess_refill;
     s->eio.emit      = mcf_sess_emit;
     s->eio.base_read = mcf_sess_base_read;
@@ -662,18 +668,162 @@ mcf_status_t mcf_session_begin(mcf_session_t *s)
     s->blocks_since_ckpt = 0u;
 
     if (s->resumable) {
-        /* The prefix on flash is already correct, so the engine re-derives it
-         * from the start of the stream and discards it instead of programming
-         * it again. The decoder therefore restarts from the beginning. */
+        /* The engine re-derives the stream from the start, but the resume point
+         * is rewound to the start of the erase block that contains it: a power
+         * cut leaves that whole block partially programmed, so the block is
+         * erased and fully re-programmed. Everything before the block boundary
+         * is kept, and the engine skips it with discard - no flash is touched
+         * for it. Rewinding to the block start (rather than rounding the erase
+         * cursor up) keeps the flash content and dst_written consistent on
+         * every path, and costs at most one erase block of redundant work. */
+        uint32_t rewind = (s->resume_newpos / s->flash_block) * s->flash_block;
         s->io.payload_pos  = 0u;
         s->io.raw_origin   = 0u;
+        s->io.raw_D        = 0u;
+        s->io.produced_total = 0u;
         s->io.stream_end   = 0;
-        s->dst_written     = s->resume_newpos;
-        s->dst_erased_upto = s->cfg->dst_addr + s->resume_newpos;
-        mcf_engine_resume(&s->engine, s->resume_newpos);
+        s->dst_written     = rewind;
+        s->dst_erased_upto = s->cfg->dst_addr + rewind;
+        mcf_engine_resume(&s->engine, rewind);
         s->resumable = 0;
+    } else if (s->resume_positioned) {
+        /* Positioning resume (MFP2). The caller has authenticated the records
+         * and arranged for the codec to be fed from the frame the point names;
+         * the engine drops the intra-frame prefix and restarts in exactly the
+         * recorded phase. pt->out_off must be erase-block aligned (the MFP2
+         * journal enforces this), so nothing below it is rewritten and the
+         * block at out_off is erased on first use, discarding whatever the
+         * interrupted run left half-written there. */
+        const mcf_resume_point_t *pt = &s->resume_pt;
+        s->io.feed_base      = pt->feed_D;
+        s->io.raw_D          = pt->feed_D;
+        s->io.produced_total = pt->feed_D;
+        s->io.payload_pos    = 0u;
+        s->io.raw_origin     = 0u;
+        s->io.stream_end     = 0;
+        s->dst_written       = pt->out_off;
+        s->dst_erased_upto   = s->cfg->dst_addr + pt->out_off;
+        mcf_engine_resume_at(&s->engine, pt->out_off, pt->old_off,
+                             pt->d_off - pt->feed_D, (mcf_engine_phase_t)pt->phase,
+                             pt->diff_remaining, pt->extra_remaining);
+        s->resume_positioned = 0;
     }
     return MCF_OK;
+}
+
+/* ---------------------------------------------------------------------- *
+ * Internal support for the MFP2 execution layer (see mcf_internal.h).
+ * ---------------------------------------------------------------------- */
+
+void mcf_session_set_stop(mcf_session_t *s, uint32_t out_off)
+{
+    if (s != NULL) {
+        s->engine.stop_at = out_off;
+    }
+}
+
+void mcf_session_restore(mcf_session_t *s, const mcf_resume_point_t *pt)
+{
+    if (s == NULL || pt == NULL) {
+        return;
+    }
+    s->resume_positioned = 1;
+    s->resume_pt         = *pt;
+}
+
+int mcf_session_snapshot(const mcf_session_t *s, mcf_resume_point_t *pt)
+{
+    if (s == NULL || pt == NULL) {
+        return 0;
+    }
+    if (s->engine_finished) {
+        return 0;
+    }
+    /* The engine's consumption cursor in raw[] maps back to an absolute
+     * decompressed offset through the origin recorded at the last refill; the
+     * feed base is set by the caller. */
+    pt->d_off           = s->io.raw_D + s->engine.raw_pos;
+    pt->out_off         = (uint32_t)s->engine.newpos;
+    pt->old_off         = s->engine.oldpos;
+    pt->phase           = (uint32_t)s->engine.phase;
+    pt->diff_remaining  = s->engine.diff_remaining;
+    pt->extra_remaining = s->engine.extra_remaining;
+    return 1;
+}
+
+int32_t mcf_nvm_record_write(const mcf_hal_t *hal, uint32_t addr, const uint8_t *rec,
+                             uint32_t len)
+{
+    uint8_t  back[MCF_NVM_RECORD_MAX];
+    int32_t  r;
+
+    if (hal == NULL || rec == NULL || len == 0u || len > MCF_NVM_RECORD_MAX ||
+        hal->flash_erase == NULL || hal->flash_write == NULL ||
+        hal->flash_read == NULL) {
+        return (int32_t)MCF_E_PARAM;
+    }
+    r = hal->flash_erase(hal->ctx, addr, len);
+    if (r != MCF_OK) {
+        return (r < 0) ? r : (int32_t)MCF_E_FLASH;
+    }
+    r = hal->flash_write(hal->ctx, addr, rec, len);
+    if (r != MCF_OK) {
+        return (r < 0) ? r : (int32_t)MCF_E_FLASH;
+    }
+    r = hal->flash_read(hal->ctx, addr, back, len);
+    if (r < 0) {
+        return r;
+    }
+    if ((uint32_t)r != len || memcmp(back, rec, len) != 0) {
+        return (int32_t)MCF_E_FLASH;
+    }
+    return (int32_t)MCF_OK;
+}
+
+int32_t mcf_nvm_record_read(const mcf_hal_t *hal, uint32_t addr, uint8_t *rec,
+                            uint32_t len)
+{
+    int32_t r;
+
+    if (hal == NULL || rec == NULL || len == 0u || len > MCF_NVM_RECORD_MAX ||
+        hal->flash_read == NULL) {
+        return (int32_t)MCF_E_PARAM;
+    }
+    r = hal->flash_read(hal->ctx, addr, rec, len);
+    if (r < 0) {
+        return r;
+    }
+    return ((uint32_t)r == len) ? (int32_t)MCF_OK : (int32_t)MCF_E_IO;
+}
+
+int32_t mcf_dst_prefix_crc(const mcf_hal_t *hal, uint32_t addr, uint32_t len,
+                           uint32_t *out)
+{
+    uint32_t crc = mcf_crc32_init();
+    uint32_t off = 0u;
+    uint8_t  tmp[64];
+
+    if (hal == NULL || hal->flash_read == NULL || out == NULL) {
+        return (int32_t)MCF_E_PARAM;
+    }
+    while (off < len) {
+        uint32_t n = len - off;
+        int32_t  r;
+        if (n > (uint32_t)sizeof(tmp)) {
+            n = (uint32_t)sizeof(tmp);
+        }
+        r = hal->flash_read(hal->ctx, addr + off, tmp, n);
+        if (r < 0) {
+            return r;
+        }
+        if ((uint32_t)r != n) {
+            return (int32_t)MCF_E_IO;
+        }
+        crc = mcf_crc32_update(crc, tmp, n);
+        off += n;
+    }
+    *out = mcf_crc32_final(crc);
+    return (int32_t)MCF_OK;
 }
 
 mcf_status_t mcf_session_step(mcf_session_t *s)

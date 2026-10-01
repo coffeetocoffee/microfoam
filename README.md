@@ -19,7 +19,7 @@ kilobytes of RAM.
 | **Language** | C99, MISRA-friendly, `-Wall -Wextra -Wconversion` clean | |
 | **Targets verified** | arm-none-eabi-gcc: M0, M0+, M3, M4, M7, M33 | |
 | **Licence** | MIT | |
-| **Status** | 1.5.2 — see [Status](#status) | |
+| **Status** | 1.6.0 — see [Status](#status) | |
 
 ---
 
@@ -368,9 +368,9 @@ tests/fixtures/            deterministic firmware pair and a test key
 contrib/ed25519-wip/       rejected verifier, defect log, and conformance harness
 docs/architecture.md       the design this implements, and why
 docs/format-v2.md          the shipped MFP1 on-flash patch format
-docs/format-v2-design.md   formally deferred MFP2 proposal for AEAD and codec checkpoints
+docs/format-v2-design.md   MFP2 design: AEAD container, signed message, resume
 docs/lzma-history.md       the retired from-scratch LZMA decoder's defect log
-include/microfoam_v2.h     MFP2 structural inspection API (never an apply/session path)
+include/microfoam_v2.h     MFP2 execution API: session, journal, structural parser
 ```
 
 ---
@@ -381,18 +381,21 @@ Honest accounting of what exists and what does not.
 
 **Working and tested**
 
-The production/session path supports MFP1 only. MFP2 remains inspection-only: its public
-parser validates container shape, and the optional sodium/PyNaCl CI test checks the producer-to-parser
-boundary plus MFP1 rejection before mutation. It does not exercise MFP2 authenticated execution;
-no MFP2 patch is applied by a session.
+The production/session path supports MFP1 and MFP2. MFP2 execution is a caller-owned session
+(`mcf_v2_session_*`, libsodium-backed through the application's Ed25519ph and
+XChaCha20-Poly1305 providers): it verifies the signature before key lookup, authenticates
+every record before decode, rebuilds the delta stream in the caller's workspace, and hands it
+to the unchanged MFP1 engine. Resume is opt-in via `journal_addr` and record-aligned. The
+optional sodium/PyNaCl CI test applies a host-produced encrypted patch end to end, byte-exact,
+and rejects every tamper variant with zero flash mutations.
 
 The build is warning-clean under `-Wall -Wextra -Wconversion -Wsign-conversion -Werror`,
 and the standard test configurations pass in both Debug and Release; the sodium configuration additionally requires libsodium and PyNaCl:
 
 | Suite | What it proves |
 |---|---|
-| `microfoam_tests` | 71 checks: round trip, **resume journal**, and fault injection at every stage |
-| `host_selftest` | 85 checks: 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, LZMA props + policy fields, format layout agreement, signing |
+| `microfoam_tests` | 79 checks: round trip, **resume journal**, and fault injection at every stage |
+| `host_selftest` | 95 checks: 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, LZMA props + policy fields, format layout agreement, signing, MFP2 KAT |
 | `cross_test` | The Python host tool's patch, applied by the C library, byte-exact |
 | `lzma_conformance_test` | 335 checks: 67 liblzma vectors at five block sizes each (opt-in build) |
 | `lzma_policy_test` | 15 checks: dictionary and `lc+lp` policy rejections with their exact status and stage |
@@ -444,6 +447,18 @@ The journal proves the prefix on flash still matches what the patch says. It is 
 authenticity control: it lives in NVM the device itself writes, and the threat it addresses
 is corruption and interruption, not forgery.
 
+**MFP2 resume is record-aligned.** `mcf_v2_config_t` carries the same
+`journal_addr` / `journal_interval` pair, and the same opt-in rule applies:
+zero disables it entirely. Because every MFP2 record is an independently
+authenticated unit, the checkpoint is taken on erase-block boundaries and the
+resume re-feeds the codec from the record that contains the recorded position
+only — the prefix records are neither re-decrypted nor re-programmed. Repeated
+work is bounded by one record (at most `2^record_log2` bytes of plaintext);
+everything below the checkpoint's erase block is left exactly as the
+interrupted run left it. `mcf_v2_resume_probe()` returns `MCF_E_NOT_FOUND` for
+a missing, damaged, or foreign record, and `MCF_V2_SESSION_FLAG_RESUME_DEGRADED`
+reports a lost checkpoint guarantee. A completed update clears the journal.
+
 
 **Not yet done**
 
@@ -457,9 +472,9 @@ is corruption and interruption, not forgery.
   are rejected with `MCF_E_SIGNATURE` unless the application supplies a vetted provider
   through `mcf_verify_fn`. An optional libsodium adapter is available with
   `-DMCF_ENABLE_SODIUM=ON`; `sodium_rfc_test` checks published RFC 8032 TEST 1 values and AEAD
-  tamper rejection. Separately, `mfp2_host_to_parser` uses PyNaCl to produce a signed+encrypted
-  patch, confirms structural parsing, then confirms MFP1 rejects it before mutation; it is not
-  an MFP2 execution test. Do not link
+  tamper rejection. Separately, `mfp2_host_to_session` uses PyNaCl to produce a
+  signed+encrypted patch and has the C session apply it end to end, byte-exact, with the full
+  tamper matrix. Do not link
   `contrib/ed25519-wip/mcf_ed25519.c` into production.
 - **armclang and IAR.** The code is written with portability to both in mind (C99, no GNU
   extensions, no VLAs, no designated-initialiser dependence in the public header,

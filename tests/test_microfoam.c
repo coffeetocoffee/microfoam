@@ -821,7 +821,11 @@ static void test_resume_interrupt_and_continue(void)
     patch_len = build_patch(g_patch, g_old, OLD_LEN, g_new, NEW_LEN, PRODUCT, VER_NEW,
                             VER_OLD, WS_LZ4, 0u, 9u);
 
-    partial = run_partial(patch_len, 2u);
+    /* Three steps, not two: two lands on a byte offset that happens to be
+     * both block-aligned and erase-block-aligned, which would hide the
+     * erase-accounting bug below. Three steps stops mid-block, which is the
+     * state a real power cut leaves behind. */
+    partial = run_partial(patch_len, 3u);
     CHECK(partial > 0u, "partial run made progress");
     CHECK(partial < NEW_LEN, "partial run stopped short");
 

@@ -173,6 +173,20 @@ typedef struct mcf_engine {
      * than programming it a second time. */
     int32_t  discard;
 
+    /* Decompressed bytes still to be consumed and dropped before any triple is
+     * interpreted. Set by mcf_engine_resume_at(); the first engine steps
+     * consume and drop this much from the head of the fed stream, placing the
+     * engine exactly on the byte the resume point recorded. */
+    uint32_t in_discard;
+
+    /* Request the engine to stop the next time its output position reaches
+     * `stop_at`, which a session sets to an erase-block boundary. The stop is
+     * taken between emissions, so diff_remaining/extra_remaining and the phase
+     * are valid and the session can capture a resumable point there. Zero
+     * disables. The engine clears it when honoured. */
+    uint32_t stop_at;
+
+
     /* Entry state of the triple currently being applied. Written the moment a
      * control triple is consumed, so a session that checkpoints here can resume
      * by re-reading that triple from its start - at most one triple of
@@ -204,6 +218,20 @@ mcf_status_t mcf_engine_step(mcf_engine_t *e, int *finished);
  * already present and correct in the destination. */
 void mcf_engine_resume(mcf_engine_t *e, uint32_t skip);
 
+/* Position the engine inside the stream instead of replaying from byte zero.
+ * `out_off` is the absolute output offset at the recorded resume point and
+ * `old_off` the base cursor there; `in_skip` decompressed bytes at the head of
+ * the fed stream are consumed and dropped first, after which the next byte
+ * read is the one the resume point recorded. `phase`, `diff_remaining` and
+ * `extra_remaining` restore the exact mid-triple state captured by the
+ * session, so the resume point may be anywhere - not only between triples.
+ * Output coordinates remain absolute, so the engine stops at the original
+ * newsize, and emission begins at `out_off` because the dropped prefix never
+ * advances newpos. */
+void mcf_engine_resume_at(mcf_engine_t *e, uint32_t out_off, int32_t old_off,
+                          uint32_t in_skip, mcf_engine_phase_t phase,
+                          int32_t diff_remaining, int32_t extra_remaining);
+
 /* ------------------------------------------------------------------------ *
  * Codec registry. Write-once during initialisation, read-only thereafter.
  * Holds configuration, not session state.
@@ -233,12 +261,32 @@ void mcf_log_emit(const mcf_hal_t *hal, int level, uint32_t site, mcf_status_t s
  * Session internals
  * ------------------------------------------------------------------------ */
 
+/* A capturable engine position: everything a positioned resume needs to
+ * restart the engine exactly where it was, mid-triple included. The session
+ * captures one whenever the engine halts (mcf_session_set_stop), and the MFP2
+ * journal persists it. */
+typedef struct mcf_resume_point {
+    uint32_t d_off;           /*!< Decompressed offset of the next byte.     */
+    uint32_t out_off;         /*!< Output bytes already programmed.          */
+    int32_t  old_off;         /*!< Base-image cursor.                        */
+    uint32_t feed_D;          /*!< Decompressed offset of feed byte 0 - the  */
+                              /*!< frame (for MFP2, record) the feed starts  */
+                              /*!< at; the engine drops (d_off - feed_D).    */
+    uint32_t phase;           /*!< mcf_engine_phase_t at the capture point.  */
+    int32_t  diff_remaining;  /*!< Diff bytes still to apply.                */
+    int32_t  extra_remaining; /*!< Literal bytes still to copy.              */
+} mcf_resume_point_t;
+
+
 /* Bookkeeping for the compressed-stream cursor, owned by the session so the
  * refill adapter needs no allocation of its own. */
 typedef struct mcf_sess_io {
     uint32_t payload_pos; /*!< Bytes consumed from the codec stream. */
     uint32_t raw_origin;  /*!< Compressed position that engine.raw[0] maps to. */
     int32_t  stream_end;  /*!< The codec reported end of stream.     */
+    uint32_t feed_base;   /*!< Decompressed offset of feed byte 0.       */
+    uint32_t produced_total; /*!< Decompressed bytes produced, absolute. */
+    uint32_t raw_D;       /*!< Decompressed offset that engine.raw[0] maps to. */
 } mcf_sess_io_t;
 
 struct mcf_session {
@@ -281,7 +329,65 @@ struct mcf_session {
     uint32_t ckpt_prefix_crc; /*!< Running CRC of the reconstructed prefix. */
     uint32_t session_id;
 
+    /* Positioning resume (MFP2). Set by mcf_session_restore() between open()
+     * and begin(); consumed by begin() in place of the replay resume above. */
+    int               resume_positioned;
+    mcf_resume_point_t resume_pt;
+
     mcf_engine_t engine;
     int          engine_finished;
 };
+
+/* ------------------------------------------------------------------------ *
+ * Internal session support used by the MFP2 execution layer. Not public.
+ * ------------------------------------------------------------------------ */
+
+/* Arm a positioning resume: `begin()` will start the engine at the recorded
+ * control-triple boundary instead of replaying the stream. `out_off` output
+ * bytes are already programmed and verified in the destination, `old_off` is
+ * the base-image cursor at that boundary, `decomp_base` the decompressed
+ * offset of the first byte the codec will be fed, and `in_skip` the
+ * decompressed bytes to consume-and-drop before the first triple. No effect
+ * on a non-resume path. */
+void mcf_session_set_position(mcf_session_t *s, uint32_t out_off, int32_t old_off,
+                              uint32_t decomp_base, uint32_t in_skip);
+
+/* Capture the engine's current position into `pt` and return 1, or return 0
+ * when the engine has finished and there is nothing to capture. The caller
+ * fills pt->feed_D itself: it names the decompressed offset of the first byte
+ * the resume feed will provide, which only the layer arranging that feed can
+ * know. Everything else - the next unconsumed byte, the output offset, the
+ * base cursor, the phase and its outstanding counts - is the engine's exact
+ * position, mid-triple included. */
+int mcf_session_snapshot(const mcf_session_t *s, mcf_resume_point_t *pt);
+
+/* Arm a positioning resume: begin() restarts the engine exactly at `pt`
+ * instead of replaying the stream. The codec must be fed from the frame the
+ * point names; the session drops (pt->d_off - pt->frame_D) decompressed bytes
+ * before interpreting anything, and the destination is rewritten from
+ * pt->out_off, which must be a multiple of the flash erase-block size. */
+void mcf_session_restore(mcf_session_t *s, const mcf_resume_point_t *pt);
+
+/* Halt the engine at `out_off` (absolute output offset) on its next steps, or
+ * pass 0 to run free. Used by the MFP2 layer to stop on erase-block
+ * boundaries. */
+void mcf_session_set_stop(mcf_session_t *s, uint32_t out_off);
+
+
+
+/* Erase and program a small record into a caller-designated NVM region using
+ * the session HAL, then read it back and compare. `len` is capped at
+ * MCF_NVM_RECORD_MAX. Fails closed on any HAL error. */
+#define MCF_NVM_RECORD_MAX 64u
+int32_t mcf_nvm_record_write(const mcf_hal_t *hal, uint32_t addr, const uint8_t *rec,
+                             uint32_t len);
+
+/* Read `len` bytes from the NVM region; returns MCF_OK or a negative status. */
+int32_t mcf_nvm_record_read(const mcf_hal_t *hal, uint32_t addr, uint8_t *rec,
+                            uint32_t len);
+
+/* Streaming CRC-32 of `len` bytes at `addr` in the destination region, via the
+ * session HAL's flash_read. Returns MCF_OK or a negative status. */
+int32_t mcf_dst_prefix_crc(const mcf_hal_t *hal, uint32_t addr, uint32_t len,
+                           uint32_t *out);
 #endif /* MCF_INTERNAL_H */

@@ -1,12 +1,12 @@
 # Microfoam Container/API v2 Executable Contract
 
-**Status: approved wire/execution contract (2026-09-30); implementation in progress.**
+**Status: approved wire/execution contract (2026-09-30); execution implemented (v1.6.0).**
 
-This document freezes the executable MFP2 profile. Until the complete parallel
-session path and its acceptance tests land, `mcf_v2_parse()` remains an
-inspection-only structural parser: success means shape validation only, never
-authenticity or acceptance. MFP1 is unchanged and remains the current
-implemented format; an MFP1 reader rejects MFP2.
+This document freezes the executable MFP2 profile. `mcf_v2_session_*` implements
+it: signature before key lookup, per-record authentication before decode, and
+the unchanged MFP1 engine for the authenticated delta stream. `mcf_v2_parse()`
+itself remains a structural parser only: success means shape validation, never
+authenticity or acceptance. MFP1 is unchanged; an MFP1 reader rejects MFP2.
 
 The sole executable v2 profile is **signed + encrypted + LZ4**. It uses
 XChaCha20-Poly1305-IETF for per-record authenticated encryption and Ed25519ph
@@ -204,15 +204,64 @@ Validation order:
 
 ## 7. Implementation acceptance boundary
 
-The frozen contract is not a claim of implementation. MFP2 execution may be
-advertised as supported only when a caller-owned v2 session implements the
-validation order above, uses vetted streaming Ed25519ph and XChaCha20-Poly1305
-providers, authenticates each record before decode/application, wipes key and
-plaintext scratch on all exits, and passes the mandatory tamper and
-host-to-device integration tests. The current sodium CI job runs
-`sodium_rfc_test` (RFC 8032 and AEAD tamper coverage) plus the conditionally
-registered `mfp2_host_to_parser` test. The latter generates a signed/encrypted
-patch with PyNaCl, checks structural parsing, and confirms the existing MFP1
-session rejects it before mutation; it is a parser-boundary test, not MFP2
-execution coverage. Until the v2 execution acceptance boundary is met, parser
-success remains inspection-only and no MFP2 patch may be applied by a session.
+MFP2 execution is implemented in `src/mcf_v2_session.c`: a caller-owned session
+performs the validation order above, uses vetted streaming Ed25519ph and
+XChaCha20-Poly1305 providers, authenticates each record before
+decode/application, and wipes key and plaintext scratch on all exits. The
+acceptance evidence is the sodium CI job, which runs `sodium_rfc_test`
+(RFC 8032 and AEAD tamper coverage) plus the `mfp2_host_to_session` test: a
+PyNaCl-produced signed/encrypted patch is applied end to end by the C session,
+byte-compared to the target image, and rejected under every tamper variant
+(signature, ciphertext, key, key id, tag, truncation, header, reordering,
+nonce prefix) with zero flash mutations. Parser success alone remains
+inspection-only; execution is the session path.
+
+## 8. Resume (record-aligned)
+
+Resume is an optimisation layered on a scheme that is already safe without it:
+the destination is a staging region, and recovery is always "start over" from
+it. The journal exists to avoid re-transferring and re-programming the part
+already done after a power cut, not to make the update correct.
+
+**Design.** The journal lives in a caller-designated NVM region
+(`mcf_v2_config_t.journal_addr`, block-aligned, outside the destination), the
+same shape as MFP1's. It is opt-in: with `journal_addr == 0` the session never
+touches NVM and behaves exactly as a cold run.
+
+The session arms the inner engine to halt exactly on erase-block boundaries
+(`mcf_session_set_stop`); whenever it halts there, the session captures the
+engine's complete position (`mcf_session_snapshot`: next unconsumed
+decompressed byte, output offset, base cursor, phase, and the outstanding diff
+and literal counts - a mid-triple point included) and writes one
+`mcf_v2_journal_t`. `record_index` and `record_base_d` name the record whose
+plaintext contains that byte and the decoded offset where the record starts.
+
+A resume re-authenticates and re-feeds the codec from that record onward only.
+The already-programmed records below it are neither re-fed nor re-written:
+`mcf_session_restore` positions the engine at the recorded point, dropping the
+intra-record prefix before interpreting anything, and `out_off` - always a
+multiple of the erase-block size - means the block containing it is treated as
+disposable and re-erased on first use, discarding whatever the interrupted run
+left half-written there. Work repeated: at most one record's plaintext,
+bounded by `2^record_log2` bytes. Work saved: the flash erase and program of
+the entire prefix.
+
+**Integrity.** `prefix_crc32` is compared against a fresh read of the
+reconstructed prefix, `session_id` binds the record to this exact patch
+header, and the record carries its own CRC; a damaged, stale, or foreign
+record returns `MCF_E_NOT_FOUND` and the update starts clean - an ordinary
+condition after a power cut, not an error. Like MFP1's journal it is not an
+authenticity control: it lives in NVM the device itself writes, and an
+attacker who can write that NVM has already won. Patch authenticity is
+sections 4-6's job.
+
+**Failure handling.** A checkpoint that cannot be written does not abort the
+update; the session stops checkpointing and sets
+`MCF_V2_SESSION_FLAG_RESUME_DEGRADED` so callers that require resumability can
+see the lost guarantee. A finished update clears the journal.
+
+**Scope note.** This is record-granular resume for MFP2's structure, not a
+codec-vtable rewind. MFP1's replay-based resume is unchanged; its one real
+correctness fix in this area is re-arming the erase cursor to the start of the
+erase block that contains the resume point, so a partially programmed block is
+rewritten whole (covered by the MFP1 resume tests).
