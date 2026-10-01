@@ -84,7 +84,7 @@ must not wrap.
 
 ## 3. Key provider and key lifetime
 
-The future execution API obtains the 32-byte symmetric key only through the
+The implemented execution API obtains the 32-byte symmetric key only through the
 `mcf_v2_key_provider_fn` declaration in `include/microfoam_v2.h`. It passes the
 fixed 16-byte `key_id`, writes the key to caller/library-provided output, and
 returns `MCF_OK` only with a complete key. The callback and its context must
@@ -175,7 +175,7 @@ Normative checks and status mapping:
 | `old_version` or base-image identity/CRC mismatch | `MCF_E_MISMATCH` |
 | Payload CRC mismatch or malformed/corrupt decoded content | `MCF_E_CORRUPT` |
 | Signature absent when required, invalid, or verifier reports verification failure | `MCF_E_SIGNATURE` |
-| Valid signature but AEAD tag/key authentication failure | `MCF_E_AUTH` (reserved status to be added before execution is implemented) |
+| Valid signature but AEAD tag/key authentication failure | `MCF_E_AUTH` |
 | Key provider reports unavailable key | `MCF_E_AUTH`; provider's other negative operational status is propagated |
 | Key provider returns invalid positive/nonzero result | `MCF_E_IO` |
 | Workspace allocation failure | `MCF_E_NOMEM` |
@@ -184,10 +184,10 @@ Normative checks and status mapping:
 | Decode truncation | `MCF_E_TRUNCATED` |
 | Flash failure | `MCF_E_FLASH` |
 
-`MCF_E_AUTH` is a required v2 execution status and MUST be added to the public
-`mcf_status_t` before the session API is declared supported. Authentication
-failure MUST NOT be aliased to `MCF_OK`, CRC-only success, or a weaker
-verification status.
+`MCF_E_AUTH` is implemented in the public `mcf_status_t` and is the required
+v2 execution status for authenticated key/tag failure. Authentication failure
+MUST NOT be aliased to `MCF_OK`, CRC-only success, or a weaker verification
+status.
 
 Validation order:
 

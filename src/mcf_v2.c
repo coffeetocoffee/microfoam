@@ -4,8 +4,8 @@
  *
  * Scope: this file parses and validates the MFP2 container shape only. It does
  * not decrypt, decode, reconstruct, or write flash, and it is not a session
- * path. v2 execution is deliberately deferred; see docs/format-v2-design.md for
- * the proposal and the decisions that gate it.
+ * path. Authenticated execution is implemented separately in
+ * mcf_v2_session.c; see docs/format-v2-design.md for the frozen contract.
  *
  * What "structural" means here, precisely:
  *   - every header field is read at its fixed offset, little-endian

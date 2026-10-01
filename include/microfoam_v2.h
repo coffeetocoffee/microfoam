@@ -93,13 +93,13 @@ typedef struct mcf_v2_record {
     uint32_t tag_len;
 } mcf_v2_record_t;
 
-/* Key-provider contract for the future execution API (declaration only).
+/* Implemented key-provider contract for the MFP2 execution API.
  * On MCF_OK, provide exactly 32 key bytes in out_key. The output buffer is
- * library-owned, writable, and must be wiped by the caller immediately after
- * the operation that needs the key; implementations must wipe every internal
- * key copy on every exit path using a non-optimizable zeroization primitive.
- * The callback context and provider must remain valid for the full operation.
- * No key is retained across operations or stored in the patch/configuration. */
+ * library-owned, writable, and is wiped by the session after the operation;
+ * implementations must wipe every internal key copy on every exit path using
+ * a non-optimizable zeroization primitive. The callback context and provider
+ * must remain valid for the full operation. No key is retained across
+ * operations or stored in the patch/configuration. */
 typedef mcf_status_t (*mcf_v2_key_provider_fn)(void *ctx,
                                                const uint8_t key_id[MCF_V2_KEY_ID_SIZE],
                                                uint8_t out_key[MCF_V2_KEY_SIZE]);
