@@ -19,7 +19,7 @@ kilobytes of RAM.
 | **Language** | C99, MISRA-friendly, `-Wall -Wextra -Wconversion` clean | |
 | **Targets verified** | arm-none-eabi-gcc: M0, M0+, M3, M4, M7, M33 | |
 | **Licence** | MIT | |
-| **Status** | 1.6.0 — see [Status](#status) | |
+| **Status** | 1.7.0 — see [Status](#status) | |
 
 ---
 
@@ -324,7 +324,9 @@ ctest --test-dir build --output-on-failure -C Release
 | `lzma_conformance_test` | 67 liblzma vectors × 5 block sizes against the LZMA decoder (with `MCF_ENABLE_LZMA=ON`) |
 | `cross_test_lzma` | A Python-produced **LZMA** patch applied by the C library (with `MCF_ENABLE_LZMA=ON`) |
 | `sodium_rfc_test` | libsodium adapter against published RFC 8032 values and AEAD tamper cases (with `MCF_ENABLE_SODIUM=ON`) |
-| `mfp2_host_to_session` | PyNaCl-produced signed+encrypted MFP2 patch: libsodium-backed C session applies it and checks signature/ciphertext tamper rejection before flash mutation (sodium + PyNaCl required). |
+| `v2_format_test` | MFP2 structural parser: header/TLV/record-framing rules, plus a deterministic mutation loop (~4,200 truncations, byte mutations, and random blobs) |
+| `hal_concurrency_test` | Two independent sessions on separate HALs, with no shared state |
+| `mfp2_host_to_session` | PyNaCl-produced signed+encrypted MFP2 patch: the C session applies it byte-exact in a workspace far smaller than the payload, and rejects every tamper variant with zero flash mutations (sodium + PyNaCl required). |
 
 | Option | Default | Effect |
 |---|---|---|
