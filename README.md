@@ -321,12 +321,17 @@ cmake --build build --config Release
 ctest --test-dir build --output-on-failure -C Release
 ```
 
+The signing tests need a host Ed25519 module (`pip install cryptography`). The signing
+seed itself is generated into the build tree at configure time, so no key needs to be
+checked out or created by hand; `cross_test` fails rather than skips if the module is
+missing.
+
 | Test | What it checks |
 |---|---|
 | `microfoam_tests` | Round trip and fault injection against a mock device |
 | `custom_codec_test` | Caller-owned codec validation, isolation, budget enforcement, and failure propagation |
 | `host_selftest` | The Python tool against an independent reference implementation |
-| `cross_test` | A Python-produced patch applied by the C library |
+| `cross_test` | A Python-produced patch applied by the C library, plus a **signed** patch the device must refuse because no verifier is configured (needs a host signing module; the seed is generated into the build tree) |
 | `cross_test_raw` | A Python-produced **raw** patch applied by the C library |
 | `lzma_policy_test` | Dictionary / `lc+lp` policy rejections and diagnostics (with `MCF_ENABLE_LZMA=ON`) |
 | `lzma_conformance_test` | 67 liblzma vectors × 5 block sizes against the LZMA decoder (with `MCF_ENABLE_LZMA=ON`) |

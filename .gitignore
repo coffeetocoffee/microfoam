@@ -50,4 +50,13 @@ host/lzma_vectors.bin
 # Local CMake build trees
 build-*/
 
+# Test fixtures are INPUTS, not build output, so the `*.bin` rule above must
+# not swallow them. Both firmware fixtures were force-added once; a new one is
+# otherwise silently ignored - `git add` refuses it and `git status` shows
+# nothing at all.
+!tests/fixtures/*.bin
+
+# Not needed any more: the cross test takes its signing seed from the build
+# tree, which CMakeLists generates. Kept so a stale local copy cannot be
+# committed by accident.
 tests/fixtures/key.priv

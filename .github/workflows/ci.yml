@@ -30,6 +30,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned rather than relying on the image's default interpreter, so the
+      # module installed below and CMake's find_package(Python3) agree on one
+      # Python across all three runners.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The cross test signs a patch and requires the device to refuse it
+      # (fail-closed), so the host needs a signing module. The seed itself comes
+      # from the build tree (CMakeLists generates it); cross_test.cmake fails
+      # rather than silently skipping if either is missing.
+      - name: Install the host signing module
+        shell: bash
+        run: python -m pip install --quiet cryptography
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
 
@@ -131,6 +146,9 @@ jobs:
       - name: Round-trip the host tool end to end
         run: |
           set -e
+          # Without these the self-test SKIPs its signing round-trip and every
+          # MFP2 case - a green run that proves less than it appears to.
+          python -m pip install --quiet cryptography pynacl
           mkdir -p build-py
           python host/selftest.py
 
@@ -146,7 +164,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libsodium-dev
-          python -m pip install pynacl
+          python -m pip install pynacl cryptography
       - name: Configure with sodium enabled
         run: cmake -B build-sodium -DCMAKE_BUILD_TYPE=Debug -DMCF_ENABLE_SODIUM=ON
       - name: Build
@@ -164,6 +182,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Install the host signing module
+        run: python -m pip install --quiet cryptography
 
       - name: Configure with LZMA enabled
         run: cmake -B build-lzma -DCMAKE_BUILD_TYPE=Debug -DMCF_ENABLE_LZMA=ON

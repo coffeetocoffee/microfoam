@@ -43,27 +43,42 @@ endif()
 
 # 2. Signed patch with no verifier configured: the device must fail closed
 #    rather than accept an unverified image.
-if(EXISTS "${KEY}")
-    execute_process(
-        COMMAND "${PY}" "${TOOL}" make
-                --old "${OLD}" --new "${NEW}" --out "${WORK}/signed-${CODEC}.bin"
-                --product 0x1234 --version 0x00020000 --old-version 0x00010000
-                --codec "${CODEC}"
-                --key "${KEY}"
-        RESULT_VARIABLE rc
-        OUTPUT_QUIET
-        ERROR_VARIABLE  err)
-    if(rc EQUAL 0)
-        execute_process(
-            COMMAND "${MCF}" "${OLD}" "${NEW}" "${WORK}/signed-${CODEC}.bin"
-            RESULT_VARIABLE rc
-            OUTPUT_VARIABLE out
-            ERROR_VARIABLE  err)
-        message(STATUS "${CODEC} signed: ${out}")
-        if(rc EQUAL 0)
-            message(FATAL_ERROR
-                "a signed patch was accepted with no verifier configured; "
-                "the library must fail closed")
-        endif()
-    endif()
+#
+# Both checks below are FATAL_ERRORs rather than skips, deliberately. This used
+# to read `if(EXISTS "${KEY}")` with the signing result ignored, so on a fresh
+# clone - which is exactly what CI is, since key.priv is not committed - the
+# whole branch vanished and the gate passed without running anything. A gate
+# that can quietly disappear is not a gate.
+if(NOT EXISTS "${KEY}")
+    message(FATAL_ERROR
+        "cross_test.cmake: signing key '${KEY}' is missing, so the "
+        "signed-patch fail-closed check cannot run. Generate it (a 32-byte "
+        "Ed25519 seed) rather than dropping the check.")
+endif()
+
+execute_process(
+    COMMAND "${PY}" "${TOOL}" make
+            --old "${OLD}" --new "${NEW}" --out "${WORK}/signed-${CODEC}.bin"
+            --product 0x1234 --version 0x00020000 --old-version 0x00010000
+            --codec "${CODEC}"
+            --key "${KEY}"
+    RESULT_VARIABLE rc
+    OUTPUT_VARIABLE out
+    ERROR_VARIABLE  err)
+if(NOT rc EQUAL 0)
+    # Almost always a missing host signing module. Report it rather than
+    # skipping, which is how this check went missing in the first place.
+    message(FATAL_ERROR "host tool make --key (${CODEC}) failed:\n${out}\n${err}")
+endif()
+
+execute_process(
+    COMMAND "${MCF}" "${OLD}" "${NEW}" "${WORK}/signed-${CODEC}.bin"
+    RESULT_VARIABLE rc
+    OUTPUT_VARIABLE out
+    ERROR_VARIABLE  err)
+message(STATUS "${CODEC} signed: ${out}")
+if(rc EQUAL 0)
+    message(FATAL_ERROR
+        "a signed patch was accepted with no verifier configured; "
+        "the library must fail closed")
 endif()

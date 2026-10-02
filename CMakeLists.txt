@@ -276,13 +276,29 @@ if(MCF_BUILD_TESTS)
         target_link_libraries(cross_test PRIVATE microfoam)
         target_compile_options(cross_test PRIVATE ${MCF_WARNINGS})
 
+        # The cross test signs a patch and requires the device to refuse it
+        # (fail-closed). The signing seed is generated here, in the build tree,
+        # rather than read from tests/fixtures/key.priv: that path is
+        # gitignored, so on a fresh clone - which is what CI is - it does not
+        # exist, and the check used to skip itself rather than fail. Generating
+        # it makes the gate unconditional for every developer and every runner.
+        set(MCF_TEST_KEY "${CMAKE_CURRENT_BINARY_DIR}/test-keys/key.priv")
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE} -c
+                "import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(bytes(range(32)))"
+                "${MCF_TEST_KEY}"
+            RESULT_VARIABLE MCF_TEST_KEY_RC)
+        if(NOT MCF_TEST_KEY_RC EQUAL 0)
+            message(FATAL_ERROR "could not generate the cross-test signing key")
+        endif()
+
         add_test(NAME host_selftest
                  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/host/selftest.py)
         add_test(NAME cross_test
                  COMMAND ${CMAKE_COMMAND}
                          -DOLD=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/old.bin
                          -DNEW=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/new.bin
-                         -DKEY=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/key.priv
+                         -DKEY=${MCF_TEST_KEY}
                          -DMCF=$<TARGET_FILE:cross_test>
                          -DPY=${Python3_EXECUTABLE}
                          -DTOOL=${CMAKE_CURRENT_SOURCE_DIR}/host/microfoam.py
@@ -296,7 +312,7 @@ if(MCF_BUILD_TESTS)
                  COMMAND ${CMAKE_COMMAND}
                          -DOLD=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/old.bin
                          -DNEW=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/new.bin
-                         -DKEY=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/key.priv
+                         -DKEY=${MCF_TEST_KEY}
                          -DMCF=$<TARGET_FILE:cross_test>
                          -DPY=${Python3_EXECUTABLE}
                          -DTOOL=${CMAKE_CURRENT_SOURCE_DIR}/host/microfoam.py
@@ -312,7 +328,7 @@ if(MCF_BUILD_TESTS)
                      COMMAND ${CMAKE_COMMAND}
                              -DOLD=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/old.bin
                              -DNEW=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/new.bin
-                             -DKEY=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/key.priv
+                             -DKEY=${MCF_TEST_KEY}
                              -DMCF=$<TARGET_FILE:cross_test>
                              -DPY=${Python3_EXECUTABLE}
                              -DTOOL=${CMAKE_CURRENT_SOURCE_DIR}/host/microfoam.py
