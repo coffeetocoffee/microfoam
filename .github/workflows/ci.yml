@@ -122,15 +122,31 @@ jobs:
           arm-none-eabi-size build-arm/mcf_lzma.o build-arm/lzma_sdk_LzmaDec.o \
             >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Link and report size
+      - name: Link for the size map
         run: |
           set -e
           arm-none-eabi-size -t build-arm/*.o || true
           arm-none-eabi-gcc -mcpu=${{ matrix.cortex }} -mthumb -nostdlib \
             -Wl,--gc-sections -Wl,-Map=build-arm/microfoam.map \
             build-arm/*.o -o build-arm/libmicrofoam.a 2>/dev/null || true
+
+      - name: Size gate for ${{ matrix.cortex }}
+        # This is a gate, not a report. It compiles the non-opt-in sources for
+        # this core and fails if .text exceeds the committed ceiling or if any
+        # static RAM appears. The object table is still written to the summary
+        # for humans; the pass/fail comes from the comparison.
+        run: |
+          set -e
+          cmake -DCORE=${{ matrix.cortex }} \
+                -DCC="$(which arm-none-eabi-gcc)" \
+                -DSRC="$PWD" \
+                -DBASELINE="$PWD/cmake/size_baseline.txt" \
+                -DWORK="$PWD/build-size" \
+                -P cmake/size_gate.cmake
           echo "### ${{ matrix.cortex }} object sizes" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
           arm-none-eabi-size build-arm/*.o >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
   python:
     name: host tool self-test
@@ -253,6 +269,44 @@ jobs:
           ./build-fuzz/v2_parse_fuzzer corpus
           -max_total_time=90 -max_len=65536 -rss_limit_mb=2048
           -print_final_stats=1
+
+  sanitizers:
+    name: host suite under ASan and UBSan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The cross test signs a patch, so the host needs a signing module; the
+      # seed comes from the build tree.
+      - name: Install the host signing module
+        run: python -m pip install --quiet cryptography
+
+      # MCF_SANITIZE instruments every target, not just the parser: the engine,
+      # the session state machine, the codec adapters and the container parser
+      # all meet real inputs in the test suite, and none of them were covered by
+      # a sanitizer before. -fno-sanitize-recover=all makes a finding abort
+      # rather than print and continue, so a ctest pass means nothing fired.
+      - name: Configure with sanitizers
+        run: >
+          cmake -B build-san -DCMAKE_BUILD_TYPE=Debug
+          -DMCF_SANITIZE=ON -DCMAKE_C_COMPILER=clang
+
+      - name: Build
+        run: cmake --build build-san --config Debug
+
+      - name: Test
+        env:
+          # Leak checking is meaningful here (the suite allocates workspace
+          # through the HAL) but the host Python tool is not instrumented, so
+          # only the C tests run under it.
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1
+        run: ctest --test-dir build-san --output-on-failure -C Debug
 
   headers:
     name: licence headers

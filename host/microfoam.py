@@ -36,6 +36,12 @@ from typing import Optional
 # other fails a build rather than corrupting a field.
 # --------------------------------------------------------------------------
 
+# Reported by `microfoam --version`. Kept in step with include/microfoam.h's
+# MCF_VERSION_* by the release procedure; selftest.py asserts the format
+# constants that actually affect patch bytes, which is the part that can
+# corrupt something if it drifts.
+TOOL_VERSION = "1.8.4"
+
 MAGIC = 0x3150464D          # 'MFP1'
 HDR_LEN = 120
 HDR_VER_MAJOR = 1
@@ -1141,6 +1147,8 @@ def cmd_keygen(args: argparse.Namespace) -> int:
 def main(argv: Optional[list] = None) -> int:
     p = argparse.ArgumentParser(prog="microfoam",
                                 description="Firmware delta update tool")
+    p.add_argument("--version", action="version",
+                   version="microfoam host tool " + TOOL_VERSION)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     m = sub.add_parser("make", help="build a patch")

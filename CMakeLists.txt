@@ -28,6 +28,16 @@ endif()
 # exercises with the sanitizers, leaving every other target untouched.
 option(MCF_BUILD_FUZZER "Build the coverage-guided MFP2 parser fuzz target (requires Clang)" OFF)
 
+# Sanitize the whole host suite, not just the parser. The fuzzer above covers
+# one function; this option covers every test target, which is where the
+# engine, the session state machine, the codec adapters and the container
+# parser all meet real inputs. Off by default because the runtimes are not
+# available on every toolchain (notably MinGW-w64 GCC); the CI job that
+# enables it uses Clang. Requires a compiler that ships the ASan/UBSan
+# runtimes - the configure step fails with a clear message otherwise rather
+# than producing a half-instrumented build.
+option(MCF_SANITIZE "Build the host test suite with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+
 # ------------------------------------------------------------------ sources
 # An explicit list. A recursive glob would drag experimental or rejected
 # implementations into a device build that has no use for them.
@@ -95,6 +105,42 @@ else()
     endif()
 endif()
 
+# ------------------------------------------------------------------ sanitizers
+# One flag list, applied to every target through MCF_WARNINGS so the library
+# and the tests that exercise it are instrumented by the same build. MSVC
+# spells these differently and is not a target for this option.
+if(MCF_SANITIZE)
+    if(MSVC)
+        message(FATAL_ERROR "MCF_SANITIZE is not supported with MSVC; use Clang or GCC")
+    endif()
+    set(MCF_SANITIZE_FLAGS
+        -fsanitize=address,undefined
+        -fno-omit-frame-pointer
+        -fno-sanitize-recover=all)
+    set(MCF_SANITIZE_LINK_FLAGS ${MCF_SANITIZE_FLAGS})
+
+    # The runtimes are not present on every toolchain, and without this probe
+    # the failure surfaces at link time as a missing -lasan, far from the
+    # option that caused it. Verified missing on both MinGW-w64 GCC and
+    # MSYS2 Clang for Windows (the mingw compiler-rt package ships fuzzer and
+    # profile runtimes but not asan); the CI job that enables this option runs
+    # on Linux, where Clang and GCC both provide them.
+    include(CheckCSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "${MCF_SANITIZE_LINK_FLAGS}")
+    check_c_source_compiles("int main(void){return 0;}" MCF_SANITIZER_RUNTIME_AVAILABLE)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(NOT MCF_SANITIZER_RUNTIME_AVAILABLE)
+        message(FATAL_ERROR
+            "MCF_SANITIZE requires the AddressSanitizer and UBSan runtimes, "
+            "which this toolchain does not provide. Use a Linux or macOS "
+            "Clang/GCC, or leave MCF_SANITIZE=OFF. On Windows the mingw "
+            "compiler-rt package does not ship the ASan runtime.")
+    endif()
+
+    list(APPEND MCF_WARNINGS ${MCF_SANITIZE_FLAGS})
+    message(STATUS "Sanitizers enabled: address,undefined (unrecoverable)")
+endif()
+
 if(MCF_ENABLE_SODIUM)
     find_path(SODIUM_INCLUDE_DIR sodium.h)
     find_library(SODIUM_LIBRARY NAMES sodium libsodium)
@@ -112,6 +158,14 @@ target_include_directories(microfoam PUBLIC
     $<INSTALL_INTERFACE:include>)
 
 target_compile_options(microfoam PRIVATE ${MCF_WARNINGS})
+
+# The sanitizer runtimes must be linked into every executable, and the tests
+# link the static library, so this propagates rather than sitting on the
+# library alone. INTERFACE so the test targets inherit it.
+if(MCF_SANITIZE)
+    target_compile_options(microfoam INTERFACE ${MCF_SANITIZE_FLAGS})
+    target_link_options(microfoam INTERFACE ${MCF_SANITIZE_LINK_FLAGS})
+endif()
 
 if(MCF_ENABLE_SODIUM)
     target_include_directories(microfoam PRIVATE ${SODIUM_INCLUDE_DIR})

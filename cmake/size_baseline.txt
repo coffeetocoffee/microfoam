@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: MIT
+#
+# Code-size ceilings for the bare-metal device build, enforced by
+# cmake/size_gate.cmake. One line per core: <core> <max .text bytes>.
+#
+# Scope: every source under src/ except mcf_lzma.c and mcf_sodium.c, which are
+# opt-in (the LZMA codec pulls in the vendored SDK; the sodium adapter needs a
+# host crypto library). The LZMA codec's own size is reported separately in CI.
+#
+# The ceilings are measured values plus ~2%, not the measured values exactly.
+# Two reasons: the CI toolchain is whatever `apt-get install gcc-arm-none-eabi`
+# provides on the runner, so its minor version drifts, and a minor version
+# change moves code size by a few bytes (16.1.0 vs 16.2.0 differ by 2 bytes on
+# Cortex-M0 for this source set). An exact figure would fail on that drift
+# while telling you nothing. A real regression - a new code path, a larger
+# table, a feature pulled in by accident - is hundreds of bytes to kilobytes,
+# which is an order of magnitude above the allowance.
+#
+# When growth is intended, raise the number here in the same commit that
+# caused it, so the diff records the cost.
+#
+# Baseline measured 2026-10-02, arm-none-eabi-gcc 16.2.0, -Os:
+#   cortex-m0 12,386   cortex-m3 11,444   cortex-m4 11,450   cortex-m7 11,446
+cortex-m0 12700
+cortex-m3 11700
+cortex-m4 11700
+cortex-m7 11700

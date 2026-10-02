@@ -12,9 +12,9 @@ kilobytes of RAM.
 
 | | |
 |---|---|
-| **RAM (LZ4, 256 B block)** | **744 B** total, no heap | 216 B session + 528 B workspace |
-| **RAM (LZ4, 512 B block)** | ~1.3 KB total | 216 B session + 1,040 B workspace |
-| **ROM (Cortex-M0)** | **5,810 B** | measured, `-Os`, all tables `const` |
+| **RAM (LZ4, 256 B block)** | **880 B** total, no heap | 352 B session + 528 B workspace |
+| **RAM (LZ4, 512 B block)** | ~1.4 KB total | 352 B session + 1,040 B workspace |
+| **ROM (Cortex-M0)** | **12,386 B** | measured, `-Os`, all tables `const`; enforced by a CI size gate |
 | **Dependencies** | `<stdint.h>`, `<string.h>`. No heap required. No RTOS. | |
 | **Language** | C99, MISRA-friendly, `-Wall -Wextra -Wconversion` clean | |
 | **Targets verified** | arm-none-eabi-gcc: M0, M0+, M3, M4, M7, M33 | |
@@ -146,10 +146,14 @@ and means only success. There is no value that means both "succeeded" and "faile
 code path that reports success after an error. If a flash program fails, you get
 `MCF_E_FLASH` — not a full-length, silently corrupt image.
 
-**The memory contract is explicit and enforced.** `mcf_ctx_size()` tells you the exact cost.
-The patch declares its own decoder requirement in `workspace_req`, and the device returns
-`MCF_E_DICT_TOO_LARGE` *before allocating anything* if it does not fit `ram_budget`. It never
-attempts an allocation it cannot satisfy, and never dereferences a null codec.
+**The memory contract is explicit and enforced.** `mcf_ctx_size()` returns the exact dynamic
+workspace a given patch and configuration will allocate — computable before any flash is
+touched, so it can size a static buffer or a pool at build time. The test suite asserts that
+number against what the allocator is actually asked for during a run, so the published
+figure cannot drift from the real one. The patch declares its own decoder requirement in
+`workspace_req`, and the device returns `MCF_E_DICT_TOO_LARGE` *before allocating anything*
+if it does not fit `ram_budget`. It never attempts an allocation it cannot satisfy, and never
+dereferences a null codec.
 
 **The caller owns all state.** There is no mutable global session state. All state lives in a
 caller-provided `mcf_session_t`, so the library is reentrant and usable from a static buffer
@@ -175,6 +179,20 @@ A minimal Conan 2 recipe is provided in `conanfile.py` for the stabilized core l
 It builds with LZMA and optional libsodium disabled; the recipe is packaging support, and
 both optional paths are enabled explicitly by consumers (`MCF_ENABLE_LZMA`,
 `MCF_ENABLE_SODIUM`).
+
+The host tool is packaged as well, so it can be installed instead of run from a checkout:
+
+```sh
+pip install .            # provides the `microfoam` command
+microfoam --version
+microfoam make --old old.bin --new new.bin --out patch.bin \
+    --product 0x1234 --version 0x00020000 --old-version 0x00010000
+```
+
+Signing is an extra: `pip install .[mfp1]` for MFP1 Ed25519 (`cryptography`) and
+`pip install .[mfp2]` for MFP2 signed/encrypted patches (`pynacl`). LZ4 and raw patches need
+nothing beyond the standard library. Running `python host/microfoam.py ...` from a checkout
+keeps working and is what CI uses.
 
 ## The HAL contract
 
@@ -292,34 +310,46 @@ stream has ended. `destroy` is called after successful initialization on every l
 
 ## Verified footprint
 
-Measured with `arm-none-eabi-gcc 16.1.0` at `-Os`, every source compiled with
+Measured with `arm-none-eabi-gcc` at `-Os`, every source compiled with
 `-Wall -Wextra -Werror -Wconversion -Wsign-conversion -Wshadow -Wcast-qual -Wstrict-prototypes
--Wmissing-prototypes`. All six configurations compile with zero warnings.
+-Wmissing-prototypes`. All six configurations compile with zero warnings. These figures are
+now checked in CI by `cmake/size_gate.cmake`, which fails if `.text` grows past the committed
+baseline in `cmake/size_baseline.txt` or if any static RAM appears; the table below and that
+baseline are the same numbers.
 
-| Target | Code (text) | Initialised data |
+| Target | Code (text) | Static RAM |
 |---|---|---|
-| Cortex-M0 / M0+ | **5,810 B** | 0 B |
-| Cortex-M3 / M33 | 5,530 B | 0 B |
-| Cortex-M4 | 5,532 B | 0 B |
-| Cortex-M7 | 5,538 B | 0 B |
+| Cortex-M0 / M0+ | **12,386 B** | 0 B |
+| Cortex-M3 / M33 | 11,444 B | 0 B |
+| Cortex-M4 | 11,450 B | 0 B |
+| Cortex-M7 | 11,446 B | 0 B |
 
-All tables are `const`, so nothing lands in RAM. The variation is the architectures'
-different multiply routines; the library's own code is essentially identical across cores.
+All tables are `const`, so nothing lands in RAM — a property the size gate enforces per
+target rather than asserts in prose. The variation is the architectures' different multiply
+routines; the library's own code is essentially identical across cores.
+
+The MFP2 authenticated execution path (`mcf_v2_session.c`) is the largest single contributor
+at roughly a third of the total, and it is compiled in unconditionally. A build that only
+needs MFP1 can drop that one source from `MCF_SOURCES`.
 
 ### RAM, measured on Cortex-M0 (32-bit)
 
 | Item | Bytes | Notes |
 |---|---|---|
-| `mcf_session_t` | **216** | Caller-owned; can be `static`, so not heap |
+| `mcf_session_t` | **352** | Caller-owned; can be `static`, so not heap |
 | `mcf_journal_t` | **20** | Resume record; lives in NVM, not RAM |
 | Workspace, `block_size = 256` | **528** | 2 × 256 processing + 16 LZ4 state |
 | Workspace, `block_size = 512` | 1,040 | |
 | Workspace, `block_size = 1024` | 2,064 | |
-| `mcf_config_t` | 56 | Prefer a `static const` in flash |
+| `mcf_config_t` | 100 | Prefer a `static const` in flash |
 | `mcf_hal_t` | 48 | Prefer a `static const` in flash |
 | `mcf_header_t` | 120 | Equals the wire header exactly — no padding |
 
-**Constrained profile: 216 + 528 = 744 bytes of RAM**, plus a small stack for the integrity
+The workspace figures are what `mcf_ctx_size()` returns for that configuration; the
+self-test asserts the query against the allocator's actual request rather than trusting the
+table.
+
+**Constrained profile: 352 + 528 = 880 bytes of RAM**, plus a small stack for the integrity
 chunks. No heap needed, on a part with 8 KB.
 
 The LZMA codec, when enabled, adds its probability table (16 KB at the default
@@ -339,6 +369,29 @@ The signing tests need a host Ed25519 module (`pip install cryptography`). The s
 seed itself is generated into the build tree at configure time, so no key needs to be
 checked out or created by hand; `cross_test` fails rather than skips if the module is
 missing.
+
+Two opt-in build modes exist for verification rather than for shipping:
+
+```sh
+# Whole host suite under ASan and UBSan, unrecoverable (a finding aborts the run).
+# Needs a toolchain with the runtimes: Linux/macOS Clang or GCC. The configure step
+# fails with an explicit message where they are missing, rather than at link time.
+cmake -S . -B build-san -DMCF_SANITIZE=ON -DCMAKE_C_COMPILER=clang
+cmake --build build-san && ctest --test-dir build-san --output-on-failure
+
+# Coverage-guided fuzzing of the MFP2 parser (Clang, libFuzzer).
+cmake -S . -B build-fuzz -DMCF_BUILD_FUZZER=ON -DCMAKE_C_COMPILER=clang
+```
+
+Device code size is gated in CI: `cmake/size_gate.cmake` compiles every non-opt-in source
+per core and fails if `.text` exceeds the committed ceiling in `cmake/size_baseline.txt`, or
+if any static RAM appears at all. Run it locally the same way CI does:
+
+```sh
+cmake -DCORE=cortex-m0 -DCC="$(which arm-none-eabi-gcc)" -DSRC="$PWD" \
+      -DBASELINE="$PWD/cmake/size_baseline.txt" -DWORK="$PWD/build-size" \
+      -P cmake/size_gate.cmake
+```
 
 | Test | What it checks |
 |---|---|
@@ -442,7 +495,7 @@ and the standard test configurations pass in both Debug and Release; the sodium 
 
 | Suite | What it proves |
 |---|---|
-| `microfoam_tests` | 79 checks: round trip, **resume journal**, and fault injection at every stage |
+| `microfoam_tests` | 100 checks: round trip, the `mcf_ctx_size()` cost query, **resume journal**, and fault injection at every stage |
 | `host_selftest` | 101 checks: 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, LZMA props + policy fields, format layout agreement, signing, MFP2 KAT, the fixed-nonce-prefix guard, and host-side tamper cases each pinned to the layer that rejects them |
 | `cross_test` | The Python host tool's patch, applied by the C library, byte-exact |
 | `v2_format_test` | 45 checks: MFP2 header/TLV/record-framing rules, plus a ~4,200-case deterministic mutation/property loop |

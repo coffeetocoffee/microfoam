@@ -103,9 +103,12 @@ no error model, no state ownership, no resource contract, no integrity model.
 
 | Target profile | RAM | ROM | Notes |
 |---|---|---|---|
-| Constrained (Cortex-M0, LZ4 codec) | **≤ 4 KB** | ~3 KB | Primary design target |
-| Standard (Cortex-M3/M4, LZ4 codec) | ≤ 6 KB | ~4 KB | Recommended default |
-| Max ratio (Cortex-M3/M4, LZMA codec) | ≤ 34 KB | ~9 KB | Opt-in, higher download savings |
+| Constrained (Cortex-M0, LZ4 codec) | **≤ 4 KB** | ~12.4 KB | Primary design target |
+| Standard (Cortex-M3/M4, LZ4 codec) | ≤ 6 KB | ~11.5 KB | Recommended default |
+| Max ratio (Cortex-M3/M4, LZMA codec) | ≤ 34 KB | ~18 KB | Opt-in, higher download savings |
+
+(ROM figures are the measured whole-library sizes from §10.4; the original design estimated
+~3–4 KB before the MFP2 authenticated path was added.)
 
 The reference implementation documents a requirement of "≥ 10 KB RAM" and an unverified
 "~5 KB ROM". This design targets an order of magnitude less RAM in its primary
@@ -278,7 +281,7 @@ would catch without deliberately injecting a fault.
 | # | Goal | Success criterion |
 |---|---|---|
 | **G1** | Total error transparency | Every failure path returns a specific negative code. A test that injects a fault at each allocation, read, decode, and write step observes the correct code in 100% of cases. |
-| **G2** | Explicit memory contract | `mcf_ctx_size()` returns the exact RAM requirement for a given configuration. The library returns `MCF_E_DICT_TOO_LARGE` rather than failing to allocate. |
+| **G2** | Explicit memory contract | `mcf_ctx_size()` returns the exact dynamic workspace a given configuration will allocate, computable before any flash is touched; the caller-owned session storage is sized separately by `mcf_session_sizeof()`. The library returns `MCF_E_DICT_TOO_LARGE` rather than failing to allocate. |
 | **G3** | Minimal porting surface | Five callbacks. No macros, no source edits, no header modification. |
 | **G4** | Reentrancy | No mutable global state. Two independent sessions with distinct contexts operate concurrently without interference. Verified by test. |
 | **G5** | Authenticated updates | A patch without a valid signature over a header with an acceptable version counter is rejected. |
@@ -579,7 +582,7 @@ void        mcf_session_close(mcf_session_t *s);
 mcf_status_t mcf_session_status(const mcf_session_t *s);
 uint32_t    mcf_session_progress(const mcf_session_t *s);
 uint32_t    mcf_session_error_line(const mcf_session_t *s);
-uint32_t    mcf_ctx_size(const mcf_config_t *cfg);   /* exact RAM requirement */
+uint32_t    mcf_ctx_size(const mcf_config_t *cfg);   /* exact dynamic workspace */
 ```
 
 Plus a single-call convenience wrapper `mcf_session_run()` for simple integrations that do not
@@ -716,11 +719,15 @@ Let `B` = block size (default 1024), `W` = codec workspace, `S` = session state,
 |---|---|---|
 | Work buffer (diff apply) | `B` | Engine working window |
 | Block read buffer | `B` | Engine input staging |
-| Codec workspace | `W` | From `required_workspace(props)` |
-| Session state | `S` | Constant, ≈ 200 B |
-| **Total** | **`2B + W + S`** | `mcf_ctx_size()` returns this |
+| Codec workspace | `W` | From `workspace_size(props)` |
+| **Dynamic total** | **`2B + W`** | what `mcf_ctx_size()` returns |
+| Session state | `S` | `mcf_session_sizeof()`: 352 B on Cortex-M0, 464 B on a 64-bit host. Caller-declared storage, not part of the dynamic total |
 
-`H` is owned by the HAL for erase/program buffering and is not included.
+`H` is owned by the HAL for erase/program buffering and is not included. The session state
+is deliberately listed apart from the dynamic total: it lives in the caller's
+`mcf_session_storage_t` (or `MCF_SESSION_DECLARE`), not in the workspace the library
+allocates, so `mcf_ctx_size()` does not count it and an integrator must add it separately
+when budgeting static RAM.
 
 ### 10.3 Derivation of codec workspace
 
@@ -736,24 +743,41 @@ The LZMA probability table is the reason the reference implementation cannot tar
 Cortex-M0: it is an unconditional floor set by the codec, not by buffer sizing. This is the
 quantitative core of **W-04**.
 
-### 10.4 Projected profiles
+### 10.4 Measured profiles
 
-| Profile | Codec | B | Workspace | **Total RAM** | ROM |
-|---|---|---|---|---|---|
-| **Constrained (M0)** | LZ4 | 512 | ~2.3 KB | **≈ 3.3 KB** | ~3 KB |
-| **Standard (M3/M4)** — default | LZ4 | 1024 | ~4.3 KB | **≈ 6.3 KB** | ~4 KB |
-| **Constrained, minimal** | LZ4 | 256 | ~1.3 KB | **≈ 2.3 KB** | ~3 KB |
-| **Max ratio (M3/M4)** | LZMA | 1024 | ~32 KB | **≈ 34 KB** | ~9 KB |
+Figures below are the actual outputs of `mcf_ctx_size()` (workspace) and
+`mcf_session_sizeof()` (session storage) on Cortex-M0, summed for a whole-device budget.
 
-**Primary design target: the Standard profile at ≈ 6.3 KB, with the Constrained profile at
-≈ 3.3 KB for the lowest end.** Compare with the reference implementation's documented
-"≥ 10 KB", which is not reproducible from its own code (**W-02**).
+| Profile | Codec | B | Workspace (`mcf_ctx_size`) | Session | **Total RAM** | ROM |
+|---|---|---|---|---|---|---|
+| **Constrained, minimal** | LZ4 | 256 | 528 | 352 | **880 B** | ~12.4 KB |
+| **Constrained (M0)** | LZ4 | 512 | 1,040 | 352 | **1,392 B** | ~12.4 KB |
+| **Standard (M3/M4)** — default | LZ4 | 1024 | 2,064 | 352 | **2,416 B** | ~11.5 KB |
+| **Max ratio (M3/M4)** | LZMA | 1024 | 32,896 | 352 | **≈ 33.3 KB** | ~18 KB |
+
+The LZ4 workspace figures are `2B + sizeof(mcf_lz4_t)`, which is exactly what the query
+returns. The ROM column is the whole library as measured by the CI size gate; it is larger
+than the design's original estimate because the MFP2 authenticated execution path
+(`mcf_v2_session.c`) was added after it. The primary design target — the Standard profile
+fitting comfortably on a 32 KB part, and the Constrained profile on an 8 KB one — holds.
 
 ### 10.5 Static allocation option
 
-For systems with no heap, `MCF_SESSION_DECLARE` plus `mcf_ctx_size()`-sized static buffers
-give a fully static, allocation-free build. This is a common requirement in
-safety-certified and hard-real-time firmware and is not supported by the reference design.
+For systems with no heap, `MCF_SESSION_DECLARE` plus a buffer of
+`mcf_ctx_size(cfg)` bytes gives a fully static, allocation-free build: the session state is
+caller-owned storage sized by `mcf_session_sizeof()`, and the dynamic workspace is the
+figure `mcf_ctx_size()` returns. This is a common requirement in safety-certified and
+hard-real-time firmware and is not supported by the reference design.
+
+```c
+static uint8_t workspace[MCF_CTX_SIZE_MAX];   /* or an exact per-config figure */
+cfg.workspace      = workspace;
+cfg.workspace_size = sizeof(workspace);
+```
+
+`mcf_ctx_size()` is safe to call at run time to check a specific configuration, and its
+result is stable for a given patch, so the same figure can be computed by a build script and
+enforced as a size gate (see 16.1 B7).
 
 ---
 
@@ -843,10 +867,16 @@ typedef struct {
 
 ### 12.4 Buffering cost
 
-`mcf_ctx_size()` includes the HAL scratch required for boundary buffering when the erase
-block exceeds the work block. For a typical 2 KB STM32 sector with `B = 1024`, the library
-buffers one sector (2 KB); for a 64 KB NOR block it buffers the block or requires the
-integrator to supply a larger `B`. This trade-off is documented rather than hidden.
+The library holds **no** erase-boundary scratch of its own. `mcf_sess_emit()` chunks each
+write so that no operation crosses an erase-block boundary and programs directly from the
+engine's output buffer, so the boundary case costs no additional RAM in this library. The
+HAL may of course keep its own program buffer; that memory is the HAL's and is not counted
+by `mcf_ctx_size()`.
+
+What the erase block does constrain is the **work block**: `block_size` should be chosen so
+that a block's worth of output fits the erase granularity sensibly, and the device refuses a
+non-power-of-two `block_size` outright (`MCF_E_PARAM`, site 15). This trade-off is
+documented rather than hidden.
 
 ---
 
@@ -1111,7 +1141,7 @@ already safe without it.
 | B4 | The compression **encoder** and file-I/O layers are not in the device build | **W-07** |
 | B5 | No public header includes standard I/O | **W-07** |
 | B6 | All library symbols namespaced (`mcf_`), no global-scope collision | **W-08** |
-| B7 | `mcf_ctx_size()` usable at build time for a size regression gate | **G-10** |
+| B7 | `mcf_ctx_size()` usable at build time for a size regression gate | **G-10** — implemented: `cmake/size_gate.cmake` plus a committed baseline in `cmake/size_baseline.txt`, enforced per core in CI |
 | B8 | CMake ≥ 3.15 with a Conan 2.x recipe; both optional for plain-CMake users | — |
 
 ### 16.2 Codec selection as a build option
@@ -1385,7 +1415,7 @@ P0–P2 to the field.
 | Q-04 | Should the journal be a required HAL capability or optional? | Integrator | P4 |
 | Q-05 | Is A/B slot support worth building in, given the "out of scope" decision (§4.2 N2)? Most integrators need it. | Product | P5 |
 | Q-06 | Should the host tool be Python or Rust? Affects the static-binary distribution story. | Maintainer | P5 |
-| Q-07 | Target minimum: is the Constrained profile (≈ 3.3 KB, Cortex-M0) genuinely in scope, or is the Standard profile (≈ 6.3 KB) sufficient? Affects whether further optimisation is warranted. | Product | P2 |
+| Q-07 | Target minimum: is the Constrained profile (880 B, Cortex-M0) genuinely in scope, or is the Standard profile (2,416 B) sufficient? Affects whether further optimisation is warranted. | Product | P2 |
 
 ---
 

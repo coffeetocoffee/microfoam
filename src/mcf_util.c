@@ -14,32 +14,25 @@
  * Nibble-wise with a 16-entry table rather than the customary 256-entry one.
  * A byte-wise table costs 1 KB of RAM, which is a third of the entire
  * Constrained-profile budget, to speed up a check that is not the bottleneck.
+ *
+ * The table is const, so it lives in flash and the device build has no
+ * initialised or zeroed RAM at all. It used to be generated into a static
+ * array on first use, which cost 65 bytes of .bss on every target and made
+ * the "all tables are const, nothing lands in RAM" claim in the README false;
+ * the size gate added for that claim found it. The values are the same either
+ * way - this is the published CRC-32 nibble table, and the self-test's
+ * published CRC vectors cover it.
  * ---------------------------------------------------------------------- */
 
-static uint32_t g_crc_nib[16];
-static uint8_t  g_crc_ready;
-
-static void mcf_crc_init_table(void)
-{
-    uint32_t i;
-
-    for (i = 0; i < 16u; i++) {
-        uint32_t c = i;
-        uint32_t k;
-
-        for (k = 0; k < 4u; k++) {
-            c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-        }
-        g_crc_nib[i] = c;
-    }
-    g_crc_ready = 1u;
-}
+static const uint32_t g_crc_nib[16] = {
+    0x00000000u, 0x1DB71064u, 0x3B6E20C8u, 0x26D930ACu,
+    0x76DC4190u, 0x6B6B51F4u, 0x4DB26158u, 0x5005713Cu,
+    0xEDB88320u, 0xF00F9344u, 0xD6D6A3E8u, 0xCB61B38Cu,
+    0x9B64C2B0u, 0x86D3D2D4u, 0xA00AE278u, 0xBDBDF21Cu
+};
 
 uint32_t mcf_crc32_init(void)
 {
-    if (g_crc_ready == 0u) {
-        mcf_crc_init_table();
-    }
     return 0xFFFFFFFFu;
 }
 
@@ -47,9 +40,6 @@ uint32_t mcf_crc32_update(uint32_t crc, const uint8_t *buf, uint32_t len)
 {
     uint32_t i;
 
-    if (g_crc_ready == 0u) {
-        mcf_crc_init_table();
-    }
     if (buf == NULL) {
         return crc;
     }

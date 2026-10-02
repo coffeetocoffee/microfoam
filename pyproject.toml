@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: MIT
+#
+# Packaging for the Microfoam host tool.
+#
+# The tool is a single module that lives in host/ next to the C library rather
+# than in its own package directory, because it is also runnable in place
+# (`python host/microfoam.py make ...`) from a checkout. package-dir maps the
+# module root at host/ so `pip install .` finds microfoam.py as a top-level
+# module without moving it.
+#
+# The tool itself has no third-party dependencies for LZ4 or raw patches.
+# LZMA patches shell out to Python's stdlib `lzma` module, which is part of a
+# standard build; signing needs `cryptography` (MFP1) or `pynacl` (MFP2), so
+# those are optional extras rather than requirements.
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "microfoam"
+version = "1.8.4"
+description = "Host-side patch builder for the Microfoam firmware delta-update library"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+keywords = ["firmware", "delta", "update", "bsdiff", "embedded", "ota"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Embedded Systems",
+    "Topic :: System :: Software Distribution",
+]
+
+[project.optional-dependencies]
+# MFP1 signing (Ed25519) uses `cryptography`.
+#
+# Do not rename these extras to `v2` or any other name that PEP 440 would
+# accept as a version string. pip evaluates an `extra == "<name>"` marker by
+# building a Specifier from the right-hand side; for a version-shaped name that
+# succeeds, so pip then tries to coerce the *left* side (the other extra's
+# name) into a Version and dies with
+# `InvalidVersion: <other extra name>`. Verified: `v2` triggers it, `mfp2` does
+# not.
+mfp1 = ["cryptography>=3.4"]
+# MFP2 signed/encrypted patches use PyNaCl.
+mfp2 = ["pynacl>=1.4"]
+
+[project.urls]
+Homepage = "https://github.com/coffeetocoffee/microfoam"
+
+[project.scripts]
+microfoam = "microfoam:main"
+
+[tool.setuptools]
+py-modules = ["microfoam"]
+
+[tool.setuptools.package-dir]
+"" = "host"

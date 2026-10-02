@@ -24,6 +24,69 @@ uint32_t mcf_session_sizeof(void)
     return (uint32_t)sizeof(struct mcf_session);
 }
 
+/* Exact dynamic workspace a session will allocate for this configuration.
+ *
+ * This mirrors the accounting in mcf_session_begin() step 6 - two block
+ * buffers plus the codec's own requirement, where the block size is the
+ * configured one clamped to the patch's new_size - so the number returned is
+ * the number the HAL allocator will be asked for, not an estimate. The test
+ * suite asserts exactly that equality against a recording allocator, which is
+ * what keeps the two from drifting apart.
+ *
+ * The caller's ram_budget is deliberately not consulted: the point of this
+ * function is to discover the cost so the budget can be chosen, so a
+ * configuration that is over budget must still report its true requirement.
+ * mcf_session_begin() remains the enforcement point.
+ *
+ * Returns 0 when the configuration cannot be sized - a null or malformed
+ * patch, a codec not resolvable for this session, or a block size that is not
+ * a power of two. A successful session never needs zero bytes, so zero is
+ * unambiguous. HAL-owned erase/program scratch is not included; that memory
+ * belongs to the HAL (see docs/architecture.md section 10.2). */
+uint32_t mcf_ctx_size(const mcf_config_t *cfg)
+{
+    mcf_config_t     probe;
+    mcf_hdr_view_t   hdr;
+    uint32_t         site = MCF_SITE_NONE;
+    const mcf_codec_ops_t *ops;
+    uint32_t         blk;
+    uint32_t         need;
+
+    if (cfg == NULL || cfg->hal == NULL || cfg->patch == NULL || cfg->patch_size == 0u) {
+        return 0u;
+    }
+
+    /* Parsing performs the same validation a real run would, so an unusable
+     * configuration is reported as unsizable rather than sized optimistically.
+     * The budget is lifted for the probe only: sizing must not depend on the
+     * ceiling it exists to inform. */
+    probe = *cfg;
+    probe.ram_budget = 0xFFFFFFFFu;
+    if (mcf_hdr_parse(cfg->hal, &probe, cfg->patch, cfg->patch_size, &hdr, &site) != MCF_OK) {
+        return 0u;
+    }
+
+    ops = mcf_codec_lookup(cfg, (mcf_codec_id_t)hdr.codec_id);
+    if (ops == NULL) {
+        return 0u;
+    }
+
+    blk = (cfg->block_size != 0u) ? cfg->block_size : (uint32_t)MCF_DEFAULT_BLOCK_SIZE;
+    if (blk > hdr.new_size) {
+        blk = hdr.new_size;
+    }
+    if ((blk & (blk - 1u)) != 0u) {
+        return 0u;
+    }
+
+    need = ops->workspace_size(hdr.props, hdr.props_len);
+    if (need == 0u) {
+        return 0u;
+    }
+
+    return (2u * blk) + need;
+}
+
 /* ---------------------------------------------------------------------- *
  * Failure funnel. The single exit for every error in the session. Records the
  * status and site, releases everything, and moves to MCF_ST_FAILED.

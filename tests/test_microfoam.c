@@ -188,7 +188,21 @@ static int32_t  h_is_readonly(void *c, uint32_t a, uint32_t l)
 { (void)c; (void)a; (void)l; return g_readonly ? 1 : 0; }
 static uint32_t h_product(void *ctx) { (void)ctx; return 0x1234u; }
 static uint32_t h_version(void *ctx) { (void)ctx; return 0x00010000u; }
-static void    *h_alloc(void *ctx, uint32_t size) { (void)ctx; return malloc(size); }
+
+/* The allocator records what it was asked for. mcf_ctx_size() promises a
+ * number equal to this request, and a promise checked against a value the
+ * test itself computes is not checked at all - so the comparison is made
+ * against what the session actually requested at run time. */
+static uint32_t g_last_alloc_size;
+static uint32_t g_alloc_calls;
+
+static void    *h_alloc(void *ctx, uint32_t size)
+{
+    (void)ctx;
+    g_last_alloc_size = size;
+    g_alloc_calls++;
+    return malloc(size);
+}
 static void     h_free(void *ctx, void *p) { (void)ctx; free(p); }
 
 static int32_t h_progress(void *ctx, uint32_t done, uint32_t total)
@@ -223,6 +237,8 @@ static void device_reset(void)
     g_contract_violation = 0;
     g_fail_journal = 0;
     g_flash_mutations = 0;
+    g_last_alloc_size = 0;
+    g_alloc_calls = 0;
     memset(g_flash, 0xFF, sizeof(g_flash));
 }
 
@@ -493,15 +509,28 @@ static void test_roundtrip(void)
 {
     uint32_t len;
     mcf_status_t st;
+    mcf_config_t cfg;
+    uint32_t predicted;
 
     banner("round trip");
     device_reset();
 
     len = build_patch(g_patch, g_old, OLD_LEN, g_new, NEW_LEN, PRODUCT, VER_NEW, VER_OLD,
                       WS_LZ4, 0u, 9u);
+
+    /* Ask what the run will cost before running it, then check the answer
+     * against what the allocator was actually asked for. If the two ever
+     * drift, the published memory contract is wrong and this fails. */
+    cfg = make_cfg(len);
+    predicted = mcf_ctx_size(&cfg);
+    CHECK(predicted != 0u, "a runnable configuration is sizable");
+    CHECK(g_alloc_calls == 0u, "sizing allocates nothing");
+
     st = apply(len, NULL);
 
     CHECK_EQ(st, MCF_OK, "patch applies");
+    CHECK_EQ(g_alloc_calls, 1u, "the run allocated exactly once");
+    CHECK_EQ(g_last_alloc_size, predicted, "mcf_ctx_size matches the run's allocation");
     CHECK_EQ(g_commit_called, 1, "commit hook invoked");
     CHECK_EQ(g_contract_violation, 0, "flash contract honoured");
     CHECK(memcmp(&g_flash[0], g_new, NEW_LEN) == 0, "reconstructed image matches");
@@ -806,6 +835,76 @@ static void test_sizing(void)
     printf("       config:         %u bytes\n", (unsigned)sizeof(mcf_config_t));
 }
 
+/* mcf_ctx_size() is the published cost query, so its contract is checked
+ * directly: the refusal cases must all report zero, and the number it returns
+ * for a valid configuration must move with the inputs that actually move the
+ * cost (block size, codec). */
+static void test_ctx_size(void)
+{
+    uint32_t len;
+    uint32_t base;
+    mcf_config_t cfg;
+
+    banner("mcf_ctx_size");
+    device_reset();
+
+    len = build_patch(g_patch, g_old, OLD_LEN, g_new, NEW_LEN, PRODUCT, VER_NEW, VER_OLD,
+                      WS_LZ4, 0u, 9u);
+    cfg = make_cfg(len);
+    base = mcf_ctx_size(&cfg);
+
+    CHECK(base != 0u, "valid configuration is sizable");
+    CHECK(g_alloc_calls == 0u, "sizing does not allocate");
+    CHECK_EQ(g_flash_mutations, 0, "sizing writes no flash");
+
+    /* The budget is an output of this query, not an input: a configuration
+     * over budget must still report its true cost, or the caller can never
+     * learn what to set the budget to. */
+    cfg = make_cfg(len);
+    cfg.ram_budget = 64u;
+    CHECK_EQ(mcf_ctx_size(&cfg), base, "budget does not cap the reported cost");
+
+    /* A larger block size costs more: the two block buffers scale with it. */
+    cfg = make_cfg(len);
+    cfg.block_size = 1024u;
+    CHECK(mcf_ctx_size(&cfg) > base, "a larger block size reports a larger cost");
+
+    /* A smaller block size costs less, down to the point where the patch's
+     * new_size clamps it. */
+    cfg = make_cfg(len);
+    cfg.block_size = 256u;
+    CHECK(mcf_ctx_size(&cfg) < base, "a smaller block size reports a smaller cost");
+
+    /* Refusals are all zero, because a runnable session never costs zero. */
+    CHECK_EQ(mcf_ctx_size(NULL), 0u, "null config is unsizable");
+
+    cfg = make_cfg(len);
+    cfg.hal = NULL;
+    CHECK_EQ(mcf_ctx_size(&cfg), 0u, "null hal is unsizable");
+
+    cfg = make_cfg(len);
+    cfg.patch = NULL;
+    CHECK_EQ(mcf_ctx_size(&cfg), 0u, "null patch is unsizable");
+
+    cfg = make_cfg(len);
+    cfg.patch_size = 4u;
+    CHECK_EQ(mcf_ctx_size(&cfg), 0u, "truncated patch is unsizable");
+
+    cfg = make_cfg(len);
+    cfg.block_size = 500u; /* not a power of two */
+    CHECK_EQ(mcf_ctx_size(&cfg), 0u, "non-power-of-two block size is unsizable");
+
+    /* A patch the session would refuse on codec grounds is unsizable, not
+     * silently sized for a codec that will never run. The patch declares LZ4;
+     * a configuration demanding LZMA is rejected during header validation. */
+    cfg = make_cfg(len);
+    cfg.codec = MCF_CODEC_LZMA;
+    CHECK_EQ(mcf_ctx_size(&cfg), 0u, "codec-mismatched patch is unsizable");
+
+    /* The rejected-patch case must not have mutated anything. */
+    CHECK_EQ(g_flash_mutations, 0, "no sizing path touched flash");
+}
+
 /* ====================================================================== *
  * Resume journal
  * ====================================================================== */
@@ -1042,6 +1141,7 @@ int main(void)
     }
 
     test_sizing();
+    test_ctx_size();
     test_crc();
     test_hal();
     test_roundtrip();

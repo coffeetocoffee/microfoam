@@ -384,12 +384,16 @@ typedef struct mcf_header {
 /*
  * Zero initialise, then set fields. Unused callbacks may be left NULL.
  *
- * Size is 56 bytes on a 32-bit target. Prefer a static const instance in flash
+ * Size is 100 bytes on a 32-bit target. Prefer a static const instance in flash
  * over a stack local on memory-constrained parts:
  *
- *     static uint8_t workspace[WORKSPACE_BYTES];
+ *     static uint8_t workspace[mcf_ctx_size(&cfg)];
  *     static const mcf_config_t cfg = { .patch = (const uint8_t *)PATCH_ADDR,
  *         .workspace = workspace, .workspace_size = sizeof(workspace), ... };
+ *
+ * mcf_ctx_size() is not a constant expression, so for a static array give it
+ * the measured figure from the build host, or size it to the ceiling you are
+ * willing to spend and let mcf_session_begin() refuse anything larger.
  *
  * Field meanings
  * --------------
@@ -554,6 +558,25 @@ typedef union mcf_session_storage {
  * MCF_SESSION_MAX_BYTES. Use this for pool or heap allocation; use
  * MCF_SESSION_DECLARE when there is no heap. */
 uint32_t mcf_session_sizeof(void);
+
+/* Exact dynamic workspace this configuration will allocate, in bytes.
+ *
+ * This is the RAM cost of a specific patch and configuration, computable
+ * before any flash is touched: two block buffers plus the codec's own
+ * requirement, with the block size clamped to the patch's new_size. It equals
+ * the size the HAL allocator is asked for during a real run, so it can size a
+ * static buffer or a pool at build time.
+ *
+ * Pure and reentrant: it allocates nothing, writes no flash, and does not
+ * consult cfg->ram_budget, because the purpose is to discover the cost so the
+ * budget can be chosen. mcf_session_begin() remains the enforcement point and
+ * still returns MCF_E_DICT_TOO_LARGE for a configuration over budget.
+ *
+ * Returns 0 when the configuration cannot be sized: a NULL cfg, hal or patch,
+ * a malformed patch, a codec this session cannot resolve, or a block size that
+ * is not a power of two. A runnable session never needs zero bytes, so zero is
+ * unambiguous. HAL-owned erase/program scratch is not included. */
+uint32_t mcf_ctx_size(const mcf_config_t *cfg);
 
 /* Declare static session storage plus a ready-to-use pointer.
  *
