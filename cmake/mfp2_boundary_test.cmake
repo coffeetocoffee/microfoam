@@ -21,6 +21,7 @@ execute_process(
             --signing-key "${WORK}/signing.key" --key "${WORK}/symmetric.key"
             --key-id 00112233445566778899aabbccddeeff
             --nonce-prefix 102132435465768798a9bacbdcedfe0f
+            --nonce-prefix-ack-reuse
             --record-log2 8
     RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
 if(NOT rc EQUAL 0)

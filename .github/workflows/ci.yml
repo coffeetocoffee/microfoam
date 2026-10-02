@@ -220,6 +220,7 @@ jobs:
               --signing-key signing.key --key symmetric.key \
               --key-id 00112233445566778899aabbccddeeff \
               --nonce-prefix 102132435465768798a9bacbdcedfe0f \
+              --nonce-prefix-ack-reuse \
               --record-log2 "$log2"
           done
 

@@ -131,7 +131,8 @@ python host/microfoam.py apply   --old old.bin --patch patch.bin --out out.bin
 ```
 
 `make` is deterministic: identical inputs produce a byte-identical patch. No timestamps, no
-randomness.
+randomness. (The encrypted `make --v2` profile is the exception — it draws a fresh random
+nonce prefix per patch, because reusing one with the same key would repeat every AEAD nonce.)
 
 ---
 
@@ -323,7 +324,7 @@ ctest --test-dir build --output-on-failure -C Release
 | `lzma_policy_test` | Dictionary / `lc+lp` policy rejections and diagnostics (with `MCF_ENABLE_LZMA=ON`) |
 | `lzma_conformance_test` | 67 liblzma vectors × 5 block sizes against the LZMA decoder (with `MCF_ENABLE_LZMA=ON`) |
 | `cross_test_lzma` | A Python-produced **LZMA** patch applied by the C library (with `MCF_ENABLE_LZMA=ON`) |
-| `sodium_rfc_test` | libsodium adapter against published RFC 8032 values and AEAD tamper cases (with `MCF_ENABLE_SODIUM=ON`) |
+| `sodium_rfc_test` | libsodium adapter against published vectors: RFC 8032 §7.1 Ed25519 and §7.3 Ed25519ph (including the three-span streaming verify and its domain separation from plain Ed25519), the draft-irtf-cfrg-xchacha-03 §A.1 XChaCha20-Poly1305 AEAD vector, and adapter tamper cases (with `MCF_ENABLE_SODIUM=ON`) |
 | `v2_format_test` | MFP2 structural parser: header/TLV/record-framing rules, plus a deterministic mutation loop (~4,200 truncations, byte mutations, and random blobs) |
 | `v2_fuzz_smoke` | The parser property oracle shared with the fuzz target, run over a built-in seed, every truncation of it, and any corpus files given on the command line: a defined status, an untouched input buffer, and an independently re-derived framing and record iteration on success. Portable, so the assertions have a gate on every platform |
 | `hal_concurrency_test` | Two independent sessions on separate HALs, with no shared state |
@@ -409,10 +410,11 @@ and the standard test configurations pass in both Debug and Release; the sodium 
 | Suite | What it proves |
 |---|---|
 | `microfoam_tests` | 79 checks: round trip, **resume journal**, and fault injection at every stage |
-| `host_selftest` | 95 checks: 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, LZMA props + policy fields, format layout agreement, signing, MFP2 KAT |
+| `host_selftest` | 99 checks: 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, LZMA props + policy fields, format layout agreement, signing, MFP2 KAT, and the fixed-nonce-prefix guard |
 | `cross_test` | The Python host tool's patch, applied by the C library, byte-exact |
 | `v2_format_test` | 45 checks: MFP2 header/TLV/record-framing rules, plus a ~4,200-case deterministic mutation/property loop |
 | `v2_fuzz_smoke` | The shared parser property oracle over a built-in seed and its truncations (portable; no sanitizer runtime needed) |
+| `sodium_rfc_test` | 17 checks: published Ed25519, Ed25519ph and XChaCha20-Poly1305 vectors, plus adapter tamper cases (opt-in build) |
 | `lzma_conformance_test` | 335 checks: 67 liblzma vectors at five block sizes each (opt-in build) |
 | `lzma_policy_test` | 15 checks: dictionary and `lc+lp` policy rejections with their exact status and stage |
 
@@ -497,8 +499,13 @@ reports a lost checkpoint guarantee. A completed update clears the journal.
   The arithmetic remains quarantined and is never part of `MCF_SOURCES`. Signed patches
   are rejected with `MCF_E_SIGNATURE` unless the application supplies a vetted provider
   through `mcf_verify_fn`. An optional libsodium adapter is available with
-  `-DMCF_ENABLE_SODIUM=ON`; `sodium_rfc_test` checks published RFC 8032 TEST 1 values and AEAD
-  tamper rejection. Separately, `mfp2_host_to_session` uses PyNaCl to produce a
+  `-DMCF_ENABLE_SODIUM=ON`; `sodium_rfc_test` checks published vectors for both constructions
+  the MFP2 profile depends on — RFC 8032 §7.3 Ed25519ph (the streaming three-span verify and
+  its domain separation from plain Ed25519) and the draft-irtf-cfrg-xchacha-03 §A.1
+  XChaCha20-Poly1305 AEAD vector — plus adapter tamper rejection. Pinning these matters
+  because a round-trip through the same library that produced the ciphertext proves only
+  self-consistency; the published vectors are what prove the construction is the standard one.
+  Separately, `mfp2_host_to_session` uses PyNaCl to produce a
   signed+encrypted patch and has the C session apply it end to end, byte-exact, with the full
   tamper matrix. Do not link
   `contrib/ed25519-wip/mcf_ed25519.c` into production.

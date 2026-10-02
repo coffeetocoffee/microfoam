@@ -950,6 +950,20 @@ def cmd_make(args: argparse.Namespace) -> int:
         signing = open(args.signing_key, "rb").read()
         symmetric = open(args.key, "rb").read()
         key_id = bytes.fromhex(args.key_id) if args.key_id else b""
+        # A fixed prefix is the one way this tool can cause a nonce to repeat.
+        # Per-record nonces are prefix || LE64(record index), so the same prefix
+        # with the same key in a second patch repeats every nonce, and
+        # XChaCha20-Poly1305 then leaks the XOR of the two plaintexts. Random is
+        # the default; a fixed prefix is only for reproducible test vectors.
+        if args.nonce_prefix and not args.nonce_prefix_ack_reuse:
+            raise SystemExit(
+                "refusing a fixed --nonce-prefix without acknowledgement\n"
+                "  A fixed prefix is safe only when the key is never used for another\n"
+                "  patch: reusing one prefix with the same key repeats every per-record\n"
+                "  nonce and leaks the XOR of the two plaintexts. Omit --nonce-prefix for\n"
+                "  a random one, or pass --nonce-prefix-ack-reuse to confirm this prefix\n"
+                "  is a test vector that will never be reused with this key."
+            )
         nonce = bytes.fromhex(args.nonce_prefix) if args.nonce_prefix else b""
         patch = V2Patch(old=old, new=new, product_id=args.product, fw_version=args.version,
                         old_version=args.old_version, private_key=signing, key=symmetric,
@@ -1147,7 +1161,9 @@ def main(argv: Optional[list] = None) -> int:
     m.add_argument("--v2", action="store_true", help="build MFP2 signed/encrypted LZ4 patch")
     m.add_argument("--signing-key", help="MFP2 Ed25519 private key")
     m.add_argument("--key-id", help="MFP2 16-byte key id as hex")
-    m.add_argument("--nonce-prefix", help="MFP2 16-byte nonce prefix as hex")
+    m.add_argument("--nonce-prefix", help="MFP2 16-byte nonce prefix as hex; a fixed prefix is for reproducible test vectors only, and needs --nonce-prefix-ack-reuse")
+    m.add_argument("--nonce-prefix-ack-reuse", action="store_true",
+                   help="confirm a fixed --nonce-prefix will never be reused with this key")
     m.add_argument("--record-log2", type=int, default=13)
     m.set_defaults(func=cmd_make)
 

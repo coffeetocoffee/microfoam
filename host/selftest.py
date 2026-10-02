@@ -513,6 +513,64 @@ def test_v2_kat() -> None:
     check(M.verify_v2(patch, pub, key=key, old=old) == new, "KAT round-trip")
 
 
+def test_v2_nonce_guard() -> None:
+    """A fixed nonce prefix must be acknowledged on the command line.
+
+    Per-record nonces are prefix || record index, so reusing one prefix with the
+    same key in a second patch repeats every nonce and leaks the XOR of the two
+    plaintexts. Random is the default; a fixed prefix is for reproducible test
+    vectors, and the guard makes that intent explicit rather than silent.
+    """
+    print("MFP2 fixed-nonce-prefix guard")
+    try:
+        from nacl.signing import SigningKey
+    except Exception as exc:
+        print(f"  SKIP  PyNaCl unavailable: {exc}")
+        return
+    old, new = make_firmware(64)
+    with tempfile.TemporaryDirectory() as d:
+        p_old = os.path.join(d, "old.bin")
+        p_new = os.path.join(d, "new.bin")
+        p_sk = os.path.join(d, "sign.key")
+        p_key = os.path.join(d, "sym.key")
+        open(p_old, "wb").write(old)
+        open(p_new, "wb").write(new)
+        open(p_sk, "wb").write(bytes(SigningKey(bytes(range(32)))))
+        open(p_key, "wb").write(bytes(range(32, 64)))
+
+        base = ["make", "--v2", "--old", p_old, "--new", p_new,
+                "--version", "0x00020000", "--old-version", "0x00010000",
+                "--signing-key", p_sk, "--key", p_key,
+                "--key-id", "00112233445566778899aabbccddeeff",
+                "--record-log2", "10"]
+        fixed = ["--nonce-prefix", "102132435465768798a9bacbdcedfe0f"]
+        p_refused = os.path.join(d, "refused.mfp2")
+
+        # Fixed prefix without the acknowledgement is refused, and writes nothing.
+        try:
+            M.main(base + fixed + ["--out", p_refused])
+        except SystemExit as exc:
+            check("acknowledgement" in str(exc), "unacknowledged fixed prefix is refused")
+        else:
+            check(False, "unacknowledged fixed prefix is refused")
+        check(not os.path.exists(p_refused), "a refused build writes no patch")
+
+        # With the acknowledgement it is allowed.
+        try:
+            rc = M.main(base + fixed + ["--nonce-prefix-ack-reuse",
+                                        "--out", os.path.join(d, "fixed.mfp2")])
+            check(rc == 0, "acknowledged fixed prefix builds")
+        except SystemExit:
+            check(False, "acknowledged fixed prefix builds")
+
+        # The random default needs no acknowledgement.
+        try:
+            rc = M.main(base + ["--out", os.path.join(d, "random.mfp2")])
+            check(rc == 0, "random prefix builds without acknowledgement")
+        except SystemExit:
+            check(False, "random prefix builds without acknowledgement")
+
+
 def test_lzma_policy_guard() -> None:
     """The host side of the LZMA props contract.
 
@@ -557,6 +615,7 @@ def main() -> int:
     test_signing()
     test_v2()
     test_v2_kat()
+    test_v2_nonce_guard()
 
     print(f"\n{PASS} checks, {FAIL} failures")
     return 0 if FAIL == 0 else 1

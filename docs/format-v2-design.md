@@ -115,6 +115,11 @@ a fresh unpredictable 16-byte prefix for each patch/key pair; prefix reuse for a
 key is a hard production error. Deterministic output is allowed only when the
 operator independently guarantees uniqueness.
 
+`host/microfoam.py` defaults to a random prefix and refuses an explicit
+`--nonce-prefix` unless `--nonce-prefix-ack-reuse` is also passed, so the one
+path that can repeat a nonce requires an explicit statement of that guarantee
+rather than being taken silently.
+
 For each record, associated data is the exact concatenation
 
 ```
@@ -214,7 +219,10 @@ O(record), not O(payload). `begin()` walks every record once to obtain the exact
 decoded delta size the synthetic MFP1 header must declare, so a record-level AEAD
 failure is still detected before the first flash erase. The
 acceptance evidence is the sodium CI job, which runs `sodium_rfc_test`
-(RFC 8032 and AEAD tamper coverage) plus the `mfp2_host_to_session` test: a
+(published vectors for both constructions the profile depends on: RFC 8032
+§7.3 Ed25519ph including the three-span streaming verify, and the
+draft-irtf-cfrg-xchacha-03 §A.1 XChaCha20-Poly1305 vector, plus tamper cases)
+plus the `mfp2_host_to_session` test: a
 PyNaCl-produced signed/encrypted patch is applied end to end by the C session,
 byte-compared to the target image, and rejected under every tamper variant
 (signature, ciphertext, key, key id, tag, truncation, header, reordering,
