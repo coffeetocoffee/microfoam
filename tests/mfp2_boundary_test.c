@@ -170,6 +170,13 @@ static int streaming_workspace_case(const uint8_t *patch, uint32_t patch_len,
         fprintf(stderr, "streaming-workspace image is not byte-exact\n");
         return 0;
     }
+    /* The streaming feed is a separate apply route from run_patch(), so it has
+     * to prove it programs flash too - otherwise its tamper assertions would be
+     * as vacuous as a counter that cannot move. */
+    if (mutations == 0u) {
+        fprintf(stderr, "streaming path programmed no flash\n");
+        return 0;
+    }
     printf("  ok  applies in %u-byte workspace (whole-payload design needed %u)\n",
            (unsigned)need, (unsigned)old_need);
     return 1;
@@ -328,15 +335,16 @@ int main(int argc, char **argv)
     uint32_t patch_len, old_len, new_len, pub_len, key_len = 0;
     uint32_t reord_len = 0, wrong_nonce_len = 0, off;
     uint32_t tag_tamper_len = 0, ct_tamper_len = 0, bad_key_id_len = 0;
+    uint32_t dupe_len = 0;
     uint8_t *patch, *old, *expected, *pub, *key;
     uint8_t *reord = NULL, *wrong_nonce = NULL, *tag_tamper = NULL;
-    uint8_t *ct_tamper = NULL, *bad_key_id = NULL;
+    uint8_t *ct_tamper = NULL, *bad_key_id = NULL, *dupe = NULL;
     mcf_v2_view_t view; crypto_ctx_t crypto;
     int ok = 1;
     /* argv: patch old new pub key [reordered wrong_nonce tag_tamper ct_tamper
-     * bad_key_id] — the trailing five are the re-signed variants built by
-     * tests/mfp2_fixtures.py. */
-    if (argc < 6 || argc > 11 || sodium_init() < 0) return 2;
+     * bad_key_id duplicated] — the trailing six are the re-signed variants
+     * built by tests/mfp2_fixtures.py. */
+    if (argc < 6 || argc > 12 || sodium_init() < 0) return 2;
     patch = read_file(argv[1], &patch_len); old = read_file(argv[2], &old_len);
     expected = read_file(argv[3], &new_len); pub = read_file(argv[4], &pub_len);
     key = read_file(argv[5], &key_len);
@@ -348,6 +356,7 @@ int main(int argc, char **argv)
     if (argc > 8 && !(tag_tamper = read_file(argv[8], &tag_tamper_len))) return 2;
     if (argc > 9 && !(ct_tamper = read_file(argv[9], &ct_tamper_len))) return 2;
     if (argc > 10 && !(bad_key_id = read_file(argv[10], &bad_key_id_len))) return 2;
+    if (argc > 11 && !(dupe = read_file(argv[11], &dupe_len))) return 2;
     memcpy(crypto.public_key, pub, sizeof(crypto.public_key));
     memcpy(crypto.symmetric_key, key, sizeof(crypto.symmetric_key));
     /* Fixture key id is 00112233445566778899aabbccddeeff. */
@@ -360,6 +369,19 @@ int main(int argc, char **argv)
         fprintf(stderr, "MFP2 positive path failed\n"); return 1;
     }
     puts("  ok  valid patch applies byte-exact");
+
+    /* The counter every tamper case leans on must be able to move. Every
+     * rejection below asserts `mutations == 0`, and that assertion is only
+     * meaningful if a successful run drives the counter above zero: a counter
+     * that can never increment would make all of them pass vacuously. Removing
+     * the increments from the HAL callbacks must break this, not the suite. */
+    if (mutations == 0u) {
+        fprintf(stderr, "flash-mutation counter never incremented on a "
+                        "successful apply: the zero-mutation assertions are "
+                        "vacuous\n");
+        return 1;
+    }
+    printf("  ok  a successful apply programs flash (%u mutations)\n", mutations);
 
     /* The same patch in a workspace far smaller than the decrypted payload. */
     if (!streaming_workspace_case(patch, patch_len, old, old_len, expected, new_len, &crypto)) {
@@ -481,6 +503,15 @@ int main(int argc, char **argv)
      * the provider rejects before a single record is decrypted. */
     if (bad_key_id) ok &= expect_case("unknown key id", bad_key_id, bad_key_id_len,
                                       NULL, MCF_E_AUTH, &crypto, old, old_len);
+    else ok = 0;
+
+    /* One record's unit replayed in another's slot. Distinct from reordering,
+     * which swaps two units so each position holds a different authentic
+     * record; here one authentic unit appears twice, so the device must refuse
+     * to accept the same authenticated record a second time. The AAD index is
+     * the only thing that can catch it. */
+    if (dupe) ok &= expect_case("duplicated record", dupe, dupe_len,
+                                NULL, MCF_E_AUTH, &crypto, old, old_len);
     else ok = 0;
 
     /* ---------------- Resume scenarios ---------------- */
@@ -616,7 +647,8 @@ int main(int argc, char **argv)
     }
 
     (void)view;
-    free(reord); free(wrong_nonce); free(tag_tamper); free(ct_tamper); free(bad_key_id);
+    free(reord); free(wrong_nonce); free(tag_tamper); free(ct_tamper);
+    free(bad_key_id); free(dupe);
     free(patch); free(old); free(expected); free(pub); free(key);
     if (!ok) { fprintf(stderr, "MFP2 session integration test FAILED\n"); return 1; }
     puts("MFP2 session success, Ed25519ph/AEAD tamper tests passed"); return 0;

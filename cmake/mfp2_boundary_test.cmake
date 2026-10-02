@@ -63,6 +63,7 @@ execute_process(
             --out-tag-tamper "${WORK}/tag_tamper.mfp2"
             --out-ct-tamper "${WORK}/ct_tamper.mfp2"
             --out-bad-key-id "${WORK}/bad_key_id.mfp2"
+            --out-duplicated "${WORK}/duplicated.mfp2"
             --self-check
     RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
 if(NOT rc EQUAL 0)
@@ -71,6 +72,7 @@ endif()
 execute_process(COMMAND "${MCF}" "${WORK}/valid.mfp2" "${OLD}" "${NEW}" "${WORK}/public.key" "${WORK}/symmetric.key"
                 "${WORK}/reordered.mfp2" "${WORK}/wrong_nonce.mfp2"
                 "${WORK}/tag_tamper.mfp2" "${WORK}/ct_tamper.mfp2" "${WORK}/bad_key_id.mfp2"
+                "${WORK}/duplicated.mfp2"
     RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "MFP2 host-to-session integration failed:\n${out}\n${err}")

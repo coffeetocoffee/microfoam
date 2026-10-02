@@ -120,6 +120,7 @@ def main() -> int:
     ap.add_argument("--out-tag-tamper", required=True)
     ap.add_argument("--out-ct-tamper", required=True)
     ap.add_argument("--out-bad-key-id", required=True)
+    ap.add_argument("--out-duplicated", required=True)
     ap.add_argument("--self-check", action="store_true",
                     help="verify the variants are rejected by the host verifier")
     args = ap.parse_args()
@@ -185,12 +186,37 @@ def main() -> int:
     hh[M.V2_OFF_KEY_ID] ^= 1
     bad_key_id = resign(bytes(hh), area, seed)
 
+    # Duplicated record: one record's unit replayed verbatim in another's slot.
+    # Distinct from reordering, which swaps two units so both positions are
+    # occupied by the wrong-but-authentic record; here one authentic unit appears
+    # twice, which is the "accepts the same record twice" shape. Two units of
+    # equal wire length are required so the copy is length-preserving and the
+    # framing still holds; without that the variant would be a framing failure
+    # rather than an authentication one.
+    seen = {}
+    dupe = None
+    for idx, (_pos, span) in enumerate(units):
+        if span in seen:
+            dupe = (seen[span], idx)
+            break
+        seen[span] = idx
+    if dupe is None:
+        raise SystemExit("need two records of equal wire length for the "
+                         "duplication variant")
+    src_i, dst_i = dupe
+    a = bytearray(area)
+    src_pos, src_len = units[src_i]
+    dst_pos, dst_len = units[dst_i]
+    a[dst_pos:dst_pos + dst_len] = area[src_pos:src_pos + src_len]
+    duplicated = resign(hdr, bytes(a), seed)
+
     outputs = (
         (args.out_reordered, "reordered", reordered),
         (args.out_wrong_nonce, "wrong-nonce", wrong_nonce),
         (args.out_tag_tamper, "tag-tamper", tag_tamper),
         (args.out_ct_tamper, "ct-tamper", ct_tamper),
         (args.out_bad_key_id, "bad-key-id", bad_key_id),
+        (args.out_duplicated, "duplicated", duplicated),
     )
     for path, _name, blobv in outputs:
         Path(path).write_bytes(blobv)

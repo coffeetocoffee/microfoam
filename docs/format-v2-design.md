@@ -224,17 +224,20 @@ acceptance evidence is the sodium CI job, which runs `sodium_rfc_test`
 draft-irtf-cfrg-xchacha-03 §A.1 XChaCha20-Poly1305 vector, plus tamper cases)
 plus the `mfp2_host_to_session` test: a
 PyNaCl-produced signed/encrypted patch is applied end to end by the C session,
-byte-compared to the target image, and rejected under 13 tamper variants
+byte-compared to the target image, and rejected under 14 tamper variants
 (signature, ciphertext, key, key id, tag, truncation, header, reordering,
-nonce prefix, unknown key id, inconsistent payload size) with zero flash
-mutations, each asserting its exact status rather than any rejection. Five of
-those variants are re-signed with a recomputed payload CRC, so signature and
-payload CRC both verify and only the binding under test can reject them; the
-rest are unsigned mutations that must die at the cheap gate they are named
-after. `tests/mfp2_fixtures.py --self-check` asserts the re-signed variants
-parse and verify before the host rejects them, so none can silently degrade
-into a parse failure and pass for the wrong reason. That test also applies the
-same patch in
+nonce prefix, unknown key id, inconsistent payload size, record duplication)
+with zero flash mutations, each asserting its exact status rather than any
+rejection. Six of those variants are re-signed with a recomputed payload CRC,
+so signature and payload CRC both verify and only the binding under test can
+reject them; the rest are unsigned mutations that must die at the cheap gate
+they are named after. `tests/mfp2_fixtures.py --self-check` asserts the
+re-signed variants parse and verify before the host rejects them, so none can
+silently degrade into a parse failure and pass for the wrong reason. The
+zero-mutation claim is falsifiable rather than assumed: the successful apply
+asserts the flash-mutation counter moved, so a counter that could never
+increment fails the suite instead of making all fourteen assertions vacuous.
+That test also applies the same patch in
 a workspace far smaller than the decrypted payload, which the resident-payload
 design could not. Parser success alone remains inspection-only; execution is the
 session path.
