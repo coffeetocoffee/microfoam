@@ -42,9 +42,11 @@ classifiers = [
 # accept as a version string. pip evaluates an `extra == "<name>"` marker by
 # building a Specifier from the right-hand side; for a version-shaped name that
 # succeeds, so pip then tries to coerce the *left* side (the other extra's
-# name) into a Version and dies with
-# `InvalidVersion: <other extra name>`. Verified: `v2` triggers it, `mfp2` does
-# not.
+# name) into a Version and dies with `InvalidVersion: <other extra name>`.
+# This is pip-version-dependent and not monotonic: the crash reproduces on
+# pip 24.1-25.2 with that exact signature, while 24.0 and 26.x install the
+# same project without complaint. So the name is wrong to use, and a green
+# install on one pip version is no evidence that it is safe.
 mfp1 = ["cryptography>=3.4"]
 # MFP2 signed/encrypted patches use PyNaCl.
 mfp2 = ["pynacl>=1.4"]

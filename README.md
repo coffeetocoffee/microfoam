@@ -192,7 +192,9 @@ microfoam make --old old.bin --new new.bin --out patch.bin \
 Signing is an extra: `pip install .[mfp1]` for MFP1 Ed25519 (`cryptography`) and
 `pip install .[mfp2]` for MFP2 signed/encrypted patches (`pynacl`). LZ4 and raw patches need
 nothing beyond the standard library. Running `python host/microfoam.py ...` from a checkout
-keeps working and is what CI uses.
+keeps working and is what most CI jobs use; a dedicated packaging job builds the sdist,
+installs it with both extras, and round-trips MFP1 and MFP2 through the installed
+`microfoam` command, so the published distribution is exercised rather than assumed.
 
 ## The HAL contract
 

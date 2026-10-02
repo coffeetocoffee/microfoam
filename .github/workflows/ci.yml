@@ -168,6 +168,92 @@ jobs:
           mkdir -p build-py
           python host/selftest.py
 
+  packaging:
+    name: host tool packaging
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Every other job runs the tool in place (`python host/microfoam.py ...`),
+      # so none of them read pyproject.toml, exercise the package-dir mapping,
+      # or invoke the console-script entry point. An extra renamed to something
+      # that no longer matches its dependency, or a module that stopped
+      # shipping in the sdist, would leave all of them green and only break for
+      # the first downstream user. This is the one job that installs the
+      # distribution the way a user does.
+      - name: Build the sdist and wheel
+        run: |
+          set -e
+          python -m pip install --quiet build
+          python -m build --outdir dist
+
+      - name: Install the built sdist with both signing extras
+        run: |
+          set -e
+          python -m venv .venv
+          . .venv/bin/activate
+          python -m pip install --quiet --upgrade pip
+          # Installed from the sdist rather than the checkout, so a file that
+          # the build backend fails to include is caught here and not by a
+          # user. Note the variable: a bare `dist/*.tar.gz[mfp1,mfp2]` would be
+          # a glob bracket expression, not an extras specifier.
+          SDIST=$(ls dist/microfoam-*.tar.gz)
+          python -m pip install "${SDIST}[mfp1,mfp2]"
+
+      # pip only warns when an extra does not exist: it still installs the
+      # package and exits 0. So the install above cannot by itself prove the
+      # extras resolved, and a gate that only checked pip's exit code would
+      # pass with the dependencies absent. Assert they actually landed.
+      - name: Assert both signing extras resolved
+        run: |
+          set -e
+          . .venv/bin/activate
+          python -c "import cryptography, nacl; print('cryptography and pynacl present')"
+
+      - name: Round-trip through the installed entry point
+        run: |
+          set -e
+          . .venv/bin/activate
+          # Run from a scratch directory, so the `microfoam` command has to
+          # resolve to the installed console script and the installed module,
+          # not to the working tree.
+          cd "$RUNNER_TEMP"
+          microfoam --version
+
+          # MFP2 (exercises the pynacl extra): sign, encrypt, verify, apply.
+          python -c "from nacl.signing import SigningKey; s=bytes(range(32)); open('signing.key','wb').write(s); open('public.key','wb').write(bytes(SigningKey(s).verify_key)); open('symmetric.key','wb').write(bytes(range(32,64)))"
+          FIX="$GITHUB_WORKSPACE/tests/fixtures"
+          microfoam make --v2 \
+            --old "$FIX/old.bin" --new "$FIX/new.bin" --out patch.mfp2 \
+            --product 0x1234 --version 0x00020000 --old-version 0x00010000 \
+            --signing-key signing.key --key symmetric.key \
+            --key-id 00112233445566778899aabbccddeeff \
+            --nonce-prefix 102132435465768798a9bacbdcedfe0f \
+            --nonce-prefix-ack-reuse --record-log2 8
+          microfoam inspect patch.mfp2
+          microfoam verify patch.mfp2 --pub public.key
+          microfoam apply --old "$FIX/old.bin" --patch patch.mfp2 \
+            --out out-v2.bin --pub public.key --key symmetric.key
+          cmp out-v2.bin "$FIX/new.bin"
+
+          # MFP1 (exercises the cryptography extra): a different code path and a
+          # different signing library, so one extra resolving does not imply the
+          # other.
+          microfoam keygen --private mfp1.key --public mfp1.pub
+          microfoam make \
+            --old "$FIX/old.bin" --new "$FIX/new.bin" --out patch.mfp \
+            --product 0x1234 --version 0x00020000 --old-version 0x00010000 \
+            --key mfp1.key --codec lz4
+          microfoam verify patch.mfp --pub mfp1.pub
+          microfoam apply --old "$FIX/old.bin" --patch patch.mfp \
+            --out out-v1.bin --pub mfp1.pub
+          cmp out-v1.bin "$FIX/new.bin"
+
   sodium:
     name: libsodium RFC and MFP2 parser-boundary tests
     runs-on: ubuntu-latest
