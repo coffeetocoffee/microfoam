@@ -232,6 +232,13 @@ The decoder is the vendored **LZMA SDK** (`third_party/lzma-sdk`, public domain,
 Pavlov), the same implementation shipped in 7-Zip, U-Boot, and EDK2. A patch declaring LZMA
 on a build without it is rejected as `MCF_E_UNSUPPORTED` rather than handed to a stub.
 
+This adds no external link dependency: the SDK sources are compiled into the library, so
+nothing outside the standard C library is required at link time. **liblzma is host-side
+only** — it is the reference encoder behind `host/lzma_vectors.py` that generates the
+conformance vectors, which is what makes those vectors an external check rather than a
+self-confirming one. `docs/lzma-history.md` is the retirement record of the hand-written
+decoder this replaced, not a proposal for future work.
+
 ### LZMA parameter policy
 
 A patch's properties block declares `lc/lp/pb` and a dictionary size, and those set the

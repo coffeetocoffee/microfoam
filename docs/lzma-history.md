@@ -127,4 +127,7 @@ consistent shape across this decoder and the Ed25519 attempt is that every local
 passes and the composition is wrong somewhere that reading cannot reach. That is an argument
 about method, not about luck, and it is why the recommendation is unchanged: for a range
 coder, take a reviewed implementation.
-that convention and must define its own. That is the one design decision still open here.
+
+Nothing on this page is an open design question. The shipped LZMA codec is the vendored LZMA
+SDK (`third_party/lzma-sdk`, wrapped by `src/mcf_lzma.c`); this page is the record of why the
+hand-written decoder it replaced was abandoned.
