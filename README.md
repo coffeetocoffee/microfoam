@@ -325,14 +325,22 @@ ctest --test-dir build --output-on-failure -C Release
 | `cross_test_lzma` | A Python-produced **LZMA** patch applied by the C library (with `MCF_ENABLE_LZMA=ON`) |
 | `sodium_rfc_test` | libsodium adapter against published RFC 8032 values and AEAD tamper cases (with `MCF_ENABLE_SODIUM=ON`) |
 | `v2_format_test` | MFP2 structural parser: header/TLV/record-framing rules, plus a deterministic mutation loop (~4,200 truncations, byte mutations, and random blobs) |
+| `v2_fuzz_smoke` | The parser property oracle shared with the fuzz target, run over a built-in seed, every truncation of it, and any corpus files given on the command line: a defined status, an untouched input buffer, and an independently re-derived framing and record iteration on success. Portable, so the assertions have a gate on every platform |
 | `hal_concurrency_test` | Two independent sessions on separate HALs, with no shared state |
 | `mfp2_host_to_session` | PyNaCl-produced signed+encrypted MFP2 patch: the C session applies it byte-exact in a workspace far smaller than the payload, and rejects every tamper variant with zero flash mutations (sodium + PyNaCl required). |
+
+`MCF_BUILD_FUZZER=ON` additionally builds `v2_parse_fuzzer`, a coverage-guided libFuzzer
+target for `mcf_v2_parse` compiled with ASan/UBSan (Clang only; run it directly with a corpus
+directory rather than through ctest). It asserts the same oracle as `v2_fuzz_smoke`, with
+coverage feedback on top; the CI `fuzz` job seeds it from real host-produced patches and runs
+it for a bounded time.
 
 | Option | Default | Effect |
 |---|---|---|
 | `MCF_ENABLE_LZMA` | `OFF` | Build the LZMA codec (vendored LZMA SDK) |
 | `MCF_ENABLE_SODIUM` | `OFF` | Build libsodium adapters and MFP2 host-to-session integration tests |
 | `MCF_BUILD_TESTS` | `ON` | Build the host test suite |
+| `MCF_BUILD_FUZZER` | `OFF` | Build the coverage-guided `v2_parse_fuzzer` with ASan/UBSan (requires Clang) |
 | `MCF_WERROR` | `ON` | Warnings are errors |
 | `MCF_STRICT` | `ON` | Add `-Wconversion -Wsign-conversion` |
 
@@ -366,6 +374,9 @@ host/lzma_vectors.py       generates the LZMA conformance vectors via liblzma
 tests/test_microfoam.c     fault-injection and round-trip tests
 tests/lzma_conformance_test.c  LZMA conformance harness (67 vectors x 5 block sizes)
 tests/cross_test.c         host-tool patch applied by the C library
+tests/v2_format_test.c     MFP2 structural parser cases and mutation/property loop
+tests/v2_parse_fixture.h   parser property oracle shared by the suite and fuzz target
+tests/fuzz_v2_parse.c      MFP2 parser fuzz target (libFuzzer entry and portable smoke driver)
 tests/fixtures/            deterministic firmware pair and a test key
 contrib/ed25519-wip/       rejected verifier, defect log, and conformance harness
 docs/architecture.md       the design this implements, and why
@@ -400,12 +411,24 @@ and the standard test configurations pass in both Debug and Release; the sodium 
 | `microfoam_tests` | 79 checks: round trip, **resume journal**, and fault injection at every stage |
 | `host_selftest` | 95 checks: 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, LZMA props + policy fields, format layout agreement, signing, MFP2 KAT |
 | `cross_test` | The Python host tool's patch, applied by the C library, byte-exact |
+| `v2_format_test` | 45 checks: MFP2 header/TLV/record-framing rules, plus a ~4,200-case deterministic mutation/property loop |
+| `v2_fuzz_smoke` | The shared parser property oracle over a built-in seed and its truncations (portable; no sanitizer runtime needed) |
 | `lzma_conformance_test` | 335 checks: 67 liblzma vectors at five block sizes each (opt-in build) |
 | `lzma_policy_test` | 15 checks: dictionary and `lc+lp` policy rejections with their exact status and stage |
 
 The cross test is the one that matters most: a library verified only against its own
 encoder proves nothing about the format. Two independently written implementations agreeing
 on a real 35 KB firmware pair is evidence.
+
+The MFP2 parser is the one surface that consumes attacker-controlled bytes, so it is held to
+a property contract rather than a list of cases: for *every* input, `mcf_v2_parse` must return
+a defined status, must not modify its input buffer, and on success must produce a view that an
+independent re-derivation of the frozen framing reproduces, with iteration yielding exactly the
+declared records. `v2_format_test` samples that space deterministically; `v2_fuzz_smoke`
+asserts the same oracle on every platform; and with `MCF_BUILD_FUZZER=ON` a Clang/libFuzzer
+target searches it with coverage feedback under ASan/UBSan. The oracle is proven non-vacuous -
+it rejects a view with an inflated record count, a shifted header length, or a mutated framing
+byte - so a passing run is evidence rather than a tautology.
 
 Fault injection covers erase failure, program failure, **program succeeding but storing the
 wrong bytes**, truncated payloads, flipped bits, wrong product, downgrade attempts, base

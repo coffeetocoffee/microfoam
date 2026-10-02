@@ -177,6 +177,61 @@ jobs:
         # library). Both are the acceptance gates for calling LZMA supported.
         run: ctest --test-dir build-lzma --output-on-failure -C Debug
 
+  fuzz:
+    name: coverage-guided MFP2 parser fuzz
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Clang and PyNaCl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+          python -m pip install pynacl
+
+      # MCF_BUILD_FUZZER builds the parser source into the fuzz target with
+      # ASan/UBSan, so a fault inside mcf_v2_parse itself is caught, not merely
+      # one in the harness. Clang supplies the coverage-guided libFuzzer runtime.
+      - name: Configure with sanitizers and the fuzz target
+        run: >
+          cmake -B build-fuzz -DCMAKE_BUILD_TYPE=Debug
+          -DMCF_BUILD_FUZZER=ON -DCMAKE_C_COMPILER=clang
+
+      - name: Build
+        run: cmake --build build-fuzz --config Debug
+
+      # Real signed+encrypted patches seed the corpus, so the fuzzer starts from
+      # a valid container instead of rediscovering the format from bytes.
+      - name: Seed the corpus from host-produced MFP2 patches
+        run: |
+          set -e
+          mkdir -p corpus
+          python -c "from nacl.signing import SigningKey; s=bytes(range(32)); open('signing.key','wb').write(s); open('public.key','wb').write(bytes(SigningKey(s).verify_key)); open('symmetric.key','wb').write(bytes(range(32,64)))"
+          for log2 in 8 10 13; do
+            python host/microfoam.py make --v2 \
+              --old tests/fixtures/old.bin --new tests/fixtures/new.bin \
+              --out "corpus/valid-$log2.mfp2" --product 0x1234 \
+              --version 0x00020000 --old-version 0x00010000 \
+              --signing-key signing.key --key symmetric.key \
+              --key-id 00112233445566778899aabbccddeeff \
+              --nonce-prefix 102132435465768798a9bacbdcedfe0f \
+              --record-log2 "$log2"
+          done
+
+      - name: Smoke-test the parser property oracle
+        run: ./build-fuzz/v2_fuzz_smoke corpus/*.mfp2
+
+      - name: Fuzz
+        run: >
+          ./build-fuzz/v2_parse_fuzzer corpus
+          -max_total_time=90 -max_len=65536 -rss_limit_mb=2048
+          -print_final_stats=1
+
   headers:
     name: licence headers
     runs-on: ubuntu-latest

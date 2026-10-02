@@ -23,6 +23,11 @@ if(MCF_ENABLE_SODIUM AND NOT MCF_BUILD_TESTS)
     message(STATUS "libsodium adapter enabled; applications must configure the HAL verify callback to mcf_sodium_verify")
 endif()
 
+# The coverage-guided fuzz target needs Clang's libFuzzer plus the ASan/UBSan
+# runtimes, so it is opt-in and self-contained: it compiles the parser source it
+# exercises with the sanitizers, leaving every other target untouched.
+option(MCF_BUILD_FUZZER "Build the coverage-guided MFP2 parser fuzz target (requires Clang)" OFF)
+
 # ------------------------------------------------------------------ sources
 # An explicit list. A recursive glob would drag experimental or rejected
 # implementations into a device build that has no use for them.
@@ -163,6 +168,33 @@ if(MCF_BUILD_TESTS)
     target_link_libraries(v2_format_test PRIVATE microfoam)
     target_compile_options(v2_format_test PRIVATE ${MCF_WARNINGS})
     add_test(NAME v2_format_test COMMAND v2_format_test)
+
+    # The parser is the one surface that consumes attacker-controlled bytes, so
+    # it gets a property oracle (tests/v2_parse_fixture.h) shared with a fuzz
+    # target. This portable smoke target runs those assertions on every platform
+    # and needs no sanitizer runtime, so the gate exists even without Clang.
+    add_executable(v2_fuzz_smoke tests/fuzz_v2_parse.c)
+    target_link_libraries(v2_fuzz_smoke PRIVATE microfoam)
+    target_compile_definitions(v2_fuzz_smoke PRIVATE MCF_FUZZ_STANDALONE=1)
+    target_compile_options(v2_fuzz_smoke PRIVATE ${MCF_WARNINGS})
+    add_test(NAME v2_fuzz_smoke COMMAND v2_fuzz_smoke)
+
+    if(MCF_BUILD_FUZZER)
+        if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+            message(FATAL_ERROR "MCF_BUILD_FUZZER requires Clang for libFuzzer")
+        endif()
+        # The parser source is compiled into the target with the sanitizers, so a
+        # fault inside mcf_v2_parse is caught, not merely one in the harness. No
+        # MCF_FUZZ_STANDALONE here: the fuzzer runtime supplies main().
+        add_executable(v2_parse_fuzzer tests/fuzz_v2_parse.c src/mcf_v2.c)
+        target_include_directories(v2_parse_fuzzer PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_options(v2_parse_fuzzer PRIVATE
+            ${MCF_WARNINGS} -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer)
+        target_link_options(v2_parse_fuzzer PRIVATE
+            -fsanitize=fuzzer,address,undefined)
+    endif()
 
     add_executable(hal_concurrency_test tests/hal_concurrency_test.c)
     target_link_libraries(hal_concurrency_test PRIVATE microfoam)

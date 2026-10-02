@@ -223,6 +223,17 @@ a workspace far smaller than the decrypted payload, which the resident-payload
 design could not. Parser success alone remains inspection-only; execution is the
 session path.
 
+The structural parser carries its own property contract, shared through
+`tests/v2_parse_fixture.h` by a deterministic mutation loop
+(`tests/v2_format_test.c`) and a coverage-guided fuzz target
+(`tests/fuzz_v2_parse.c`, built with `MCF_BUILD_FUZZER=ON`): for every input,
+`mcf_v2_parse` returns a defined status, leaves the input buffer byte-identical,
+and - on success - yields a view that an independent re-derivation of the frozen
+framing reproduces, with iteration yielding exactly `record_count` records. The
+portable `v2_fuzz_smoke` target runs those assertions on every platform; the CI
+`fuzz` job adds Clang/libFuzzer coverage guidance under ASan/UBSan over a corpus
+of real host-produced patches.
+
 ## 8. Resume (record-aligned)
 
 Resume is an optimisation layered on a scheme that is already safe without it:

@@ -18,6 +18,7 @@
  * matches an independent re-derivation of the header and record framing. */
 
 #include "microfoam_v2.h"
+#include "v2_parse_fixture.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -32,51 +33,6 @@ static int g_failures;
         g_failures++; \
     } \
 } while (0)
-
-static void wr16(uint8_t *p, uint16_t v)
-{
-    p[0] = (uint8_t)v;
-    p[1] = (uint8_t)(v >> 8);
-}
-
-static void wr32(uint8_t *p, uint32_t v)
-{
-    p[0] = (uint8_t)v;
-    p[1] = (uint8_t)(v >> 8);
-    p[2] = (uint8_t)(v >> 16);
-    p[3] = (uint8_t)(v >> 24);
-}
-
-/* Valid frozen-profile patch: signed + encrypted + LZ4, two tagged records. */
-static void build_valid(uint8_t *patch, uint32_t patch_size)
-{
-    memset(patch, 0, patch_size);
-    wr32(&patch[MCF_V2_OFF_MAGIC], MCF_V2_MAGIC);
-    wr16(&patch[MCF_V2_OFF_HEADER_LEN], MCF_V2_HEADER_MIN);
-    wr16(&patch[MCF_V2_OFF_VERSION], MCF_V2_VERSION);
-    wr32(&patch[MCF_V2_OFF_FLAGS], MCF_V2_EXEC_REQUIRED_FLAGS);
-    wr32(&patch[MCF_V2_OFF_PRODUCT], 0x1234u);
-    wr32(&patch[MCF_V2_OFF_OLD_SIZE], 64u);
-    wr32(&patch[MCF_V2_OFF_NEW_SIZE], 64u);
-    wr32(&patch[MCF_V2_OFF_PAYLOAD_SIZE], 44u);
-    wr32(&patch[MCF_V2_OFF_OLD_VERSION], 1u);
-    patch[MCF_V2_OFF_CODEC] = (uint8_t)MCF_CODEC_LZ4;
-    patch[MCF_V2_OFF_RECORD_LOG2] = MCF_V2_RECORD_LOG2_MIN;
-    wr32(&patch[MCF_V2_OFF_CODEC_PROFILE], 0u);
-    patch[MCF_V2_OFF_KEY_ID] = 1u;
-    wr32(&patch[MCF_V2_OFF_RECORD_COUNT], 2u);
-
-    /* nonce_prefix[16..23] is reserved zero; memset initialized it. */
-    wr32(&patch[MCF_V2_HEADER_MIN], 2u);
-    patch[MCF_V2_HEADER_MIN + 4u] = 0xAAu;
-    patch[MCF_V2_HEADER_MIN + 5u] = 0xBBu;
-    memset(&patch[MCF_V2_HEADER_MIN + 6u], 0xA1u, MCF_V2_RECORD_TAG_SIZE);
-    wr32(&patch[MCF_V2_HEADER_MIN + 4u + 2u + MCF_V2_RECORD_TAG_SIZE], 2u);
-    patch[MCF_V2_HEADER_MIN + 4u + 2u + MCF_V2_RECORD_TAG_SIZE + 4u] = 0xCCu;
-    patch[MCF_V2_HEADER_MIN + 4u + 2u + MCF_V2_RECORD_TAG_SIZE + 5u] = 0xDDu;
-    memset(&patch[MCF_V2_HEADER_MIN + 4u + 2u + MCF_V2_RECORD_TAG_SIZE + 6u],
-           0xB2u, MCF_V2_RECORD_TAG_SIZE);
-}
 
 /* ======================================================================== *
  * Deterministic mutation/property loop
@@ -94,60 +50,11 @@ static uint32_t rng_next(void)
 
 static uint32_t rng_below(uint32_t n) { return rng_next() % n; }
 
-static uint32_t wr32_read(const uint8_t *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
 /* Wrapper so every loop call site goes through one point; `v` may be a
  * scratch view the caller re-uses across iterations (the parser zeroes it). */
 static mcf_status_t parse_quiet(const uint8_t *p, uint32_t n, mcf_v2_view_t *v)
 {
     return mcf_v2_parse(p, n, v);
-}
-
-/* Independent re-derivation of the header and record framing. Returns 1 when
- * the parser view matches what the frozen profile says the blob must look
- * like. `out` was zeroed by the parser, so every field read here was set by
- * it, not by previous state. */
-static int view_matches_framing(const uint8_t *p, uint32_t n, const mcf_v2_view_t *out)
-{
-    uint32_t header_len = (uint32_t)out->header_len;
-    uint32_t tlv_len = out->tlv_len;
-    uint32_t pos;
-    uint32_t i;
-    uint32_t max_block = 0u;
-
-    if (header_len < MCF_V2_HEADER_MIN || header_len > MCF_V2_HEADER_MAX ||
-        (header_len & 3u) != 0u || (uint32_t)out->version != MCF_V2_VERSION) {
-        return 0;
-    }
-    if (out->flags != MCF_V2_EXEC_REQUIRED_FLAGS) return 0;
-    if (tlv_len != header_len - MCF_V2_HEADER_MIN) return 0;
-    if (out->record_log2 < MCF_V2_RECORD_LOG2_MIN ||
-        out->record_log2 > MCF_V2_RECORD_LOG2_MAX) return 0;
-    if (out->record_count == 0u) return 0;
-    if (header_len + out->payload_size != n) return 0;
-    if (out->codec_id != (uint8_t)MCF_CODEC_LZ4 || out->codec_profile != 0u) return 0;
-
-    /* Walk the record area exactly as the normative contract describes and
-     * check that the parser's record_max_block agrees. */
-    pos = header_len;
-    for (i = 0u; i < out->record_count; i++) {
-        uint32_t len;
-        if (n - pos < 4u) return 0;
-        len = wr32_read(&p[pos]);
-        pos += 4u;
-        if (len == 0u || len > (1u << out->record_log2) || len > n - pos) return 0;
-        if (len > max_block) max_block = len;
-        pos += len;
-        if (n - pos < MCF_V2_RECORD_TAG_SIZE) return 0;
-        pos += MCF_V2_RECORD_TAG_SIZE;
-    }
-    if (pos != n) return 0;
-    if (max_block != out->record_max_block) return 0;
-    return 1;
 }
 
 int main(void)
@@ -158,7 +65,7 @@ int main(void)
     mcf_v2_record_t rec;
     uint32_t off;
 
-    build_valid(patch, sizeof(patch));
+    mcf_v2f_build_valid(patch, sizeof(patch));
 
     /* --- the happy path: parse and iterate --------------------------------- */
     CHECK(mcf_v2_parse(patch, MCF_V2_HEADER_MIN + 44u, &view) == MCF_OK, "valid patch parses");
@@ -186,8 +93,8 @@ int main(void)
         const uint32_t rec0 = MCF_V2_HEADER_MIN;
         const uint32_t rec1 = rec0 + 4u + 2u + MCF_V2_RECORD_TAG_SIZE;
         memcpy(encrypted, patch, sizeof(encrypted));
-        wr32(&encrypted[MCF_V2_OFF_FLAGS], MCF_V2_EXEC_REQUIRED_FLAGS);
-        wr32(&encrypted[MCF_V2_OFF_PAYLOAD_SIZE], 44u);
+        mcf_v2f_wr32(&encrypted[MCF_V2_OFF_FLAGS], MCF_V2_EXEC_REQUIRED_FLAGS);
+        mcf_v2f_wr32(&encrypted[MCF_V2_OFF_PAYLOAD_SIZE], 44u);
         /* The fixture already contains two records with detached tags. */
         CHECK(mcf_v2_parse(encrypted, MCF_V2_HEADER_MIN + 44u, &view) == MCF_OK,
               "encrypted per-record framing parses without decrypting");
@@ -204,23 +111,23 @@ int main(void)
               "encrypted iteration ends after the declared records");
 
         /* Structural tampering is rejected irrespective of tag contents. */
-        wr32(&encrypted[rec0], 2u);
-        wr32(&encrypted[rec1], 2u);
-        wr32(&encrypted[MCF_V2_OFF_PAYLOAD_SIZE], 43u);
+        mcf_v2f_wr32(&encrypted[rec0], 2u);
+        mcf_v2f_wr32(&encrypted[rec1], 2u);
+        mcf_v2f_wr32(&encrypted[MCF_V2_OFF_PAYLOAD_SIZE], 43u);
         CHECK(mcf_v2_parse(encrypted, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_FORMAT,
               "encrypted framing with a truncated tag is rejected");
-        wr32(&encrypted[MCF_V2_OFF_PAYLOAD_SIZE], 45u);
+        mcf_v2f_wr32(&encrypted[MCF_V2_OFF_PAYLOAD_SIZE], 45u);
         CHECK(mcf_v2_parse(encrypted, MCF_V2_HEADER_MIN + 45u, &view) == MCF_E_FORMAT,
               "encrypted framing with trailing payload byte is rejected");
-        wr32(&encrypted[MCF_V2_OFF_PAYLOAD_SIZE], 44u);
-        wr32(&encrypted[rec1], 200u);
+        mcf_v2f_wr32(&encrypted[MCF_V2_OFF_PAYLOAD_SIZE], 44u);
+        mcf_v2f_wr32(&encrypted[rec1], 200u);
         CHECK(mcf_v2_parse(encrypted, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_FORMAT,
               "encrypted record length overrunning its framing is rejected");
     }
 
     /* --- header rejections ------------------------------------------------- */
     memcpy(bad, patch, sizeof(bad));
-    wr32(&bad[MCF_V2_OFF_MAGIC], 0xDEADBEEFu);
+    mcf_v2f_wr32(&bad[MCF_V2_OFF_MAGIC], 0xDEADBEEFu);
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_FORMAT, "bad magic rejected");
 
     memcpy(bad, patch, sizeof(bad));
@@ -228,26 +135,26 @@ int main(void)
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_FORMAT, "unknown flag rejected");
 
     memcpy(bad, patch, sizeof(bad));
-    wr32(&bad[MCF_V2_OFF_FLAGS], MCF_V2_FLAG_ENCRYPTED | MCF_V2_FLAG_CODEC_LZ4);
+    mcf_v2f_wr32(&bad[MCF_V2_OFF_FLAGS], MCF_V2_FLAG_ENCRYPTED | MCF_V2_FLAG_CODEC_LZ4);
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_UNSUPPORTED,
           "unsigned plaintext LZ4 profile is unsupported");
 
     memcpy(bad, patch, sizeof(bad));
-    wr32(&bad[MCF_V2_OFF_FLAGS], MCF_V2_FLAG_SIGNED | MCF_V2_FLAG_CODEC_LZ4);
+    mcf_v2f_wr32(&bad[MCF_V2_OFF_FLAGS], MCF_V2_FLAG_SIGNED | MCF_V2_FLAG_CODEC_LZ4);
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_UNSUPPORTED,
           "signed plaintext LZ4 profile is unsupported");
 
     memcpy(bad, patch, sizeof(bad));
-    wr32(&bad[MCF_V2_OFF_FLAGS], MCF_V2_FLAG_ENCRYPTED | MCF_V2_FLAG_SIGNED);
+    mcf_v2f_wr32(&bad[MCF_V2_OFF_FLAGS], MCF_V2_FLAG_ENCRYPTED | MCF_V2_FLAG_SIGNED);
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_UNSUPPORTED,
           "signed encrypted profile without LZ4 is unsupported");
 
     memcpy(bad, patch, sizeof(bad));
-    wr32(&bad[MCF_V2_OFF_RESERVED], 1u);
+    mcf_v2f_wr32(&bad[MCF_V2_OFF_RESERVED], 1u);
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_FORMAT, "nonzero reserved rejected");
 
     memcpy(bad, patch, sizeof(bad));
-    wr16(&bad[MCF_V2_OFF_VERSION], 0x0300u);
+    mcf_v2f_wr16(&bad[MCF_V2_OFF_VERSION], 0x0300u);
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_UNSUPPORTED,
           "future major version rejected");
 
@@ -261,7 +168,7 @@ int main(void)
           "record_log2 above range rejected");
 
     memcpy(bad, patch, sizeof(bad));
-    wr32(&bad[MCF_V2_OFF_CODEC_PROFILE], 1u);
+    mcf_v2f_wr32(&bad[MCF_V2_OFF_CODEC_PROFILE], 1u);
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_UNSUPPORTED,
           "unknown codec profile rejected");
     memcpy(bad, patch, sizeof(bad));
@@ -277,38 +184,38 @@ int main(void)
 
     /* Count claims three records but only two are framed. */
     memcpy(bad, patch, sizeof(bad));
-    wr32(&bad[MCF_V2_OFF_RECORD_COUNT], 3u);
+    mcf_v2f_wr32(&bad[MCF_V2_OFF_RECORD_COUNT], 3u);
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_FORMAT,
           "record count larger than the framing is rejected");
 
     /* Count claims one record but the area frames two: trailing bytes. */
     memcpy(bad, patch, sizeof(bad));
-    wr32(&bad[MCF_V2_OFF_RECORD_COUNT], 1u);
+    mcf_v2f_wr32(&bad[MCF_V2_OFF_RECORD_COUNT], 1u);
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_FORMAT,
           "trailing bytes past the declared record count are rejected");
 
     /* A record whose declared length runs past the payload area. */
     memcpy(bad, patch, sizeof(bad));
-    wr32(&bad[MCF_V2_HEADER_MIN], 200u);
+    mcf_v2f_wr32(&bad[MCF_V2_HEADER_MIN], 200u);
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_FORMAT,
           "record length past the payload area is rejected");
 
     /* A record larger than 2^record_log2. */
     memcpy(bad, patch, sizeof(bad));
-    wr32(&bad[MCF_V2_HEADER_MIN], 300u);
-    wr32(&bad[MCF_V2_OFF_PAYLOAD_SIZE], 4u + 300u + MCF_V2_RECORD_TAG_SIZE + 4u + MCF_V2_RECORD_TAG_SIZE);
+    mcf_v2f_wr32(&bad[MCF_V2_HEADER_MIN], 300u);
+    mcf_v2f_wr32(&bad[MCF_V2_OFF_PAYLOAD_SIZE], 4u + 300u + MCF_V2_RECORD_TAG_SIZE + 4u + MCF_V2_RECORD_TAG_SIZE);
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 4u + 300u + 2u * MCF_V2_RECORD_TAG_SIZE + 4u, &view) == MCF_E_FORMAT,
           "record larger than the declared record size is rejected");
 
     /* Zero-length record. */
     memcpy(bad, patch, sizeof(bad));
-    wr32(&bad[MCF_V2_HEADER_MIN], 0u);
+    mcf_v2f_wr32(&bad[MCF_V2_HEADER_MIN], 0u);
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_FORMAT,
           "zero-length record is rejected");
 
     /* Payload larger than the file. */
     memcpy(bad, patch, sizeof(bad));
-    wr32(&bad[MCF_V2_OFF_PAYLOAD_SIZE], 4096u);
+    mcf_v2f_wr32(&bad[MCF_V2_OFF_PAYLOAD_SIZE], 4096u);
     CHECK(mcf_v2_parse(bad, MCF_V2_HEADER_MIN + 44u, &view) == MCF_E_TRUNCATED,
           "payload larger than the patch is rejected");
 
@@ -319,14 +226,14 @@ int main(void)
         static uint8_t tlv_patch[1024];
         memset(tlv_patch, 0, sizeof(tlv_patch));
         memcpy(tlv_patch, patch, sizeof(tlv_patch));
-        wr16(&tlv_patch[MCF_V2_OFF_HEADER_LEN], MCF_V2_HEADER_MIN + 12u);
-        wr16(&tlv_patch[MCF_V2_OFF_TLV_LEN], 12u);
-        wr16(&tlv_patch[MCF_V2_HEADER_MIN], 2u);      /* type 2, noncritical */
-        wr16(&tlv_patch[MCF_V2_HEADER_MIN + 2u], 0u); /* flags */
-        wr32(&tlv_patch[MCF_V2_HEADER_MIN + 4u], 4u); /* length */
+        mcf_v2f_wr16(&tlv_patch[MCF_V2_OFF_HEADER_LEN], MCF_V2_HEADER_MIN + 12u);
+        mcf_v2f_wr16(&tlv_patch[MCF_V2_OFF_TLV_LEN], 12u);
+        mcf_v2f_wr16(&tlv_patch[MCF_V2_HEADER_MIN], 2u);      /* type 2, noncritical */
+        mcf_v2f_wr16(&tlv_patch[MCF_V2_HEADER_MIN + 2u], 0u); /* flags */
+        mcf_v2f_wr32(&tlv_patch[MCF_V2_HEADER_MIN + 4u], 4u); /* length */
         /* 8 + 4 = 12 bytes, already 4-aligned. */
         memcpy(&tlv_patch[MCF_V2_HEADER_MIN + 12u], &patch[MCF_V2_HEADER_MIN], 44u);
-        wr32(&tlv_patch[MCF_V2_OFF_PAYLOAD_SIZE], 44u);
+        mcf_v2f_wr32(&tlv_patch[MCF_V2_OFF_PAYLOAD_SIZE], 44u);
         CHECK(mcf_v2_parse(tlv_patch, MCF_V2_HEADER_MIN + 12u + 44u, &view) == MCF_OK,
               "a noncritical TLV is accepted");
         CHECK(view.header_len == MCF_V2_HEADER_MIN + 12u, "TLV shifts the record area");
@@ -337,11 +244,11 @@ int main(void)
         static uint8_t tlv_patch[1024];
         memset(tlv_patch, 0, sizeof(tlv_patch));
         memcpy(tlv_patch, patch, sizeof(tlv_patch));
-        wr16(&tlv_patch[MCF_V2_OFF_HEADER_LEN], MCF_V2_HEADER_MIN + 12u);
-        wr16(&tlv_patch[MCF_V2_OFF_TLV_LEN], 12u);
-        wr16(&tlv_patch[MCF_V2_HEADER_MIN], 2u);      /* type 2, unknown */
-        wr16(&tlv_patch[MCF_V2_HEADER_MIN + 2u], 1u); /* critical */
-        wr32(&tlv_patch[MCF_V2_HEADER_MIN + 4u], 4u);
+        mcf_v2f_wr16(&tlv_patch[MCF_V2_OFF_HEADER_LEN], MCF_V2_HEADER_MIN + 12u);
+        mcf_v2f_wr16(&tlv_patch[MCF_V2_OFF_TLV_LEN], 12u);
+        mcf_v2f_wr16(&tlv_patch[MCF_V2_HEADER_MIN], 2u);      /* type 2, unknown */
+        mcf_v2f_wr16(&tlv_patch[MCF_V2_HEADER_MIN + 2u], 1u); /* critical */
+        mcf_v2f_wr32(&tlv_patch[MCF_V2_HEADER_MIN + 4u], 4u);
         CHECK(mcf_v2_parse(tlv_patch, sizeof(tlv_patch), &view) == MCF_E_FORMAT,
               "unknown critical TLV is rejected");
     }
@@ -351,11 +258,11 @@ int main(void)
         static uint8_t tlv_patch[1024];
         memset(tlv_patch, 0, sizeof(tlv_patch));
         memcpy(tlv_patch, patch, sizeof(tlv_patch));
-        wr16(&tlv_patch[MCF_V2_OFF_HEADER_LEN], MCF_V2_HEADER_MIN + 12u);
-        wr16(&tlv_patch[MCF_V2_OFF_TLV_LEN], 12u);
-        wr16(&tlv_patch[MCF_V2_HEADER_MIN], 2u);
-        wr16(&tlv_patch[MCF_V2_HEADER_MIN + 2u], 0u);
-        wr32(&tlv_patch[MCF_V2_HEADER_MIN + 4u], 64u); /* overruns */
+        mcf_v2f_wr16(&tlv_patch[MCF_V2_OFF_HEADER_LEN], MCF_V2_HEADER_MIN + 12u);
+        mcf_v2f_wr16(&tlv_patch[MCF_V2_OFF_TLV_LEN], 12u);
+        mcf_v2f_wr16(&tlv_patch[MCF_V2_HEADER_MIN], 2u);
+        mcf_v2f_wr16(&tlv_patch[MCF_V2_HEADER_MIN + 2u], 0u);
+        mcf_v2f_wr32(&tlv_patch[MCF_V2_HEADER_MIN + 4u], 64u); /* overruns */
         CHECK(mcf_v2_parse(tlv_patch, sizeof(tlv_patch), &view) == MCF_E_FORMAT,
               "TLV length overrunning the area is rejected");
     }
@@ -391,12 +298,11 @@ int main(void)
             memcpy(work, base, valid_size);
             memcpy(want, base, valid_size);
             st = parse_quiet(work, iter, &v);
-            if (st != MCF_OK && st != MCF_E_FORMAT && st != MCF_E_UNSUPPORTED &&
-                st != MCF_E_TRUNCATED && st != MCF_E_PARAM) {
+            if (!mcf_v2f_status_defined(st)) {
                 props_hold = 0;
                 printf("  phase A iter %u: undefined status %d\n", (unsigned)iter, (int)st);
             }
-            if (st == MCF_OK && !view_matches_framing(work, iter, &v)) {
+            if (st == MCF_OK && !mcf_v2f_framing_ok(work, iter, &v)) {
                 props_hold = 0;
                 printf("  phase A iter %u: accepted view does not match framing\n", (unsigned)iter);
             }
@@ -419,29 +325,18 @@ int main(void)
             }
             memcpy(want, work, valid_size);
             st = parse_quiet(work, valid_size, &v);
-            if (st != MCF_OK && st != MCF_E_FORMAT && st != MCF_E_UNSUPPORTED &&
-                st != MCF_E_TRUNCATED && st != MCF_E_PARAM) {
+            if (!mcf_v2f_status_defined(st)) {
                 props_hold = 0;
                 printf("  phase B iter %u: undefined status %d\n", (unsigned)iter, (int)st);
             }
-            if (st == MCF_OK && !view_matches_framing(work, valid_size, &v)) {
+            if (st == MCF_OK && !mcf_v2f_framing_ok(work, valid_size, &v)) {
                 props_hold = 0;
                 printf("  phase B iter %u: accepted view does not match framing\n", (unsigned)iter);
             }
-            if (st == MCF_OK) {
-                /* Iteration must reproduce exactly record_count records. */
-                uint32_t cursor = 0u;
-                mcf_v2_record_t r;
-                uint32_t seen = 0u;
-                while (mcf_v2_next_record(&v, work, valid_size, &cursor, &r) == MCF_OK) {
-                    seen++;
-                    if (seen > v.record_count) break;
-                }
-                if (seen != v.record_count) {
-                    props_hold = 0;
-                    printf("  phase B iter %u: iteration found %u of %u records\n",
-                           (unsigned)iter, (unsigned)seen, (unsigned)v.record_count);
-                }
+            if (st == MCF_OK && !mcf_v2f_iterate_ok(work, valid_size, &v)) {
+                props_hold = 0;
+                printf("  phase B iter %u: iteration did not reproduce record_count\n",
+                       (unsigned)iter);
             }
             if (memcmp(work, want, valid_size) != 0) {
                 props_hold = 0;
@@ -460,12 +355,11 @@ int main(void)
                 want[b] = work[b];
             }
             st = parse_quiet(work, n, &v);
-            if (st != MCF_OK && st != MCF_E_FORMAT && st != MCF_E_UNSUPPORTED &&
-                st != MCF_E_TRUNCATED && st != MCF_E_PARAM) {
+            if (!mcf_v2f_status_defined(st)) {
                 props_hold = 0;
                 printf("  phase C iter %u: undefined status %d\n", (unsigned)iter, (int)st);
             }
-            if (st == MCF_OK && !view_matches_framing(work, n, &v)) {
+            if (st == MCF_OK && !mcf_v2f_framing_ok(work, n, &v)) {
                 props_hold = 0;
                 printf("  phase C iter %u: accepted view does not match framing\n", (unsigned)iter);
             }
