@@ -313,9 +313,8 @@ stream has ended. `destroy` is called after successful initialization on every l
 Measured with `arm-none-eabi-gcc` at `-Os`, every source compiled with
 `-Wall -Wextra -Werror -Wconversion -Wsign-conversion -Wshadow -Wcast-qual -Wstrict-prototypes
 -Wmissing-prototypes`. All six configurations compile with zero warnings. These figures are
-now checked in CI by `cmake/size_gate.cmake`, which fails if `.text` grows past the committed
-baseline in `cmake/size_baseline.txt` or if any static RAM appears; the table below and that
-baseline are the same numbers.
+checked in CI by `cmake/size_gate.cmake`, which fails if `.text` grows past the ceiling in
+`cmake/size_baseline.txt` or if any static RAM appears at all.
 
 | Target | Code (text) | Static RAM |
 |---|---|---|
@@ -323,6 +322,11 @@ baseline are the same numbers.
 | Cortex-M3 / M33 | 11,444 B | 0 B |
 | Cortex-M4 | 11,450 B | 0 B |
 | Cortex-M7 | 11,446 B | 0 B |
+
+The baseline ceilings sit about 2% above these figures, because the CI runner's
+`gcc-arm-none-eabi` minor version differs from the one used here and moves code size by tens
+of bytes (the CI toolchain reports 12,482 B for Cortex-M0). A real regression is an order of
+magnitude larger, so the allowance costs no sensitivity.
 
 All tables are `const`, so nothing lands in RAM — a property the size gate enforces per
 target rather than asserts in prose. The variation is the architectures' different multiply
