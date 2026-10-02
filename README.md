@@ -196,7 +196,11 @@ For a system with no heap, set `workspace` and `workspace_size` on each session'
 `mcf_config_t`; each simultaneously active session must receive a distinct buffer.
 The former global `mcf_hal_set_static_workspace()` entry point is deprecated and
 returns `MCF_E_UNSUPPORTED`. `mcf_hal_register()` is also compatibility-only and
-stores nothing; every session must set `cfg.hal`.
+stores nothing; every session must set `cfg.hal`. Both are marked
+`MCF_DEPRECATED` in the header, so a migrating caller gets a compiler diagnostic
+rather than silence; define `MCF_NO_DEPRECATED` to suppress it. Neither is on any
+session path — `mcf_session_open()` repeats the same HAL checks — and both are
+removal candidates for the next major version.
 
 For vetted device-side Ed25519 verification, configure `-DMCF_ENABLE_SODIUM=ON`, keep a
 32-byte public key in immutable storage, and install `mcf_sodium_verify` as the HAL's
@@ -213,6 +217,16 @@ Custom codec descriptors are caller-owned and session-scoped: set `cfg.codecs` a
 but does not retain global state. Built-in LZ4 remains available automatically; custom IDs
 must be in the `MCF_CODEC_CUSTOM_MIN` range and are never accepted without a matching
 per-session descriptor.
+
+Two consequences of per-session resolution are worth stating explicitly:
+
+- The session's own table is consulted **before** the built-ins, so a descriptor whose id
+  equals a built-in id replaces that built-in for that session. Use this to install a
+  device-specific decoder for an existing wire id.
+- The v1 container carries a leading parameter block only for the parameterised
+  built-in ids (LZ4 and LZMA), so a custom codec is always handed `props_len == 0`.
+  A custom format cannot depend on out-of-band parameters; the codec must ignore
+  the `props` argument.
 
 | Codec | Decoder state | RAM | Ratio vs LZMA | Default |
 |---|---|---|---|---|
@@ -329,7 +343,7 @@ missing.
 | Test | What it checks |
 |---|---|
 | `microfoam_tests` | Round trip and fault injection against a mock device |
-| `custom_codec_test` | Caller-owned codec validation, isolation, budget enforcement, and failure propagation |
+| `custom_codec_test` | Caller-owned codec descriptors: validation of every required member and the reserved id gap, per-session table isolation, built-in shadowing, budget enforcement, properties-less payload contract, and failure propagation |
 | `host_selftest` | The Python tool against an independent reference implementation |
 | `cross_test` | A Python-produced patch applied by the C library, plus a **signed** patch the device must refuse because no verifier is configured (needs a host signing module; the seed is generated into the build tree) |
 | `cross_test_raw` | A Python-produced **raw** patch applied by the C library |

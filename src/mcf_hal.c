@@ -6,7 +6,14 @@
 #include "mcf_internal.h"
 
 /* HAL descriptions are supplied per session; no process-global device state is
- * retained here. */
+ * retained here.
+ *
+ * The two entry points below are the compatibility surface for callers written
+ * against the earlier global-registration API. Neither stores anything, and
+ * neither is on any session path: mcf_session_open() performs its own HAL
+ * checks, so a caller that sets cfg.hal needs neither. They are marked
+ * deprecated in the public header and are removal candidates for the next
+ * major version. */
 
 mcf_status_t mcf_hal_register(const mcf_hal_t *hal)
 {

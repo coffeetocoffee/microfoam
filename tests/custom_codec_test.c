@@ -11,7 +11,15 @@
 #define OLD_VERSION 1u
 #define NEW_VERSION 2u
 #define CUSTOM_ID ((mcf_codec_id_t)0x80u)
+#define OTHER_ID ((mcf_codec_id_t)0x81u)
 #define WORKSPACE_SIZE 16u
+
+/* The reconstructed image must be at least as large as one BSDIFF43 control
+ * triple (24 bytes), because the session clamps its block size to new_size and
+ * the engine buffers the triple in that block. A one-byte image would make the
+ * triple unbufferable and fail every codec identically, which would prove
+ * nothing about the codec under test. */
+#define IMAGE_SIZE 32u
 
 typedef struct test_codec {
     uint32_t mode;
@@ -27,9 +35,9 @@ enum {
 };
 
 static uint8_t g_flash[FLASH_SIZE];
-static uint8_t g_old[1];
-static uint8_t g_new[1];
-static uint8_t g_delta[25];
+static uint8_t g_old[IMAGE_SIZE];
+static uint8_t g_new[IMAGE_SIZE];
+static uint8_t g_delta[24u + IMAGE_SIZE];
 static uint8_t g_patch[256];
 static uint32_t g_codec_mode;
 static uint32_t g_init_calls;
@@ -39,6 +47,8 @@ static uint32_t g_destroy_calls;
 static uint32_t g_alloc_calls;
 static uint32_t g_free_calls;
 static uint32_t g_codec_ws;
+static const uint8_t *g_seen_props;
+static uint32_t g_seen_props_len;
 static uint32_t g_checks;
 static uint32_t g_failures;
 
@@ -64,15 +74,21 @@ static void wr32(uint8_t *p, uint32_t v)
     p[3] = (uint8_t)(v >> 24);
 }
 
+/* BSDIFF43 sign-magnitude offset. The magnitude is held in a 64-bit type so
+ * that every shift below is defined: shifting a 32-bit value by 32 or more is
+ * undefined behaviour, and on x86 the count wraps, stamping a copy of the low
+ * byte into byte 4. That silently turns a valid control triple into a corrupt
+ * one, which is why this helper was never exercised until a case drove the
+ * engine past the codec. */
 static void put_offset(uint8_t *p, int32_t value)
 {
-    uint32_t magnitude = (uint32_t)(value < 0 ? -value : value);
+    uint64_t magnitude = (uint64_t)(value < 0 ? -value : value);
     uint32_t i;
     for (i = 0u; i < 8u; i++) {
         p[i] = (uint8_t)(magnitude >> (i * 8u));
     }
     if (value < 0) {
-        p[7] |= 0x80u;
+        p[7] = (uint8_t)(p[7] | 0x80u);
     }
 }
 
@@ -138,8 +154,8 @@ static const mcf_hal_t g_hal = {
 
 static uint32_t codec_workspace(const uint8_t *props, uint32_t props_len)
 {
-    (void)props;
-    (void)props_len;
+    g_seen_props = props;
+    g_seen_props_len = props_len;
     return g_codec_ws;
 }
 
@@ -188,11 +204,11 @@ static void codec_destroy(mcf_codec_t *handle)
     g_destroy_calls++;
 }
 
-static mcf_codec_ops_t codec_ops(const char *name)
+static mcf_codec_ops_t codec_ops(const char *name, mcf_codec_id_t id)
 {
     mcf_codec_ops_t ops;
     ops.name = name;
-    ops.id = CUSTOM_ID;
+    ops.id = id;
     ops.workspace_size = codec_workspace;
     ops.init = codec_init;
     ops.decode = codec_decode;
@@ -202,10 +218,16 @@ static mcf_codec_ops_t codec_ops(const char *name)
     return ops;
 }
 
-static uint32_t build_patch(void)
+/* Build a patch declaring `codec_id`. `props_len` is the leading parameter
+ * block that the codec id carries in the v1 container: 4 for LZ4 (the content
+ * size), 9 for LZMA, 0 for RAW and for every custom id. The payload CRC covers
+ * the stream *after* the props block, not the props block itself, which is why
+ * the two are written separately here. */
+static uint32_t build_patch_ex(uint8_t codec_id, uint32_t flags, uint32_t props_len)
 {
     uint32_t i;
-    uint32_t len = (uint32_t)sizeof(g_delta);
+    uint32_t delta_len = (uint32_t)sizeof(g_delta);
+    uint32_t payload_size = props_len + delta_len;
     memset(g_patch, 0, sizeof(g_patch));
     memset(g_delta, 0, sizeof(g_delta));
     memset(g_flash, 0xFF, sizeof(g_flash));
@@ -219,20 +241,28 @@ static uint32_t build_patch(void)
     wr32(&g_patch[MCF_OFF_MAGIC], MCF_HDR_MAGIC);
     wr16(&g_patch[MCF_OFF_HDR_LEN], (uint16_t)MCF_HDR_MIN_SIZE);
     wr16(&g_patch[MCF_OFF_HDR_VER], (uint16_t)((MCF_HDR_VER_MAJOR << 8) | MCF_HDR_VER_MINOR));
+    wr32(&g_patch[MCF_OFF_FLAGS], flags);
     wr32(&g_patch[MCF_OFF_PRODUCT_ID], PRODUCT_ID);
     wr32(&g_patch[MCF_OFF_FW_VERSION], NEW_VERSION);
     wr32(&g_patch[MCF_OFF_OLD_SIZE], (uint32_t)sizeof(g_old));
     wr32(&g_patch[MCF_OFF_NEW_SIZE], (uint32_t)sizeof(g_new));
-    wr32(&g_patch[MCF_OFF_PAYLOAD_SIZE], len);
+    wr32(&g_patch[MCF_OFF_PAYLOAD_SIZE], payload_size);
     wr32(&g_patch[MCF_OFF_OLD_CRC32], mcf_crc32(g_old, (uint32_t)sizeof(g_old)));
     wr32(&g_patch[MCF_OFF_NEW_CRC32], mcf_crc32(g_new, (uint32_t)sizeof(g_new)));
-    wr32(&g_patch[MCF_OFF_PAYLOAD_CRC32], mcf_crc32(g_delta, len));
+    wr32(&g_patch[MCF_OFF_PAYLOAD_CRC32], mcf_crc32(g_delta, delta_len));
     wr32(&g_patch[MCF_OFF_WORKSPACE_REQ], g_codec_ws);
     wr32(&g_patch[MCF_OFF_OLD_VERSION], OLD_VERSION);
-    g_patch[MCF_OFF_CODEC_ID] = (uint8_t)CUSTOM_ID;
+    g_patch[MCF_OFF_CODEC_ID] = codec_id;
     g_patch[MCF_OFF_BLOCK_LOG2] = 8u;
-    memcpy(&g_patch[MCF_HDR_MIN_SIZE], g_delta, len);
-    return MCF_HDR_MIN_SIZE + len;
+    /* The props block is left zeroed; only its length is load-bearing here,
+     * because the codec that would interpret it is the one under test. */
+    memcpy(&g_patch[MCF_HDR_MIN_SIZE + props_len], g_delta, delta_len);
+    return MCF_HDR_MIN_SIZE + payload_size;
+}
+
+static uint32_t build_patch(void)
+{
+    return build_patch_ex((uint8_t)CUSTOM_ID, 0u, 0u);
 }
 
 static mcf_status_t run_case(mcf_codec_ops_t *ops, uint32_t patch_size,
@@ -260,7 +290,7 @@ static mcf_status_t run_case(mcf_codec_ops_t *ops, uint32_t patch_size,
 
 static void test_descriptor_validation(void)
 {
-    mcf_codec_ops_t ops = codec_ops("custom");
+    mcf_codec_ops_t ops = codec_ops("custom", CUSTOM_ID);
     mcf_codec_ops_t bad = ops;
     CHECK(mcf_codec_register(&ops) == MCF_OK, "valid descriptor accepted");
     bad.decode = NULL;
@@ -269,6 +299,38 @@ static void test_descriptor_validation(void)
     bad.id = MCF_CODEC_AUTO;
     CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "reserved codec id rejected");
     CHECK(mcf_codec_register(NULL) == MCF_E_PARAM, "null descriptor rejected");
+
+    /* Every required member is required; a descriptor is a contract, and a
+     * missing callback must be refused at registration rather than discovered
+     * as a null call in the middle of an update. */
+    bad = ops;
+    bad.name = NULL;
+    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "missing name rejected");
+    bad = ops;
+    bad.workspace_size = NULL;
+    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "missing workspace_size rejected");
+    bad = ops;
+    bad.init = NULL;
+    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "missing init rejected");
+    bad = ops;
+    bad.finish = NULL;
+    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "missing finish rejected");
+    bad = ops;
+    bad.destroy = NULL;
+    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "missing destroy rejected");
+
+    /* The reserved gap between the built-in range and the custom range. Both
+     * edges are checked, because an off-by-one here would let a codec claim an
+     * id that a future format revision assigns to a built-in. */
+    bad = ops;
+    bad.id = MCF_CODEC_MAX;
+    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "id at MCF_CODEC_MAX rejected");
+    bad = ops;
+    bad.id = (mcf_codec_id_t)0x40u;
+    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "id inside the reserved gap rejected");
+    bad = ops;
+    bad.id = MCF_CODEC_CUSTOM_MIN;
+    CHECK(mcf_codec_register(&bad) == MCF_OK, "id at MCF_CODEC_CUSTOM_MIN accepted");
 }
 
 static void test_failures(void)
@@ -280,7 +342,7 @@ static void test_failures(void)
     uint32_t patch_size;
 
     for (i = 0u; i < 2u; i++) {
-        mcf_codec_ops_t ops = codec_ops("custom-failure");
+        mcf_codec_ops_t ops = codec_ops("custom-failure", CUSTOM_ID);
         mcf_session_storage_t storage;
         mcf_session_t *session = (mcf_session_t *)(void *)&storage;
         mcf_config_t cfg;
@@ -306,7 +368,7 @@ static void test_failures(void)
 
 static void test_workspace_limit(void)
 {
-    mcf_codec_ops_t ops = codec_ops("custom-budget");
+    mcf_codec_ops_t ops = codec_ops("custom-budget", CUSTOM_ID);
     mcf_session_storage_t storage;
     mcf_session_t *session = (mcf_session_t *)(void *)&storage;
     mcf_config_t cfg;
@@ -324,12 +386,110 @@ static void test_workspace_limit(void)
     mcf_session_close(session);
 }
 
+static void test_success_path(void)
+{
+    mcf_codec_ops_t ops = codec_ops("custom-pass", CUSTOM_ID);
+    mcf_session_storage_t storage;
+    mcf_session_t *session = (mcf_session_t *)(void *)&storage;
+    mcf_config_t cfg;
+    uint32_t patch_size;
+    uint32_t init_before = g_init_calls;
+    uint32_t finish_before = g_finish_calls;
+    uint32_t destroy_before = g_destroy_calls;
+
+    /* The one case that runs a custom codec to completion. Without it the suite
+     * would only ever observe custom codecs failing, and a codec that fails
+     * everywhere would pass. The pass-through codec yields the delta verbatim,
+     * so the reconstructed image must equal the one the patch declares. */
+    g_codec_mode = MODE_PASS;
+    g_codec_ws = WORKSPACE_SIZE;
+    g_seen_props = NULL;
+    g_seen_props_len = 99u; /* deliberately wrong, to prove it is overwritten */
+    patch_size = build_patch();
+
+    CHECK(run_case(&ops, patch_size, 1024u, session, &storage, &cfg) == MCF_OK,
+          "custom codec completes a full update");
+    CHECK(mcf_session_state(session) == MCF_ST_DONE, "completed session reports done");
+    CHECK(g_init_calls == init_before + 1u, "codec was initialized");
+    CHECK(g_finish_calls == finish_before + 1u, "codec finish was called");
+    CHECK(memcmp(g_flash, g_new, sizeof(g_new)) == 0,
+          "reconstructed image matches the declared new image");
+
+    /* The v1 container carries no parameter block for a custom id, so the codec
+     * is told it has none. This is a wire-format constraint rather than an
+     * omission: pinning it here stops a future props change from silently
+     * reaching a codec written to ignore the argument. */
+    CHECK(g_seen_props_len == 0u, "custom codec is handed no properties block");
+    CHECK(g_seen_props != NULL, "custom codec is still handed a payload pointer");
+
+    /* The codec outlives the run: destroy is the close path's job, so it must
+     * not have happened yet, and must happen exactly once afterwards. */
+    CHECK(g_destroy_calls == destroy_before, "codec is not destroyed before close");
+    mcf_session_close(session);
+    CHECK(g_destroy_calls == destroy_before + 1u, "codec is destroyed exactly once on close");
+}
+
+static void test_session_isolation(void)
+{
+    mcf_codec_ops_t ops_a = codec_ops("custom-a", CUSTOM_ID);
+    mcf_codec_ops_t ops_b = codec_ops("custom-b", OTHER_ID);
+    mcf_session_storage_t storage;
+    mcf_session_t *session = (mcf_session_t *)(void *)&storage;
+    mcf_config_t cfg;
+    uint32_t patch_size;
+
+    g_codec_mode = MODE_INIT_FAIL; /* reach the codec, then stop recognisably */
+    g_codec_ws = WORKSPACE_SIZE;
+    patch_size = build_patch(); /* declares CUSTOM_ID (0x80) */
+
+    /* The patch's codec is listed in this table, so the session resolves it and
+     * reaches codec init, where the injected failure is reported (site 16). */
+    CHECK(run_case(&ops_a, patch_size, 1024u, session, &storage, &cfg) == MCF_E_UNSUPPORTED,
+          "owning table resolves the codec");
+    CHECK(mcf_session_error_site(session) == 16u, "owning table reaches codec init");
+    mcf_session_close(session);
+
+    /* The same patch against a table that lists a different id must be refused
+     * during header validation (site 9): a codec table is per session, and one
+     * session's registrations must not be visible to another. */
+    CHECK(run_case(&ops_b, patch_size, 1024u, session, &storage, &cfg) == MCF_E_UNSUPPORTED,
+          "foreign table does not resolve the codec");
+    CHECK(mcf_session_error_site(session) == 9u, "foreign table fails at the header codec check");
+    mcf_session_close(session);
+}
+
+static void test_builtin_shadowing(void)
+{
+    mcf_codec_ops_t shadow = codec_ops("lz4-shadow", MCF_CODEC_LZ4);
+    mcf_session_storage_t storage;
+    mcf_session_t *session = (mcf_session_t *)(void *)&storage;
+    mcf_config_t cfg;
+    uint32_t patch_size;
+
+    /* A caller-owned descriptor may carry a built-in id, and the session table
+     * is consulted before the built-ins. The patch below declares LZ4, so if
+     * the built-in were chosen instead the session would proceed past init and
+     * fail later with a different status and site. Reaching the injected init
+     * failure (MCF_E_UNSUPPORTED, site 16) proves the table entry won. */
+    g_codec_mode = MODE_INIT_FAIL;
+    g_codec_ws = WORKSPACE_SIZE;
+    patch_size = build_patch_ex((uint8_t)MCF_CODEC_LZ4, MCF_FLAG_CODEC_LZ4, 4u);
+
+    CHECK(run_case(&shadow, patch_size, 1024u, session, &storage, &cfg) == MCF_E_UNSUPPORTED,
+          "table entry shadows the built-in of the same id");
+    CHECK(mcf_session_error_site(session) == 16u, "shadowing codec reaches its own init");
+    mcf_session_close(session);
+}
+
 int main(void)
 {
     g_codec_ws = WORKSPACE_SIZE;
     test_descriptor_validation();
     test_failures();
     test_workspace_limit();
+    test_success_path();
+    test_session_isolation();
+    test_builtin_shadowing();
     printf("custom codec contract: %u checks, %u failures\n", g_checks, g_failures);
     return (g_failures == 0u) ? EXIT_SUCCESS : EXIT_FAILURE;
 }

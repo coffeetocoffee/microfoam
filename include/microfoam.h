@@ -22,6 +22,28 @@
 extern "C" {
 #endif
 
+/* ------------------------------------------------------------------------ *
+ * Deprecation marker
+ *
+ * Applied to entry points retained only for source compatibility, so a caller
+ * migrating away gets a compiler diagnostic rather than silence. This is the
+ * one macro in this header; it expands to a compiler attribute, never to
+ * control flow, and expands to nothing where no attribute is available.
+ *
+ * Define MCF_NO_DEPRECATED to suppress the diagnostics, for a downstream tree
+ * that is mid-migration.
+ * ------------------------------------------------------------------------ */
+
+#if defined(MCF_NO_DEPRECATED)
+#define MCF_DEPRECATED
+#elif defined(__GNUC__) || defined(__clang__)
+#define MCF_DEPRECATED __attribute__((deprecated))
+#elif defined(_MSC_VER)
+#define MCF_DEPRECATED __declspec(deprecated)
+#else
+#define MCF_DEPRECATED
+#endif
+
 /* ======================================================================== *
  * 1. Version
  * ======================================================================== */
@@ -124,9 +146,13 @@ typedef void (*mcf_log_fn)(void *ctx, int level, const char *msg);
  * ======================================================================== */
 
 /*
- * The single platform-dependent surface. Register one instance at startup with
- * mcf_hal_register(). The pointer is retained, not copied, so the instance must
- * outlive every session; a static const instance in flash is the intended use.
+ * The single platform-dependent surface. Supply one instance per session by
+ * setting mcf_config_t.hal before mcf_session_open(). The pointer is retained,
+ * not copied, so the instance must outlive every session; a static const
+ * instance in flash is the intended use.
+ *
+ * There is no global registration: the HAL is a per-session input, so two
+ * concurrent sessions may be given two different instances.
  *
  * Flash contract
  * --------------
@@ -188,11 +214,17 @@ typedef struct mcf_hal {
 } mcf_hal_t;
 
 /* Validate a HAL description. Deprecated compatibility helper; the HAL is now
- * supplied per session through mcf_config_t.hal and is not stored globally. */
+ * supplied per session through mcf_config_t.hal and is not stored globally.
+ * Validation is the only behaviour it ever performs, and mcf_session_open()
+ * repeats the same checks, so a caller that sets cfg.hal can drop this call. */
+MCF_DEPRECATED
 mcf_status_t mcf_hal_register(const mcf_hal_t *hal);
 
 /* Deprecated: static workspace is now supplied in each mcf_config_t. This
- * function returns MCF_E_UNSUPPORTED and is retained for source compatibility. */
+ * function performs no work and returns MCF_E_UNSUPPORTED; it is retained for
+ * source compatibility only, and is a removal candidate for the next major
+ * version. Use mcf_config_t.workspace / workspace_size instead. */
+MCF_DEPRECATED
 mcf_status_t mcf_hal_set_static_workspace(const mcf_hal_t *hal, void *bytes, uint32_t size);
 
 /* ======================================================================== *
@@ -229,7 +261,14 @@ typedef struct mcf_codec_ops {
     mcf_codec_id_t id;
 
     /* Return the workspace in bytes needed to decode a payload described by
-     * `props`. Must not allocate. Called before any allocation is attempted. */
+     * `props`. Must not allocate. Called before any allocation is attempted.
+     *
+     * `props` / `props_len` describe a leading parameter block that the v1
+     * container carries only for the parameterised built-in ids (LZ4 and LZMA;
+     * RAW and every custom id carry none). A custom codec therefore always
+     * receives props_len == 0 and props pointing at the first payload byte,
+     * which it must ignore. Declare no format that depends on out-of-band
+     * parameters. */
     uint32_t (*workspace_size)(const uint8_t *props, uint32_t props_len);
 
     /* `workspace` is at least workspace_size() bytes. The codec places its state
@@ -259,7 +298,14 @@ typedef struct mcf_codec_ops {
 } mcf_codec_ops_t;
 
 /* Validate a custom codec descriptor. The descriptor is not copied or stored;
- * provide it through mcf_config_t.codecs for the sessions that may use it. */
+ * provide it through mcf_config_t.codecs for the sessions that may use it.
+ * Ids in the reserved gap [MCF_CODEC_MAX, MCF_CODEC_CUSTOM_MIN) are rejected; a
+ * descriptor naming a built-in id replaces that built-in for the sessions whose
+ * table lists it (see mcf_config_t.codecs).
+ *
+ * Custom descriptors are props-less: the v1 container carries a leading
+ * parameter block only for the parameterised built-in ids, so a custom codec
+ * always receives props_len == 0 (see the workspace_size() note above). */
 mcf_status_t mcf_codec_register(const mcf_codec_ops_t *ops);
 
 /* ======================================================================== *

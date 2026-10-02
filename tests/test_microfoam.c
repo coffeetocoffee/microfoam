@@ -48,6 +48,24 @@ static void banner(const char *s)
     printf("\n-- %s\n", s);
 }
 
+/* The HAL compatibility entry points are deliberately deprecated in the public
+ * header, and this suite is the one caller that must keep exercising them. The
+ * diagnostic is silenced only around those calls, so an accidental new use
+ * anywhere else in the tree still fails the -Werror build. */
+#if defined(__GNUC__) || defined(__clang__)
+#  define DEPRECATED_CALLS_BEGIN                                   \
+        _Pragma("GCC diagnostic push")                             \
+        _Pragma("GCC diagnostic ignored \"-Wdeprecated-declarations\"")
+#  define DEPRECATED_CALLS_END _Pragma("GCC diagnostic pop")
+#elif defined(_MSC_VER)
+#  define DEPRECATED_CALLS_BEGIN \
+        __pragma(warning(push)) __pragma(warning(disable : 4996))
+#  define DEPRECATED_CALLS_END __pragma(warning(pop))
+#else
+#  define DEPRECATED_CALLS_BEGIN
+#  define DEPRECATED_CALLS_END
+#endif
+
 /* ---------------------------------------------------------------------- *
  * Mock device: RAM-backed flash plus fault-injection switches.
  * ---------------------------------------------------------------------- */
@@ -436,8 +454,11 @@ static void test_crc(void)
 static void test_hal(void)
 {
     mcf_hal_t bad;
+    uint8_t   ws[64];
 
-    banner("hal registration");
+    DEPRECATED_CALLS_BEGIN
+
+    banner("hal registration (deprecated compatibility helper)");
     CHECK_EQ(mcf_hal_register(&g_hal), MCF_OK, "validate valid hal");
 
     bad = g_hal;
@@ -450,6 +471,22 @@ static void test_hal(void)
 
     CHECK_EQ(mcf_hal_register(NULL), MCF_E_PARAM, "reject null hal");
     CHECK_EQ(mcf_hal_register(&g_hal), MCF_OK, "revalidate hal");
+
+    /* The static-workspace helper is retained for source compatibility only.
+     * Its contract is a flat refusal: it must never appear to succeed, because
+     * a caller that believed it had configured a workspace would discover
+     * otherwise much later, on a different path, with an unrelated code. */
+    banner("deprecated static workspace helper");
+    CHECK_EQ(mcf_hal_set_static_workspace(&g_hal, ws, (uint32_t)sizeof(ws)),
+             MCF_E_UNSUPPORTED, "static workspace helper refuses to configure");
+    CHECK_EQ(mcf_hal_set_static_workspace(NULL, ws, (uint32_t)sizeof(ws)),
+             MCF_E_PARAM, "null hal rejected before the refusal");
+    CHECK_EQ(mcf_hal_set_static_workspace(&g_hal, NULL, (uint32_t)sizeof(ws)),
+             MCF_E_PARAM, "null workspace rejected before the refusal");
+    CHECK_EQ(mcf_hal_set_static_workspace(&g_hal, ws, 0u),
+             MCF_E_PARAM, "zero-size workspace rejected before the refusal");
+
+    DEPRECATED_CALLS_END
 }
 
 static void test_roundtrip(void)

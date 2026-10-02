@@ -424,7 +424,10 @@ retained as a zero-cost special case, resolved at session configuration.
 Codec descriptors are caller-owned and session-scoped through `mcf_config_t.codecs` and
 `codec_count`; there is no mutable process-global registration table. Built-in LZ4 is always
 available, while custom codec IDs must use the reserved `MCF_CODEC_CUSTOM_MIN` range and be
-provided explicitly by each session.
+provided explicitly by each session. The session's own table is consulted before the
+built-ins, so an entry may deliberately replace a built-in id for that session. Because the
+v1 container carries a properties block only for the built-in ids, a custom codec is always
+handed `props_len == 0` and cannot depend on out-of-band parameters.
 
 The single highest-leverage structural decision (**P8**, addressing **W-04**).
 
@@ -560,7 +563,7 @@ porting effort transfers.
 ```c
 /* ---- HAL callbacks (bound per session) ---- */
 /* Set cfg.hal before mcf_session_open(); each session may use a different HAL. */
-mcf_status_t mcf_hal_register(const mcf_hal_t *hal); /* validation only */
+mcf_status_t mcf_hal_register(const mcf_hal_t *hal); /* deprecated; validation only */
 
 /* Heapless sessions set caller-owned `workspace` and `workspace_size` in each
  * mcf_config_t; concurrent sessions require separate buffers. */
