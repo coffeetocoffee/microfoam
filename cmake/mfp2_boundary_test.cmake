@@ -47,9 +47,12 @@ execute_process(COMMAND "${CMAKE_COMMAND}" -E compare_files "${WORK}/applied.bin
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "MFP2 host apply output differs from new.bin")
 endif()
-# Signed-but-invalid variants the C test uses: reordered records, mismatched
-# nonce prefix. mfp2_fixtures.py --self-check proves the host verifier
-# rejects both before handing them to the device path.
+# Re-signed-but-invalid variants the C test uses. Each is structurally valid,
+# carries a matching payload CRC and a valid signature, and fails exactly one
+# downstream binding: the AAD record index, the nonce derivation, the AEAD tag,
+# the ciphertext, or the key id. mfp2_fixtures.py --self-check proves every one
+# parses and verifies before the host verifier rejects it, so none of them can
+# silently degrade into a parse failure and pass for the wrong reason.
 execute_process(
     COMMAND "${PY}" "${CMAKE_CURRENT_LIST_DIR}/../tests/mfp2_fixtures.py"
             --patch "${WORK}/valid.mfp2" --pub "${WORK}/public.key"
@@ -57,6 +60,9 @@ execute_process(
             --signing-key "${WORK}/signing.key"
             --out-reordered "${WORK}/reordered.mfp2"
             --out-wrong-nonce "${WORK}/wrong_nonce.mfp2"
+            --out-tag-tamper "${WORK}/tag_tamper.mfp2"
+            --out-ct-tamper "${WORK}/ct_tamper.mfp2"
+            --out-bad-key-id "${WORK}/bad_key_id.mfp2"
             --self-check
     RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
 if(NOT rc EQUAL 0)
@@ -64,6 +70,7 @@ if(NOT rc EQUAL 0)
 endif()
 execute_process(COMMAND "${MCF}" "${WORK}/valid.mfp2" "${OLD}" "${NEW}" "${WORK}/public.key" "${WORK}/symmetric.key"
                 "${WORK}/reordered.mfp2" "${WORK}/wrong_nonce.mfp2"
+                "${WORK}/tag_tamper.mfp2" "${WORK}/ct_tamper.mfp2" "${WORK}/bad_key_id.mfp2"
     RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "MFP2 host-to-session integration failed:\n${out}\n${err}")

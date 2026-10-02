@@ -328,7 +328,7 @@ ctest --test-dir build --output-on-failure -C Release
 | `v2_format_test` | MFP2 structural parser: header/TLV/record-framing rules, plus a deterministic mutation loop (~4,200 truncations, byte mutations, and random blobs) |
 | `v2_fuzz_smoke` | The parser property oracle shared with the fuzz target, run over a built-in seed, every truncation of it, and any corpus files given on the command line: a defined status, an untouched input buffer, and an independently re-derived framing and record iteration on success. Portable, so the assertions have a gate on every platform |
 | `hal_concurrency_test` | Two independent sessions on separate HALs, with no shared state |
-| `mfp2_host_to_session` | PyNaCl-produced signed+encrypted MFP2 patch: the C session applies it byte-exact in a workspace far smaller than the payload, and rejects every tamper variant with zero flash mutations (sodium + PyNaCl required). |
+| `mfp2_host_to_session` | PyNaCl-produced signed+encrypted MFP2 patch: the C session applies it byte-exact in a workspace far smaller than the payload, and rejects 13 tamper variants with zero flash mutations, each pinned to its exact status. Five of them are re-signed with a recomputed payload CRC, so a valid signature and payload CRC leave the AAD record index, the nonce derivation, the AEAD tag, the ciphertext, or the key provider as the only thing that can reject them (sodium + PyNaCl required). |
 
 `MCF_BUILD_FUZZER=ON` additionally builds `v2_parse_fuzzer`, a coverage-guided libFuzzer
 target for `mcf_v2_parse` compiled with ASan/UBSan (Clang only; run it directly with a corpus
@@ -402,7 +402,12 @@ every record before decode, decrypts records one at a time into a small sliding 
 whole decrypted payload is never resident), and hands the reconstructed delta stream to the
 unchanged MFP1 engine. Resume is opt-in via `journal_addr` and record-aligned. The
 optional sodium/PyNaCl CI test applies a host-produced encrypted patch end to end, byte-exact,
-and rejects every tamper variant with zero flash mutations.
+and rejects 13 tamper variants with zero flash mutations, each pinned to its exact status.
+Five of those variants are re-signed with a recomputed payload CRC, so signature and payload
+CRC both verify and only the AAD record index, the nonce derivation, the AEAD tag, the
+ciphertext, or the key provider can reject them; a further check asserts the variants parse
+and verify on the host before it rejects them, which is what stops a case from passing for
+the wrong reason.
 
 The build is warning-clean under `-Wall -Wextra -Wconversion -Wsign-conversion -Werror`,
 and the standard test configurations pass in both Debug and Release; the sodium configuration additionally requires libsodium and PyNaCl:

@@ -11,9 +11,6 @@
 #define FLASH_SIZE (128u * 1024u)
 #define FLASH_BASE 0x08010000u
 #define BLOCK_SIZE 1024u
-/* MCF_E_ANY: accept any rejection status (used when several gates could fire
- * first and pinning one would over-specify the implementation). */
-#define MCF_E_ANY 0
 
 static uint8_t flash[FLASH_SIZE];
 static uint8_t workspace[FLASH_SIZE];
@@ -191,7 +188,10 @@ static int expect_case(const char *name, const uint8_t *patch, uint32_t patch_le
         fprintf(stderr, "%s: expected rejection, session succeeded\n", name);
         return 0;
     }
-    if (want != MCF_E_ANY && (int32_t)st != (int32_t)want) {
+    /* The status is pinned exactly. Accepting any non-OK status is how a case
+     * that dies for the wrong reason keeps reporting ok, which is exactly what
+     * the re-signed fixtures below exist to prevent. */
+    if ((int32_t)st != (int32_t)want) {
         fprintf(stderr, "%s: status %d, expected %d\n", name, (int)st, (int)want);
         return 0;
     }
@@ -327,11 +327,16 @@ int main(int argc, char **argv)
 {
     uint32_t patch_len, old_len, new_len, pub_len, key_len = 0;
     uint32_t reord_len = 0, wrong_nonce_len = 0, off;
+    uint32_t tag_tamper_len = 0, ct_tamper_len = 0, bad_key_id_len = 0;
     uint8_t *patch, *old, *expected, *pub, *key;
-    uint8_t *reord = NULL, *wrong_nonce = NULL;
+    uint8_t *reord = NULL, *wrong_nonce = NULL, *tag_tamper = NULL;
+    uint8_t *ct_tamper = NULL, *bad_key_id = NULL;
     mcf_v2_view_t view; crypto_ctx_t crypto;
     int ok = 1;
-    if (argc < 6 || argc > 8 || sodium_init() < 0) return 2;
+    /* argv: patch old new pub key [reordered wrong_nonce tag_tamper ct_tamper
+     * bad_key_id] — the trailing five are the re-signed variants built by
+     * tests/mfp2_fixtures.py. */
+    if (argc < 6 || argc > 11 || sodium_init() < 0) return 2;
     patch = read_file(argv[1], &patch_len); old = read_file(argv[2], &old_len);
     expected = read_file(argv[3], &new_len); pub = read_file(argv[4], &pub_len);
     key = read_file(argv[5], &key_len);
@@ -340,6 +345,9 @@ int main(int argc, char **argv)
     if (key_len != sizeof(crypto.symmetric_key)) return 2;
     if (argc > 6 && !(reord = read_file(argv[6], &reord_len))) return 2;
     if (argc > 7 && !(wrong_nonce = read_file(argv[7], &wrong_nonce_len))) return 2;
+    if (argc > 8 && !(tag_tamper = read_file(argv[8], &tag_tamper_len))) return 2;
+    if (argc > 9 && !(ct_tamper = read_file(argv[9], &ct_tamper_len))) return 2;
+    if (argc > 10 && !(bad_key_id = read_file(argv[10], &bad_key_id_len))) return 2;
     memcpy(crypto.public_key, pub, sizeof(crypto.public_key));
     memcpy(crypto.symmetric_key, key, sizeof(crypto.symmetric_key));
     /* Fixture key id is 00112233445566778899aabbccddeeff. */
@@ -367,25 +375,50 @@ int main(int argc, char **argv)
                         MCF_E_AUTH, &crypto, old, old_len);
       memcpy(crypto.symmetric_key, saved, sizeof(saved)); }
 
-    /* Wrong key id: header CRC gates first, then the provider rejects. */
+    /* ---- Tampering that is NOT re-signed: each must die at a cheap gate.
+     * The status is pinned, so a case that fails for an unexpected reason
+     * fails the suite instead of quietly reporting ok. ---- */
+
+    /* The key id sits inside the signed span, so flipping it is a signature
+     * test. Reaching the key provider is a different test, and it is the
+     * re-signed `unknown key id` fixture below that reaches it. */
     { uint8_t *tampered = (uint8_t *)malloc(patch_len);
       if (tampered) {
           memcpy(tampered, patch, patch_len);
           tampered[MCF_V2_OFF_KEY_ID] ^= 1u;
-          ok &= expect_case("wrong key id", tampered, patch_len, NULL,
-                            MCF_E_ANY, &crypto, old, old_len);
+          ok &= expect_case("tampered key id", tampered, patch_len, NULL,
+                            MCF_E_SIGNATURE, &crypto, old, old_len);
           free(tampered);
       } else ok = 0; }
 
-    /* Corrupted AEAD tag: payload CRC (over the ciphertext) fails first. */
+    /* new_crc32 is covered by the signature but checked by no structural rule
+     * before it, so the signature is what has to reject this. Flipping
+     * payload_size instead trips MCF_E_FORMAT first — see below. */
     { uint8_t *tampered = (uint8_t *)malloc(patch_len);
-      if (tampered && mcf_v2_parse(patch, patch_len, &view) == MCF_OK) {
+      if (tampered) {
           memcpy(tampered, patch, patch_len);
-          off = view.header_len + 4u; /* length prefix of record 0 */
-          if (off + view.record_max_block + MCF_V2_RECORD_TAG_SIZE <= patch_len)
-              tampered[off + view.record_max_block + (MCF_V2_RECORD_TAG_SIZE - 1u)] ^= 1u;
-          ok &= expect_case("corrupted AEAD tag", tampered, patch_len, NULL,
-                            MCF_E_CORRUPT, &crypto, old, old_len);
+          tampered[MCF_V2_OFF_NEW_CRC] ^= 1u;
+          ok &= expect_case("tampered header field", tampered, patch_len, NULL,
+                            MCF_E_SIGNATURE, &crypto, old, old_len);
+          free(tampered);
+      } else ok = 0; }
+
+    { uint8_t *tampered = (uint8_t *)malloc(patch_len);
+      if (tampered) {
+          memcpy(tampered, patch, patch_len); tampered[MCF_V2_OFF_SIGNATURE] ^= 1u;
+          ok &= expect_case("flipped signature byte", tampered, patch_len, NULL,
+                            MCF_E_SIGNATURE, &crypto, old, old_len);
+          free(tampered);
+      } else ok = 0; }
+
+    /* A header field contradicting the actual patch length is a structural
+     * rejection, reached before any cryptographic gate. */
+    { uint8_t *tampered = (uint8_t *)malloc(patch_len);
+      if (tampered) {
+          memcpy(tampered, patch, patch_len);
+          tampered[MCF_V2_OFF_PAYLOAD_SIZE] ^= 0x10u;
+          ok &= expect_case("inconsistent payload size", tampered, patch_len, NULL,
+                            MCF_E_FORMAT, &crypto, old, old_len);
           free(tampered);
       } else ok = 0; }
 
@@ -396,44 +429,59 @@ int main(int argc, char **argv)
                             MCF_E_TRUNCATED, &crypto, old, old_len);
       } else ok = 0; }
 
-    /* Modified header byte outside signature/CRC: payload size. */
+    /* In-place corruption of the record area is caught by the payload CRC,
+     * which is computed over the framed ciphertext — tags included — before
+     * anything is decrypted. A bit flip here therefore always dies at
+     * MCF_E_CORRUPT and can never reach the AEAD tag check. The AEAD-layer
+     * equivalents need the CRC recomputed and are the re-signed fixtures
+     * further down. */
     { uint8_t *tampered = (uint8_t *)malloc(patch_len);
-      if (tampered) {
+      if (tampered && mcf_v2_parse(patch, patch_len, &view) == MCF_OK) {
           memcpy(tampered, patch, patch_len);
-          tampered[MCF_V2_OFF_PAYLOAD_SIZE] ^= 0x10u;
-          ok &= expect_case("modified header field", tampered, patch_len, NULL,
-                            MCF_E_ANY, &crypto, old, old_len);
+          tampered[patch_len - 1u] ^= 1u;           /* last byte is the final tag */
+          ok &= expect_case("corrupted AEAD tag", tampered, patch_len, NULL,
+                            MCF_E_CORRUPT, &crypto, old, old_len);
+          memcpy(tampered, patch, patch_len);
+          off = view.header_len + 4u;               /* first ciphertext byte */
+          if (off < patch_len) tampered[off] ^= 1u;
+          ok &= expect_case("flipped ciphertext byte", tampered, patch_len, NULL,
+                            MCF_E_CORRUPT, &crypto, old, old_len);
           free(tampered);
       } else ok = 0; }
 
-    /* Reordered records: re-signed by the host, so signature, key id, key and
-     * nonce prefix are all genuinely valid — only the AAD record index binds
-     * the ciphertexts to their positions. */
+    /* ---- Re-signed variants: signature and payload CRC are both valid, so
+     * every cheap gate is satisfied and the device has to reject on the
+     * binding under test. tests/mfp2_fixtures.py --self-check proves each one
+     * parses and verifies before the host rejects it, which is what stops a
+     * variant from silently degrading into a parse failure. ---- */
+
+    /* Units swapped verbatim: only the AAD record index ties a ciphertext to
+     * its position. */
     if (reord) ok &= expect_case("reordered records", reord, reord_len, NULL,
-                                 MCF_E_ANY, &crypto, old, old_len);
+                                 MCF_E_AUTH, &crypto, old, old_len);
     else ok = 0;
 
-    /* Mismatched nonce prefix: re-signed, everything valid except the device
-     * derives a different per-record nonce than the producer used. */
+    /* The header declares a nonce prefix the ciphertexts were not sealed
+     * under, so the device derives a different per-record nonce. */
     if (wrong_nonce) ok &= expect_case("wrong nonce prefix", wrong_nonce, wrong_nonce_len,
-                                       NULL, MCF_E_ANY, &crypto, old, old_len);
+                                       NULL, MCF_E_AUTH, &crypto, old, old_len);
     else ok = 0;
 
-    /* Original bit-flip cases, kept for regression parity. */
-    { uint8_t *tampered = (uint8_t *)malloc(patch_len);
-      if (tampered) {
-          memcpy(tampered, patch, patch_len); tampered[MCF_V2_OFF_SIGNATURE] ^= 1u;
-          ok &= expect_case("flipped signature byte", tampered, patch_len, NULL,
-                            MCF_E_SIGNATURE, &crypto, old, old_len);
-          memcpy(tampered, patch, patch_len);
-          if (mcf_v2_parse(patch, patch_len, &view) == MCF_OK) {
-              off = view.header_len + 4u; /* first ciphertext byte */
-              if (off < patch_len) tampered[off] ^= 1u;
-              ok &= expect_case("flipped ciphertext byte", tampered, patch_len, NULL,
-                                MCF_E_CORRUPT, &crypto, old, old_len);
-          } else ok = 0;
-          free(tampered);
-      } else ok = 0; }
+    /* One bit of a record's AEAD tag, payload CRC recomputed. */
+    if (tag_tamper) ok &= expect_case("tampered AEAD tag", tag_tamper, tag_tamper_len,
+                                      NULL, MCF_E_AUTH, &crypto, old, old_len);
+    else ok = 0;
+
+    /* One bit of record 0's ciphertext, payload CRC recomputed. */
+    if (ct_tamper) ok &= expect_case("tampered ciphertext", ct_tamper, ct_tamper_len,
+                                     NULL, MCF_E_AUTH, &crypto, old, old_len);
+    else ok = 0;
+
+    /* Validly signed, but the key id names a key the provider does not hold:
+     * the provider rejects before a single record is decrypted. */
+    if (bad_key_id) ok &= expect_case("unknown key id", bad_key_id, bad_key_id_len,
+                                      NULL, MCF_E_AUTH, &crypto, old, old_len);
+    else ok = 0;
 
     /* ---------------- Resume scenarios ---------------- */
     {
@@ -568,7 +616,7 @@ int main(int argc, char **argv)
     }
 
     (void)view;
-    free(reord); free(wrong_nonce);
+    free(reord); free(wrong_nonce); free(tag_tamper); free(ct_tamper); free(bad_key_id);
     free(patch); free(old); free(expected); free(pub); free(key);
     if (!ok) { fprintf(stderr, "MFP2 session integration test FAILED\n"); return 1; }
     puts("MFP2 session success, Ed25519ph/AEAD tamper tests passed"); return 0;
