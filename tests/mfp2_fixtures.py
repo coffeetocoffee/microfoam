@@ -51,10 +51,38 @@ def record_units(area: bytes):
     return units
 
 
+def framed_records(hdr: bytes, area: bytes):
+    """The record units of `area`, refusing anything the header does not declare.
+
+    Every legitimate variant here mutates the record area in place and leaves
+    its length alone, so the header's declared payload size is a real invariant
+    to check against. It has to be checked: bytearray slice assignment RESIZES
+    when the assigned span differs in length, and resign() recomputes
+    payload_size from whatever it is handed, so a resized area would otherwise
+    be blessed into a patch that is internally consistent, still signed, and no
+    longer testing the binding it is named for. Counting units is not enough -
+    the framing is self-describing, so a shortened area can still yield the
+    declared number of units. Length is the anchor that actually catches it.
+    """
+    declared_len = struct.unpack_from("<I", hdr, V2_OFF_PAYLOAD_SIZE)[0]
+    declared_count = struct.unpack_from("<I", hdr, M.V2_OFF_RECORD_COUNT)[0]
+    if len(area) != declared_len:
+        raise SystemExit(
+            f"variant changed the record area length: {len(area)} bytes, "
+            f"header declares {declared_len}")
+    units = record_units(area)
+    if len(units) != declared_count:
+        raise SystemExit(
+            f"variant no longer frames: {len(units)} record units, "
+            f"header declares {declared_count}")
+    return units
+
+
 def resign(hdr: bytes, area: bytes, seed: bytes) -> bytes:
     """Re-derive payload size, payload CRC and signature over a mutated blob."""
     h = bytearray(hdr)
     area = bytes(area)
+    framed_records(h, area)
     struct.pack_into("<I", h, V2_OFF_PAYLOAD_SIZE, len(area))
     struct.pack_into("<I", h, V2_OFF_PAYLOAD_CRC, M.crc32(area))
     h[M.V2_OFF_SIGNATURE:M.V2_OFF_SIGNATURE + M.SIG_SIZE] = M._ed25519ph_sign(
@@ -71,6 +99,7 @@ def self_check(name: str, blobv: bytes, pub: bytes, key: bytes, old: bytes) -> N
     if not M._ed25519ph_verify(pub, h.signature,
                                SIG_DOMAIN + M._v2_header_for_sig(blobv[:h.header_len]) + area):
         raise SystemExit(f"{name}: variant is not validly signed")
+    framed_records(blobv[:h.header_len], area)
     try:
         M.verify_v2(blobv, pub, key=key, old=old)
     except SystemExit as exc:
@@ -112,7 +141,7 @@ def main() -> int:
     if not M._ed25519ph_verify(pub, h.signature, SIG_DOMAIN + M._v2_header_for_sig(hdr) + area):
         raise SystemExit("fixture patch fails its own signature")
 
-    units = record_units(area)
+    units = framed_records(hdr, area)
     if len(units) < 2:
         raise SystemExit(f"need >=2 records for the reorder variant, got {len(units)}")
     (p0, l0), (p1, l1) = units[0], units[1]

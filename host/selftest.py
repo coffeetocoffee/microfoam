@@ -43,6 +43,21 @@ def check(cond: bool, name: str) -> None:
         print(f"  FAIL  {name}")
 
 
+def rejected_for(label: str, fn, *args, reason: str, **kwargs) -> None:
+    """Assert `fn` is rejected *for the stated reason*.
+
+    Asserting only that something was raised passes whenever the code dies at a
+    different gate than the one under test — which is how a tamper case reports
+    green while proving nothing. The message is pinned here instead.
+    """
+    try:
+        fn(*args, **kwargs)
+    except SystemExit as exc:
+        check(reason in str(exc), f"{label} (rejected: {reason!r})")
+    else:
+        check(False, f"{label} (expected rejection: {reason!r})")
+
+
 # --------------------------------------------------------------------------
 # 1. Layout agreement between the C header and the Python tool
 # --------------------------------------------------------------------------
@@ -245,8 +260,15 @@ def make_firmware(seed: int) -> tuple[bytes, bytes]:
     old = bytes(out)
     new = bytearray(old)
     new[0x200:0x600] = bytes(random.randrange(256) for _ in range(0x400))
-    i = old.find(b"STR_200_")
-    new[i:i + 20] = b"STR_200_CHANGED_XX"
+    marker = b"STR_200_"
+    i = old.find(marker)
+    if i < 0:
+        raise SystemExit("firmware fixture lost its STR_200_ marker")
+    # Sliced to the replacement's own length on purpose: a slice assignment
+    # RESIZES the buffer when the spans differ, so an off-by-a-few literal here
+    # would silently change the image length instead of editing it.
+    replacement = b"STR_200_CHANGED_XX"
+    new[i:i + len(replacement)] = replacement
     return old, bytes(new)
 
 
@@ -341,21 +363,21 @@ def test_signing() -> None:
     check(len(patch) == M.HDR_LEN + h.payload_size,
           "file length equals header plus payload")
 
-    for label, offset, value in [
-        ("unknown flag", M.OFF_FLAGS, 0x80000000),
-        ("codec mismatch", M.OFF_FLAGS, M.FLAG_CODEC_LZMA),
-        ("nonzero reserved field", M.OFF_RESERVED, 1),
+    for label, offset, value, reason in [
+        ("unknown flag", M.OFF_FLAGS, 0x80000000,
+         "unsupported header flags or nonzero reserved field"),
+        ("codec mismatch", M.OFF_FLAGS, M.FLAG_CODEC_LZMA,
+         "LZ4 patch is missing FLAG_CODEC_LZ4"),
+        ("nonzero reserved field", M.OFF_RESERVED, 1,
+         "unsupported header flags or nonzero reserved field"),
     ]:
         malformed = bytearray(patch)
         if offset == M.OFF_FLAGS:
             struct.pack_into("<I", malformed, offset, value)
         else:
             struct.pack_into("<H", malformed, offset, value)
-        try:
-            M.parse_header(bytes(malformed))
-            check(False, f"host rejects {label}")
-        except SystemExit:
-            check(True, f"host rejects {label}")
+        rejected_for(f"host rejects {label}", M.parse_header, bytes(malformed),
+                     reason=reason)
 
 
 def test_lzma() -> None:
@@ -473,10 +495,38 @@ def test_v2() -> None:
     check(h.flags == M.V2_REQUIRED_FLAGS and h.record_count > 0, "MFP2 profile and records")
     check(M.verify_v2(patch, pub) == b"", "MFP2 signature and CRC verify")
     check(M.verify_v2(patch, pub, key=key, old=old) == new, "MFP2 decrypt/apply round-trip")
-    bad = bytearray(patch); bad[-1] ^= 1
-    try: M.verify_v2(bytes(bad), pub)
-    except SystemExit: check(True, "MFP2 tamper rejected")
-    else: check(False, "MFP2 tamper rejected")
+
+    # Each tamper case must be rejected by the layer it targets. A bare bit flip
+    # is caught by the payload CRC, which covers the framed ciphertext including
+    # the tags and is checked before the signature or any decryption, so on its
+    # own it never exercises those layers. Reaching the signature and the AEAD
+    # takes a mutation with the CRC recomputed, and - for the AEAD - a fresh
+    # signature as well.
+    hdr = patch[:h.header_len]
+    area = patch[h.header_len:]
+
+    crc_only = bytearray(patch)
+    crc_only[-1] ^= 1
+    rejected_for("MFP2 tamper: raw bit flip", M.verify_v2, bytes(crc_only), pub,
+                 reason="MFP2 payload CRC mismatch")
+
+    sig_only = bytearray(patch)
+    sig_only[M.V2_OFF_SIGNATURE] ^= 1
+    rejected_for("MFP2 tamper: signature byte", M.verify_v2, bytes(sig_only), pub,
+                 reason="MFP2 signature invalid")
+
+    def resign(header: bytes, record_area: bytes) -> bytes:
+        h = bytearray(header)
+        struct.pack_into("<I", h, 40, M.crc32(record_area))
+        h[M.V2_OFF_SIGNATURE:M.V2_OFF_SIGNATURE + M.SIG_SIZE] = M._ed25519ph_sign(
+            seed, b"MCF2SIG\0" + M._v2_header_for_sig(h) + record_area)
+        return bytes(h) + record_area
+
+    aead = bytearray(area)
+    aead[4] ^= 1                                    # first ciphertext byte
+    rejected_for("MFP2 tamper: ciphertext, CRC recomputed and re-signed",
+                 M.verify_v2, resign(hdr, bytes(aead)), pub,
+                 reason="MFP2 record authentication failed", key=key, old=old)
 
 
 def test_v2_kat() -> None:

@@ -415,7 +415,7 @@ and the standard test configurations pass in both Debug and Release; the sodium 
 | Suite | What it proves |
 |---|---|
 | `microfoam_tests` | 79 checks: round trip, **resume journal**, and fault injection at every stage |
-| `host_selftest` | 99 checks: 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, LZMA props + policy fields, format layout agreement, signing, MFP2 KAT, and the fixed-nonce-prefix guard |
+| `host_selftest` | 101 checks: 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, LZMA props + policy fields, format layout agreement, signing, MFP2 KAT, the fixed-nonce-prefix guard, and host-side tamper cases each pinned to the layer that rejects them |
 | `cross_test` | The Python host tool's patch, applied by the C library, byte-exact |
 | `v2_format_test` | 45 checks: MFP2 header/TLV/record-framing rules, plus a ~4,200-case deterministic mutation/property loop |
 | `v2_fuzz_smoke` | The shared parser property oracle over a built-in seed and its truncations (portable; no sanitizer runtime needed) |
