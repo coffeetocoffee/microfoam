@@ -248,11 +248,19 @@ Two consequences of per-session resolution are worth stating explicitly:
   A custom format cannot depend on out-of-band parameters; the codec must ignore
   the `props` argument.
 
-| Codec | Decoder state | RAM | Ratio vs LZMA | Default |
+| Codec | Decoder state | RAM | Payload vs LZMA | Default |
 |---|---|---|---|---|
-| **LZ4** | ~16 B | + block buffers | −5% to −15% on binary diffs | **yes** |
+| **LZ4** | ~16 B | + block buffers | ~1.7× at the default 1 KB block (see below) | **yes** |
 | LZMA | probability table + dictionary | see below | baseline | no (`-DMCF_ENABLE_LZMA=ON`) |
 | Raw | 16 B | none | delta verbatim | no (`--codec raw`) |
+
+LZ4 is the default because it decodes in ~16 B of state rather than an LZMA probability
+table. That buys RAM, not bytes: on the same delta LZ4 emits a **larger** payload, and the
+gap is what a caller trades away. On the suite's 35 KB fixture, LZ4 costs **1.67×** LZMA's
+payload at the default 1 KB block (1,934 B vs 1,160 B). The gap narrows as the block grows —
+1.09× at a 32 KB block — but the LZ4 workspace is `2 × block_size`, so closing it that way
+costs the very RAM LZ4 was chosen to save. `host_selftest` measures and pins this figure, so
+it cannot drift from the implementation.
 
 **Raw** is the delta stream passed through untouched — no framing, no properties, no
 per-block headers. Use it when the delta is small enough that a codec's headers cost more

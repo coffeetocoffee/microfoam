@@ -450,11 +450,16 @@ typedef struct {
 
 Three codecs ship:
 
-| Codec | Decoder state | Workspace | RAM | Ratio vs LZMA | Role |
+| Codec | Decoder state | Workspace | RAM | Payload vs LZMA | Role |
 |---|---|---|---|---|---|
-| **LZ4** | ~256 B | ring buffer, configurable | **~1.5 KB @ 1 KB ring** | −5% to −15% on binary diffs | **Default** |
+| **LZ4** | 16 B | `2·block_size + 16 B`, configurable | **2,064 B @ 1 KB block** | ~1.7× at the default 1 KB block | **Default** |
 | **Raw** | 16 B | none | **16 B** | delta verbatim | `--codec raw`, for sub-threshold deltas |
 | **LZMA** | vendored SDK, 16 KB probs at `lc=3` | dictionary, configurable | ~20–33 KB | baseline | Opt-in, max ratio saving |
+
+LZ4's advantage is decoder state, not payload size: on the suite's 35 KB fixture it costs
+1.67× LZMA's payload at the default 1 KB block (1,934 B vs 1,160 B), narrowing to 1.09× at a
+32 KB block. A larger block therefore buys ratio at the price of workspace, since the LZ4
+workspace is `2 × block_size`. `host_selftest` pins the default-block figure.
 
 The raw codec exists because framing overhead is not free at the bottom of the size range: a
 delta smaller than a codec's headers is better sent verbatim. It carries no properties block
@@ -733,7 +738,7 @@ when budgeting static RAM.
 
 | Codec | Formula | Default configuration |
 |---|---|---|
-| **LZ4** | `~256 B + ring_size` | `ring = 4·B` ⇒ **~4.3 KB** @ B=1024 |
+| **LZ4** | `2·block_size + 16 B` | `block_size = 1024` ⇒ **2,064 B** |
 | **LZMA** | `state + probs + dict` where `probs = (1984 + 768·2^(lc+lp))·2 B` | `lc=3,lp=0` ⇒ 16,256 B; `dict=16 KB` ⇒ **~32.9 KB** |
 
 (The shipped LZMA decoder is the vendored LZMA SDK; the `1984` base-probability count and the

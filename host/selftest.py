@@ -438,6 +438,47 @@ def test_lzma() -> None:
           "4 KB dictionary round-trips byte-exact")
 
 
+def test_codec_ratio() -> None:
+    # The README states what LZ4 costs against LZMA, so this measures it on one
+    # fixture instead of trusting the prose. LZ4 is the default because it
+    # decodes in ~16 B of state rather than an LZMA probability table; that buys
+    # RAM, not bytes. On the same delta LZ4 emits a *larger* payload, and the
+    # gap is the ratio a caller trades away for the smaller decoder.
+    print("lz4 vs lzma payload size on one fixture")
+    try:
+        import lzma  # noqa: F401
+    except ImportError:
+        print("  SKIP  stdlib lzma not available")
+        return
+
+    old, new = make_firmware(2024)
+    kw = dict(product_id=0x1234, fw_version=0x00020000, old_version=0x00010000)
+    lz4_patch = M.Patch(old=old, new=new, codec=M.CODEC_LZ4, **kw).build()
+    lzma_patch = M.Patch(old=old, new=new, codec=M.CODEC_LZMA, **kw).build()
+
+    lz4_payload = M.parse_header(lz4_patch).payload_size
+    lzma_payload = M.parse_header(lzma_patch).payload_size
+    ratio = lz4_payload / lzma_payload
+    print(f"       payload lz4 {lz4_payload} B vs lzma {lzma_payload} B "
+          f"({ratio:.2f}x)")
+
+    # The sign is the part the README had backwards: LZ4 costs bytes.
+    check(lz4_payload > lzma_payload, "lz4 is larger than lzma on this fixture")
+    # And the magnitude, pinned loosely. The direction above is the invariant;
+    # this band only catches a gross drift, because liblzma's exact output can
+    # vary between the versions CI and a developer machine carry. Measured 1.67x.
+    check(1.3 < ratio < 2.2, "lz4 costs roughly 1.5-1.8x lzma at the default block")
+
+    # A wider LZ4 block narrows the gap, but its workspace grows with it -- that
+    # is exactly the RAM the default block size was chosen to keep small, so the
+    # narrow-gap regime is not the regime the default operates in.
+    wide = M.Patch(old=old, new=new, codec=M.CODEC_LZ4, block_log2=15, **kw).build()
+    wide_payload = M.parse_header(wide).payload_size
+    print(f"       payload lz4 block_log2=15 {wide_payload} B "
+          f"({wide_payload / lzma_payload:.2f}x)")
+    check(wide_payload < lz4_payload, "a wider lz4 block narrows the gap")
+
+
 def test_raw() -> None:
     print("raw (uncompressed) make / apply round-trip")
     old, new = make_firmware(55)
@@ -661,6 +702,7 @@ def main() -> int:
     test_pipeline()
     test_raw()
     test_lzma()
+    test_codec_ratio()
     test_lzma_policy_guard()
     test_signing()
     test_v2()
