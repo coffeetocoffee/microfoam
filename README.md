@@ -16,14 +16,14 @@ few kilobytes of RAM, with no heap and no RTOS.
 | **Delta size** | typically **1–15%** of the image |
 | **RAM** | **880 B** total (LZ4, 256 B block) — 352 B session + 528 B workspace, no heap; ~1.4 KB at a 512 B block |
 | **ROM** | **12,386 B** on Cortex-M0; all tables `const`, enforced by a CI size gate |
-| **Dependencies** | `<stdint.h>`, `<string.h>`. No heap. No RTOS. |
+| **Dependencies** | `<stdint.h>`, `<stddef.h>`, `<string.h>`. No heap. No RTOS. |
 | **Language** | C99, MISRA-friendly, `-Wall -Wextra -Wconversion` clean |
-| **Verified targets** | arm-none-eabi-gcc: M0, M0+, M3, M4, M7, M33 |
+| **Verified targets** | arm-none-eabi-gcc: Cortex-M0, M3, M4, M7 — the four cores in the CI matrix. M0+ and M33 are untested portability targets. |
 | **Licence** | MIT |
 | **Status** | `1.9.1` — see [what works and what does not](#status) |
 
 ```c
-#include "microfoam.h"   /* the entire public API is this one header */
+#include "microfoam.h"   /* the v1 API; MFP2 adds microfoam_v2.h */
 ```
 
 > [!NOTE]
@@ -245,28 +245,33 @@ returns. Service a watchdog, sleep, or report progress between steps. Aborting t
 progress callback is a clean `MCF_E_ABORTED`, not a forced reset.
 
 **The flash contract is enforced, not assumed.** The library never issues an unaligned or
-block-crossing erase or program, and it performs read-back verification after every write. Your
-callback does not have to know the erase geometry.
+block-crossing erase or program, and it reads every programmed region back and compares it
+(unless `flash_is_readonly` reports that region cannot be read). Your callback does not have
+to know the erase geometry.
 
-**Updates are authenticated.** Product binding, anti-rollback, and signature verification are
-built in, not bolted on. Verification fails closed: a patch that claims to be signed is
-rejected if no verifier is available, never accepted unverified.
+**Updates can be authenticated, and the choice is explicit.** Product binding and
+anti-rollback are always enforced. Signature verification is built in and fails closed — a
+patch that claims to be signed is rejected if no verifier is available, never accepted
+unverified. Note that an *unsigned* patch carries no signature to check and is applied by
+default, so a product that must reject them configures a verifier (see the HAL contract).
 
 ---
 
 ## The HAL contract
 
-Five required callbacks and one optional. This is the entire platform dependency.
+Six callbacks are required on every path — `flash_erase`, `flash_write`, `flash_read`,
+`flash_block_size`, `get_product_id`, `get_fw_version` — plus `alloc`/`free` unless you supply
+a static workspace. Everything else is optional. This is the entire platform dependency.
 
 | Callback | Required | Contract |
 |---|---|---|
 | `flash_erase(ctx, addr, len)` | yes | `len` is always a whole multiple of `flash_block_size()`, and `addr` is aligned to it. Return `MCF_OK` on success or a negative status on failure. |
 | `flash_write(ctx, addr, p, len)` | yes | Never crosses an erase-block boundary. May be called repeatedly for one logical block. Return `MCF_OK` on success or a negative status on failure; positive byte counts are not valid. |
-| `flash_read(ctx, addr, p, len)` | for read-back verify | Needed unless `flash_is_readonly` reports the region unreadable. Return exactly `len` on success or a negative status on failure. The old-image `old_read` callback follows the same exact-count rule. |
+| `flash_read(ctx, addr, p, len)` | yes | Used for read-back verification after programming and for the whole-image CRC read at finish, which always reads the destination back from flash rather than trusting the buffer just written. Required on every path, including a write-only region. Return exactly `len` on success or a negative status on failure. The old-image `old_read` callback follows the same exact-count rule. |
 | `flash_block_size(ctx)` | yes | Erase granularity in bytes. Must be a power of two. |
 | `alloc` / `free` | unless static | Returning `NULL` is reported as `MCF_E_NOMEM`. |
 | `get_product_id`, `get_fw_version` | yes | Device-provisioned identity and running version. |
-| `flash_is_readonly` | no | Non-zero skips read-back verify. |
+| `flash_is_readonly` | no | Non-zero skips the per-write read-back compare. It does **not** remove the need for `flash_read`: the whole-image CRC at finish still reads the destination back. |
 | `verify` | no | Signature verifier. `NULL` means no verifier available → signed patches rejected. |
 | `log` | no | Diagnostics. |
 
@@ -415,14 +420,16 @@ path.
 
 Measured with `arm-none-eabi-gcc` at `-Os`, every source compiled with `-Wall -Wextra -Werror
 -Wconversion -Wsign-conversion -Wshadow -Wcast-qual -Wstrict-prototypes -Wmissing-prototypes`.
-All six configurations compile with zero warnings. These figures are checked in CI by
+All four configurations compile with zero warnings. These figures are checked in CI by
 `cmake/size_gate.cmake`, which fails if `.text` grows past the ceiling in
-`cmake/size_baseline.txt` or if any static RAM appears at all.
+`cmake/size_baseline.txt` or if any static RAM appears at all. The four cores below are the
+ones the CI matrix builds; M0+ and M33 are untested portability targets and no figure is
+claimed for them.
 
 | Target | Code (`.text`) | Static RAM |
 |---|---|---|
-| Cortex-M0 / M0+ | **12,386 B** | 0 B |
-| Cortex-M3 / M33 | 11,444 B | 0 B |
+| Cortex-M0 | **12,386 B** | 0 B |
+| Cortex-M3 | 11,444 B | 0 B |
 | Cortex-M4 | 11,450 B | 0 B |
 | Cortex-M7 | 11,446 B | 0 B |
 
@@ -516,8 +523,9 @@ cmake -DCORE=cortex-m0 -DCC="$(which arm-none-eabi-gcc)" -DSRC="$PWD" \
 | `MCF_WERROR` | `ON` | Warnings are errors |
 | `MCF_STRICT` | `ON` | Add `-Wconversion -Wsign-conversion` |
 
-Or drop the sources into an existing project — there are seven `.c` files, one header, and no
-generated code:
+Or drop the sources into an existing project — twelve `.c` files and three headers, and no
+generated code. Only the ones the build selects are compiled: `mcf_lzma.c` and `mcf_sodium.c`
+are opt-in, and `mcf_v2.c`/`mcf_v2_session.c` are the MFP2 execution path:
 
 ```cmake
 add_subdirectory(microfoam)
@@ -528,8 +536,9 @@ target_link_libraries(my_app PRIVATE microfoam::microfoam)
 <summary><b>Repository layout</b></summary>
 
 ```
-include/microfoam.h        the public v1 API — the entire production contract
+include/microfoam.h        the public v1 API
 include/microfoam_v2.h     MFP2 execution API: session, journal, structural parser
+include/microfoam_sodium.h libsodium adapter for Ed25519ph verify and XChaCha20-Poly1305 (opt-in)
 src/mcf_container.c        MFP1 header parse and validation (the only session format)
 src/mcf_engine.c           BSDIFF43 delta loop, resumable, 32-bit clean
 src/mcf_session.c          state machine, workspace, flash write path
@@ -539,6 +548,9 @@ src/mcf_lzma.c             LZMA codec adapter (opt-in)
 src/mcf_codec.c            codec registry
 src/mcf_hal.c              HAL registration, workspace allocation
 src/mcf_util.c             CRC-32, version, diagnostics
+src/mcf_v2.c               MFP2 structural parser (shape only; never decrypts)
+src/mcf_v2_session.c       MFP2 authenticated execution: streaming decrypt, resume
+src/mcf_sodium.c           libsodium adapter (opt-in, MCF_ENABLE_SODIUM)
 third_party/lzma-sdk/      vendored LZMA SDK decoder (public domain)
 host/microfoam.py          patch generator, inspector, verifier, reference decoder
 host/selftest.py           host tool self-test
@@ -547,18 +559,24 @@ host/check_quickstart.py   builds the README's quick-start patch and applies it 
 host/lzma_vectors.py       generates the LZMA conformance vectors via liblzma
 tests/test_microfoam.c     fault-injection and round-trip tests
 tests/hal_concurrency_test.c  two sessions driven interleaved, proving reentrancy
+tests/custom_codec_test.c  caller-owned codec descriptors and failure propagation
 tests/patch_fixture.h      shared MFP1 patch builder used by the C suites
 tests/lzma_conformance_test.c  LZMA conformance harness (67 vectors x 5 block sizes)
+tests/lzma_policy_test.c   LZMA dictionary and lc+lp policy rejections
 tests/cross_test.c         host-tool patch applied by the C library
 tests/v2_format_test.c     MFP2 structural parser cases and mutation/property loop
 tests/v2_parse_fixture.h   parser property oracle shared by the suite and fuzz target
 tests/fuzz_v2_parse.c      MFP2 parser fuzz target (libFuzzer entry and portable smoke driver)
+tests/mfp2_boundary_test.c MFP2 session boundary: tamper matrix and resume
+tests/mfp2_fixtures.py     re-signed MFP2 tamper variants for the boundary test
+tests/sodium_rfc_test.c    published Ed25519/Ed25519ph/XChaCha20-Poly1305 vectors
 tests/fixtures/            deterministic firmware pair and a test key
 contrib/ed25519-wip/       rejected verifier, defect log, and conformance harness
 docs/architecture.md       the design this implements, and why
 docs/format-v2.md          the shipped MFP1 on-flash patch format
 docs/format-v2-design.md   MFP2 design: AEAD container, signed message, resume
-docs/lzma-history.md       the retired from-scratch LZMA decoder's defect log
+docs/mfp2-streaming-decryption-design.md  the streaming record window and its trade-offs
+docs/lzma-history.md       why the from-scratch LZMA decoder was retired
 ```
 
 </details>

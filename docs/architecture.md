@@ -64,6 +64,14 @@ This document specifies the target software architecture for **Microfoam** — a
 production-grade firmware delta update library for resource-constrained microcontrollers. It
 is a **forward-looking specification**, not a description of existing code.
 
+> **Reading this against the shipped library.** The architecture was written as a design
+> ahead of the implementation, so parts of it are aspirational. Where a statement is
+> present-tense about the code — a named symbol, a struct layout, a CI gate, a guarantee —
+> it has been reconciled with the `1.9.2` tree and now matches it. Where a statement is a
+> plan (the §21 roadmap, and the HIL and static-analysis tiers marked as such in §16.4 and
+> §18.1), it is not yet implemented and says so. Treat any unmarked future-tense item as a
+> target, not a claim.
+
 All public symbols use the `mcf_` prefix; the host tool is invoked as `microfoam`. Section
 13 defines the on-flash patch format, which carries the `'MFP1'` magic.
 
@@ -377,7 +385,7 @@ reference implementation and is a genuinely good property.
 ├─────────────────────────────────────────────────────────────────┤
 │  L0   HAL                 flash erase/write/read, alloc, log   │  Platform
 └─────────────────────────────────────────────────────────────────┘
-                          ▲ mcf_ctx_t owns all mutable state ──┘
+                          ▲ mcf_session_t owns all mutable state ─┘
 ```
 
 Dependency rule: **strictly downward.** A layer may call only layers below it. The codec
@@ -386,8 +394,10 @@ the session layer owns all policy.
 
 ### 7.1 L0 — Hardware Abstraction Layer
 
-The only platform-dependent surface. Five callbacks (§12). Everything above is portable C99
-with no standard-library dependency beyond `<string.h>` and `<stdint.h>`.
+The only platform-dependent surface. Six callbacks are required on every path (§12).
+Everything above is portable C99
+with no standard-library dependency beyond `<string.h>`, `<stdint.h>` and `<stddef.h>` (plus the
+opt-in libsodium adapter).
 
 ### 7.2 L3 — Delta Engine
 
@@ -399,15 +409,16 @@ The engine is a pure transformation with two injected functions and an explicit 
 performs no allocation, no I/O, and holds no static state.
 
 ```c
-typedef struct {
-    /* Injected source: raw delta stream (post-codec) */
-    int  (*read)(void *u, uint32_t off, uint8_t *p, uint32_t len);
-    /* Injected sink: reconstructed bytes, sequential */
-    int  (*write)(void *u, const uint8_t *p, uint32_t len);
-    /* Injected base image access: arbitrary backing store */
-    int  (*old_read)(void *u, uint32_t off, uint8_t *p, uint32_t len);
-    void *u;
-} mcf_io_t;
+/* Internal (src/mcf_internal.h): the engine's injected I/O, wired by the session. */
+typedef struct mcf_engine_io {
+    mcf_refill_fn    refill;     /* injected source: decompressed delta bytes   */
+    mcf_emit_fn      emit;       /* injected sink: reconstructed bytes          */
+    mcf_base_read_fn base_read;  /* injected base-image access                  */
+    void          (*shift)(void *ctx, uint32_t consumed);
+    uint32_t       *raw_origin;
+    void            *ctx;
+    uint32_t        *site;
+} mcf_engine_io_t;
 ```
 
 The `old_read` callback is the direct architectural answer to **G-08**. A raw pointer is
@@ -485,8 +496,8 @@ benefit from the same release.
 ### 7.4 L2 — Container
 
 Parses, validates, and integrity-checks the patch header, then exposes a validated view to
-the layers above. It performs **no** patch application. Its contract is: *after `mcf_hdr_open`
-returns `MCF_OK`, every field in the view is in range, consistent, and authenticated.*
+the layers above. It performs **no** patch application. Its contract is: *after
+`mcf_hdr_parse` returns `MCF_OK`, every field in the view is in range and consistent.*
 
 This is principle **P5** — one validation boundary, so no downstream layer re-validates.
 
@@ -564,9 +575,9 @@ other state may be reported as success. This directly closes **B-03** and **B-05
 
 ### 9.1 Surface
 
-Five functions, one query, one context. This is the contract an integrator implements and
-calls — deliberately close to the reference implementation's successful refactor, so prior
-porting effort transfers.
+The lifecycle, the resume pair, and the queries below. This is the contract an integrator
+implements and calls — deliberately close to the reference implementation's successful
+refactor, so prior porting effort transfers.
 
 ```c
 /* ---- HAL callbacks (bound per session) ---- */
@@ -579,15 +590,17 @@ mcf_status_t mcf_hal_register(const mcf_hal_t *hal); /* deprecated; validation o
 /* ---- Session lifecycle ---- */
 mcf_status_t mcf_session_open(mcf_session_t *s, const mcf_config_t *cfg);
 mcf_status_t mcf_session_begin(mcf_session_t *s);
-int32_t     mcf_session_step(mcf_session_t *s);   /* MCF_OK, or bytes remaining */
+mcf_status_t mcf_session_step(mcf_session_t *s);   /* MCF_OK, or a negative status */
 mcf_status_t mcf_session_finish(mcf_session_t *s);
 void        mcf_session_close(mcf_session_t *s);
 
 /* ---- Queries ---- */
+mcf_state_t  mcf_session_state(const mcf_session_t *s);
 mcf_status_t mcf_session_status(const mcf_session_t *s);
-uint32_t    mcf_session_progress(const mcf_session_t *s);
-uint32_t    mcf_session_error_line(const mcf_session_t *s);
-uint32_t    mcf_ctx_size(const mcf_config_t *cfg);   /* exact dynamic workspace */
+uint32_t     mcf_session_progress(const mcf_session_t *s);
+uint32_t     mcf_session_total(const mcf_session_t *s);
+uint32_t     mcf_session_error_site(const mcf_session_t *s);
+uint32_t     mcf_ctx_size(const mcf_config_t *cfg);   /* exact dynamic workspace */
 ```
 
 Plus a single-call convenience wrapper `mcf_session_run()` for simple integrations that do not
@@ -613,7 +626,10 @@ typedef enum {
     MCF_E_FLASH         = -13,  /* erase, program, or verify failed       */
     MCF_E_IO            = -14,  /* underlying source/sink read failed     */
     MCF_E_ABORTED       = -15,  /* cancelled via progress callback        */
-    MCF_E_COMMIT        = -16   /* integrators' commit hook rejected      */
+    MCF_E_COMMIT        = -16,  /* integrators' commit hook rejected      */
+    MCF_E_NOT_FOUND     = -17,  /* no such session, state, or codec       */
+    MCF_E_AUTH          = -18,  /* authentication tag or key invalid      */
+    MCF_E_MAX           = -19
 } mcf_status_t;
 ```
 
@@ -621,7 +637,7 @@ typedef enum {
 `mcf_status_t` on failure. `mcf_status_t` functions return a code. **Zero is never
 ambiguous**: it means "success, zero bytes", and only that. (**B-03**, **B-04**)
 
-`mcf_session_error_line()` records a coarse stage identifier (which layer and which step
+`mcf_session_error_site()` records a coarse stage identifier (which layer and which step
 failed) so a field failure is diagnosable from a log line without a debugger (**P1**,
 stakeholder: Operations).
 
@@ -635,47 +651,63 @@ The caller provides the storage — from a static object, a pool allocator, or t
 library never allocates the session itself and never holds a static session pointer. This
 eliminates **B-12** and makes the library reentrant by construction.
 
-A convenience `MCF_SESSION_DECLARE(name, cfg)` macro provides static storage without
+A convenience `MCF_SESSION_DECLARE(name)` macro provides static storage without
 requiring a heap.
 
 ### 9.4 Configuration
 
 ```c
-typedef struct {
-    const uint8_t *patch_base;      /* patch image in memory               */
-    uint32_t       patch_size;
+typedef struct mcf_config {
+    const mcf_hal_t *hal;           /* per-session platform callbacks      */
+    const uint8_t   *patch;         /* patch image in memory               */
+    uint32_t         patch_size;
 
     /* Base image: direct memory (fast path) or callback (general) */
-    const uint8_t *old_base;        /* NULL ⇒ use old_read callback        */
-    uint32_t       old_size;
-    int  (*old_read)(void *u, uint32_t off, uint8_t *p, uint32_t len);
-    void         *old_ctx;
+    const uint8_t   *old;           /* NULL ⇒ use old_read callback        */
+    uint32_t         old_size;
+    mcf_read_fn      old_read;
+    void            *old_ctx;
 
-    /* Destination for the reconstructed image */
-    uint32_t       dst_addr;        /* via HAL                            */
+    uint32_t         dst_addr;      /* via HAL                             */
 
-    /* Codec: NULL ⇒ auto-select smallest workspace that fits */
-    const char    *codec;
-    uint32_t       block_size;      /* 0 ⇒ MCF_DEFAULT_BLOCK_SIZE (1024)   */
+    mcf_codec_id_t   codec;         /* MCF_CODEC_AUTO ⇒ smallest that fits */
+    uint32_t         block_size;    /* 0 ⇒ MCF_DEFAULT_BLOCK_SIZE (1024)   */
 
-    /* Memory ceiling for codec workspace; the library refuses to exceed it */
-    uint32_t       max_workspace;
+    /* Memory ceiling; the library refuses to exceed it (see §10) */
+    uint32_t         ram_budget;
 
     /* Optional */
-    int  (*progress)(void *u, uint32_t done, uint32_t total);
-    void *progress_ctx;
-    int  (*commit)(void *u);        /* invoked after CRC passes           */
-    void *commit_ctx;
+    mcf_progress_fn  progress;
+    void            *progress_ctx;
+    mcf_commit_fn    commit;        /* invoked after the CRC passes        */
+    void            *commit_ctx;
 
-    /* Memory budget for sizing (see §10) */
-    uint32_t       ram_budget;
+    /* Heapless operation: private per-session workspace */
+    void            *workspace;
+    uint32_t         workspace_size;
+
+    /* Optional per-session verifier; falls back to the HAL verifier */
+    mcf_verify_fn    verify;
+    void            *verify_ctx;
+
+    /* Optional LZMA policy (see 13.4 step 11) */
+    uint32_t         lzma_max_dict;
+    uint32_t         lzma_max_lc_plus_lp;
+
+    /* Optional per-session codec table; overrides built-ins by id */
+    const mcf_codec_ops_t *codecs;
+    uint32_t         codec_count;
+
+    /* Resume journal (see §15); both zero disables it */
+    uint32_t         journal_addr;
+    uint32_t         journal_interval;
 } mcf_config_t;
 ```
 
-`max_workspace` and `ram_budget` are the mechanism that converts an implicit contract into
-an enforced one (**P2**). The library computes the requirement from the patch, compares it
-against the budget, and returns `MCF_E_DICT_TOO_LARGE` if it does not fit. **It never
-attempts an allocation it cannot satisfy.** This is the direct fix for **B-01** and **W-01**.
+`ram_budget` is the mechanism that converts an implicit contract into an enforced one
+(**P2**). The library computes the requirement from the patch, compares it against the
+budget, and returns `MCF_E_DICT_TOO_LARGE` if it does not fit. **It never attempts an
+allocation it cannot satisfy.** This is the direct fix for **B-01** and **W-01**.
 
 ### 9.5 Progress and abort (**P7**)
 
@@ -768,14 +800,18 @@ fitting comfortably on a 32 KB part, and the Constrained profile on an 8 KB one 
 
 ### 10.5 Static allocation option
 
-For systems with no heap, `MCF_SESSION_DECLARE` plus a buffer of
-`mcf_ctx_size(cfg)` bytes gives a fully static, allocation-free build: the session state is
-caller-owned storage sized by `mcf_session_sizeof()`, and the dynamic workspace is the
-figure `mcf_ctx_size()` returns. This is a common requirement in safety-certified and
-hard-real-time firmware and is not supported by the reference design.
+For systems with no heap, `MCF_SESSION_DECLARE` plus a buffer sized to the configuration's
+workspace requirement gives a fully static, allocation-free build: the session state is
+caller-owned storage sized by `mcf_session_sizeof()` (bounded by `MCF_SESSION_MAX_BYTES`), and
+the dynamic workspace is the figure `mcf_ctx_size()` returns. This is a common requirement in
+safety-certified and hard-real-time firmware and is not supported by the reference design.
 
 ```c
-static uint8_t workspace[MCF_CTX_SIZE_MAX];   /* or an exact per-config figure */
+/* mcf_ctx_size() is not a constant expression, so give the buffer the ceiling you
+ * are willing to spend and let mcf_session_begin() refuse anything larger; or
+ * compute the exact figure from the build host and size it to that. */
+static uint8_t workspace[4096];
+MCF_SESSION_DECLARE(session);        /* a mcf_session_t * over static storage */
 cfg.workspace      = workspace;
 cfg.workspace_size = sizeof(workspace);
 ```
@@ -796,7 +832,7 @@ enforced as a size gate (see 16.1 B7).
 | Reentrancy | **Yes.** Two sessions with distinct contexts are fully independent, and this is exercised by driving two of them through the whole decode interleaved (`hal_concurrency_test`). |
 | Thread safety of one session | **No.** A single session must be driven by one context at a time. Documented, not defended against. |
 | HAL reentrancy | Depends on the implementation; stated as a HAL requirement. |
-| Blocking calls | **None.** Every call is bounded by one block of work. |
+| Blocking calls | `mcf_session_step()` is bounded by one block of work — the reason the step-wise API exists. `begin()` and `finish()` are **not**: `begin()` walks the base-image and payload CRCs, and `finish()` reads the whole reconstructed image back for its CRC, so both scale with image size. Use the step-wise API and the progress callback where a watchdog must be serviced. |
 
 **`mcf_ctx_size()` is pure and reentrant** — safe to call from an allocator or a build script.
 
@@ -837,25 +873,34 @@ primitive — produces **silent corruption**, and the library's own error path t
 ### 12.2 The contract
 
 ```c
-typedef struct {
-    /* Erase `len` bytes starting at `addr`. `len` is always a multiple of
-     * mcf_flash_block_size() and aligned to it. */
-    int (*erase)(void *u, uint32_t addr, uint32_t len);
+/* The shipped HAL (include/microfoam.h). One instance per session, via cfg.hal. */
+typedef struct mcf_hal {
+    /* Erase `len` bytes at `addr`: a whole multiple of flash_block_size(), aligned. */
+    int32_t  (*flash_erase)(void *ctx, uint32_t addr, uint32_t len);
 
-    /* Program `len` bytes. `len` is always a multiple of the HAL's program
-     * granularity, which the library queries. Never crosses a block boundary. */
-    int (*write)(void *u, uint32_t addr, const uint8_t *p, uint32_t len);
+    /* Program `len` bytes: never crosses an erase-block boundary. */
+    int32_t  (*flash_write)(void *ctx, uint32_t addr, const uint8_t *p, uint32_t len);
 
-    /* Read `len` bytes. May be NULL if the region is directly addressable. */
-    int (*read)(void *u, uint32_t addr, uint8_t *p, uint32_t len);
+    /* Read `len` bytes: required — read-back verify and the finish CRC use it. */
+    int32_t  (*flash_read)(void *ctx, uint32_t addr, uint8_t *p, uint32_t len);
 
     /* Erase/program granularity in bytes. Power of two. */
-    uint32_t (*block_size)(void *u);
+    uint32_t (*flash_block_size)(void *ctx);
 
-    /* Optional. Non-zero ⇒ write-only device; enables the streaming fast path
-     * that skips the read-back verify. */
-    int (*is_readonly)(void *u, uint32_t addr, uint32_t len);
-} mcf_flash_ops_t;
+    /* Optional. Non-zero skips the per-write read-back compare only. */
+    int32_t  (*flash_is_readonly)(void *ctx, uint32_t addr, uint32_t len);
+
+    /* Workspace allocation, optional when a static workspace is supplied. */
+    void    *(*alloc)(void *ctx, uint32_t size);
+    void     (*free)(void *ctx, void *ptr);
+
+    uint32_t (*get_product_id)(void *ctx);
+    uint32_t (*get_fw_version)(void *ctx);
+
+    mcf_verify_fn verify;   /* NULL rejects signed patches */
+    mcf_log_fn    log;      /* NULL disables logging */
+    void         *ctx;
+} mcf_hal_t;
 ```
 
 ### 12.3 What the library now guarantees
@@ -865,8 +910,10 @@ typedef struct {
 2. **Buffering** — the library buffers across erase-block boundaries so the HAL never has
    to. This is the defect's direct fix.
 3. **Erase-before-program** — enforced by the library, not requested in a comment.
-4. **Write verification** — read-back compare after program, unless `is_readonly` says the
-   region cannot be read. Failure returns `MCF_E_FLASH`.
+4. **Write verification** — read-back compare after program, unless `flash_is_readonly` reports
+   that region unreadable. Failure returns `MCF_E_FLASH`. Note this skips only the per-write
+   compare: the whole-image CRC at finish still reads the destination back, so `flash_read`
+   remains required.
 5. **Error propagation** — any HAL failure aborts the session and is reported verbatim
    (**B-02**).
 
@@ -953,7 +1000,7 @@ header-translation step, preserving field investment (**§19**).
 
 ### 13.4 Header validation
 
-Performed once, in `mcf_hdr_open()`, and everything downstream trusts the result (**P5**):
+Performed once, in `mcf_hdr_parse()`, and everything downstream trusts the result (**P5**):
 
 ```
  1. magic == 'MFP1'                    else MCF_E_FORMAT
@@ -1152,13 +1199,16 @@ already safe without it.
 ### 16.2 Codec selection as a build option
 
 ```cmake
-option(MCF_CODEC_LZ4   "Enable LZ4 codec (default)"  ON)
-option(MCF_CODEC_LZMA  "Enable LZMA codec"           OFF)
-option(MCF_SIGN        "Require patch signatures"    ON)
-option(MCF_RESUME      "Enable resume journal"       ON)
+# LZ4 is in the base source list: always compiled, and the default codec.
+option(MCF_ENABLE_LZMA   "Build the LZMA codec (vendored LZMA SDK)"   OFF)
+option(MCF_ENABLE_SODIUM "Build the libsodium Ed25519ph/AEAD adapter" OFF)
 ```
 
-Only selected codecs are compiled, so a device pays only for what it uses.
+LZ4 is compiled unconditionally and is the default codec. LZMA is opt-in because it pulls in
+the vendored SDK; the sodium adapter is opt-in because it needs a host crypto library. Only
+selected codecs are compiled, so a device pays only for what it uses. Signatures and the
+resume journal are always compiled in — they are runtime configuration
+(`mcf_config_t.verify` and `journal_addr`), not build options.
 
 ### 16.3 Explicit source list
 
@@ -1170,12 +1220,15 @@ encoder side of the codecs. **No overlap.**
 
 | Dimension | Values |
 |---|---|
-| Compiler | GCC/ARM GCC (verified); armclang and IAR are unverified portability targets |
-| Core | M0, M3, M4, M7, M33 |
-| Build type | Debug, Release (`-Osize`, `-Os` LTO + `--gc-sections`) |
-| Analysis | `-Wall -Wextra -Wconversion -Wsign-conversion -Werror`, static analysis |
-| Tests | Host unit tests, ASan/UBSan host build, hardware-in-the-loop targets |
+| Compiler | GCC and ARM GCC on the host and cross jobs (verified); armclang and IAR are unverified portability targets |
+| Core | Cortex-M0, M3, M4, M7 — the four the cross-compile job builds. M0+ and M33 are untested portability targets. |
+| Build type | Debug and Release (`-Osize`, `-Os` LTO + `--gc-sections`) |
+| Analysis | `-Wall -Wextra -Wconversion -Wsign-conversion -Werror`; a separate sanitizer job builds the host suite under ASan/UBSan |
+| Tests | Host unit tests, the host-to-device cross test, MFP2 boundary tests, and the parser fuzz smoke target |
 | Gates | Zero warnings, all tests pass, **ROM and RAM deltas within budget** |
+
+A hardware-in-the-loop tier (real flash, real watchdog, real power cycling) is planned but not
+part of the current matrix.
 
 **B7 is enforced as a gate:** a pull request that increases the reported size for a
 configuration without a documented reason fails CI. This is the mechanism that keeps
@@ -1234,10 +1287,14 @@ device executes attacker-supplied bytes, this is the most serious process gap.
 | **Fault injection** | **Every allocation, read, decode, erase, program, and verify step forced to fail in turn** | Per commit |
 | **Property** | Random old/new pairs; arbitrary corruption of the patch; arbitrary truncation at every offset | Nightly |
 | **Conformance** | Golden `.bin` fixtures; host reference decoder cross-check; byte-exact output | Per commit |
-| **Static analysis** | `-Wall -Wextra -Wconversion -Werror`; cppcheck; ASan/UBSan host build | Per commit |
+| **Static analysis** | `-Wall -Wextra -Wconversion -Werror`; a separate sanitizer job builds the host suite under ASan/UBSan | Per commit |
 | **Size** | `mcf_ctx_size()` and ROM size per configuration | Per commit (**B7**) |
 | **Documentation** | The check counts the README states, compared against what the suites report (`host/check_counts.py`) | Per commit |
-| **HIL** | STM32F0/M4, Renesas RX — real flash, real watchdog, real power cycling | Nightly |
+| **Fuzzing** | The MFP2 parser under a coverage-guided libFuzzer target (Clang) plus a portable mutation smoke target | Per commit / continuous |
+
+A **hardware-in-the-loop** tier — real flash, a real watchdog, real power cycling on STM32 and
+Renesas parts — is a planned addition, not a current gate. A dedicated cppcheck pass is
+likewise not wired up; the compiler warning set above is the enforced static check.
 
 ### 18.2 The fault-injection suite is the core contribution
 
@@ -1357,9 +1414,11 @@ convention — CI fails on a missing SPDX header.
 
 ### 20.4 Security disclosure
 
-A `SECURITY.md` defines coordinated disclosure: report privately, 90-day window, credit in
-the advisory. A published security contact is a precondition for a project that asks users to
-trust it with firmware authenticity.
+A coordinated-disclosure policy — report privately, 90-day window, credit in the advisory — is
+the intended practice. A published security contact is a precondition for a project that asks
+users to trust it with firmware authenticity, and a `SECURITY.md` is the deliverable that
+records it. **It is not yet committed to the repository**; until it is, the maintainer's
+repository contact is the channel.
 
 ---
 
@@ -1370,11 +1429,11 @@ artefact and the highest-risk work is de-risked early.
 
 | Phase | Duration | Deliverable | Exit criteria |
 |---|---|---|---|
-| **P0 — Foundation** | 2 wks | Repository skeleton, CI, MIT headers, `mcf_hal_t`, error model, `mcf_ctx_size()`, documentation site | Builds clean on all 5 toolchains; all SPI headers present |
+| **P0 — Foundation** | 2 wks | Repository skeleton, CI, MIT headers, `mcf_hal_t`, error model, `mcf_ctx_size()`, documentation site | Builds clean under `-Werror` on the host and the ARM cross-compile; all SPDX headers present |
 | **P1 — Core engine** | 4 wks | Context object, LZ4 codec, BSDIFF43 engine, container parse, `session_run` | Round-trip passes; **all fault-injection tests green** |
 | **P2 — Robustness** | 3 wks | Workspace validation (`MCF_E_DICT_TOO_LARGE`), LZMA codec, step-wise API, progress/abort, block-size tuning | Workspace rejection verified at many dict sizes; Constrained profile ≤ 3.3 KB measured |
-| **P3 — Security** | 3 wks | v2 header, Ed25519 signatures, product binding, anti-rollback | Signature and rollback tests green; `MCF_SIGN` mandatory in release builds |
-| **P4 — Resilience** | 3 wks | Journal, `mcf_resume_probe`, `mcf_session_resume`, power-cycle HIL tests | Interrupted restore resumes correctly; corrupted journal is rejected |
+| **P3 — Security** | 3 wks | v2 header, Ed25519 signatures, product binding, anti-rollback | Signature and rollback tests green; products that require signatures configure a verifier, which fails closed |
+| **P4 — Resilience** | 3 wks | Journal, `mcf_resume_probe` + `mcf_session_begin`, power-cycle HIL tests | Interrupted restore resumes correctly; corrupted journal is rejected |
 | **P5 — Release** | 2 wks | Host tool, docs, three worked ports (STM32 internal flash, STM32 + SPI NOR, Renesas RX) | Host tool produces byte-identical output on repeat runs; a new integrator succeeds unaided |
 
 **Total: ~17 weeks.** P0–P2 (9 weeks) delivers a strictly better library than the reference
@@ -1472,7 +1531,7 @@ review artefact that makes the architecture auditable.
 | G-09 no power-fail model | Journal + resume + staging-region safety argument | 15.2, 15.4 |
 | G-10 no tests | Full test pyramid with fault injection and CI gates | 18 |
 | G-11 no host tool | Published, deterministic, signing-capable tool | 17 |
-| G-12 no resource query | `mcf_ctx_size()`; `max_workspace`; `ram_budget` | 9.4, 10.1 |
+| G-12 no resource query | `mcf_ctx_size()`; `ram_budget` | 9.4, 10.1 |
 | W-01 implicit dict contract | `workspace_req` in header; pre-allocation validation | 13.2, 10.4 |
 | W-02 unreproducible RAM figure | Published derivation; measured CI gate | 10.3, 16.1 B7 |
 | W-03 global state | Caller-owned context | 9.3, 11.1 |

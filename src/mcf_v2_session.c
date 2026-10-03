@@ -3,8 +3,6 @@
 #include "mcf_internal.h"
 #include <string.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
 
 static int v2_ranges_overlap(const void *a, uint32_t an, const void *b, uint32_t bn)
 {

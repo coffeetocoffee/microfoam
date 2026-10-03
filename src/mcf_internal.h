@@ -9,7 +9,6 @@
 
 #include "microfoam.h"
 
-#include <limits.h>
 #include <string.h>
 
 /* ------------------------------------------------------------------------ *
