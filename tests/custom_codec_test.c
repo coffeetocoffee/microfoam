@@ -335,13 +335,13 @@ static void test_descriptor_validation(void)
 
 static void test_failures(void)
 {
-    const uint32_t modes[] = { MODE_INIT_FAIL, MODE_DECODE_FAIL };
-    const mcf_status_t expected[] = { MCF_E_UNSUPPORTED, MCF_E_IO };
-    const uint32_t expected_site[] = { 16u, 17u };
+    const uint32_t modes[] = { MODE_INIT_FAIL, MODE_DECODE_FAIL, MODE_FINISH_FAIL };
+    const mcf_status_t expected[] = { MCF_E_UNSUPPORTED, MCF_E_IO, MCF_E_CORRUPT };
+    const uint32_t expected_site[] = { 16u, 17u, 18u };
     uint32_t i;
     uint32_t patch_size;
 
-    for (i = 0u; i < 2u; i++) {
+    for (i = 0u; i < 3u; i++) {
         mcf_codec_ops_t ops = codec_ops("custom-failure", CUSTOM_ID);
         mcf_session_storage_t storage;
         mcf_session_t *session = (mcf_session_t *)(void *)&storage;
@@ -356,7 +356,11 @@ static void test_failures(void)
         CHECK(status == expected[i], "provider status propagates without remapping");
         CHECK(mcf_session_state(session) == MCF_ST_FAILED, "provider failure marks session failed");
         CHECK(mcf_session_error_site(session) == expected_site[i], "provider stage is recorded");
-        CHECK(g_free_calls >= freed_before, "workspace cleanup is observable after provider failure");
+        /* Exactly one release: the failure funnel frees the workspace, and the
+         * close that follows must not free it a second time. `>=` here would be
+         * an assertion that cannot fail - the counter only ever grows - which is
+         * the "counter that can never move" defect this suite exists to avoid. */
+        CHECK(g_free_calls == freed_before + 1u, "workspace is released exactly once on provider failure");
         if (modes[i] != MODE_INIT_FAIL) {
             CHECK(g_destroy_calls == destroyed_before + 1u, "initialized codec is destroyed on failure");
         } else {

@@ -300,19 +300,26 @@ static int run_partial(const uint8_t *patch, uint32_t patch_len,
     return 1;
 }
 
-/* Reboot: probe the journal, resume, finish, and check the image. */
+/* Reboot: probe the journal, resume, finish, and check the image.
+ *
+ * `want_probe` is the exact status the probe must return, not a boolean. Every
+ * rejection mcf_v2_resume_probe() makes is MCF_E_NOT_FOUND, and accepting "any
+ * non-MCF_OK" would let an unrelated failure - a parameter error, a HAL fault -
+ * masquerade as the rejection under test. The MFP1 counterpart pins the code
+ * exactly for the same reason. */
 static int run_resume(const uint8_t *patch, uint32_t patch_len,
                       const uint8_t *old, uint32_t old_len, crypto_ctx_t *crypto,
                       const uint8_t *expected, uint32_t new_len,
-                      int expect_probe_ok, uint32_t *out_progress)
+                      mcf_status_t want_probe, uint32_t *out_progress)
 {
     mcf_v2_config_t cfg; mcf_v2_session_t s; mcf_status_t st;
     v2_cfg(&cfg, patch, patch_len, old, old_len, crypto, JOURNAL_BASE);
     st = mcf_v2_session_open(&s, &cfg);
     if (st != MCF_OK) return 0;
     st = mcf_v2_resume_probe(&s);
-    if ((st == MCF_OK) != (expect_probe_ok != 0)) {
-        fprintf(stderr, "resume probe status %d (expected_ok=%d)\n", (int)st, expect_probe_ok);
+    if (st != want_probe) {
+        fprintf(stderr, "resume probe status %d (expected %d)\n",
+                (int)st, (int)want_probe);
         mcf_v2_session_close(&s);
         return 0;
     }
@@ -574,7 +581,7 @@ int main(int argc, char **argv)
         /* A fresh session probes the journal and continues; the image must be
          * byte-exact and the resume must have started past the checkpoint. */
         ok &= run_resume(patch, patch_len, old, old_len, &crypto,
-                         expected, new_len, 1, &resumed);
+                         expected, new_len, MCF_OK, &resumed);
         if (resumed < partial) {
             fprintf(stderr, "resume: progress regressed (%u -> %u)\n", partial, resumed);
             ok = 0;
@@ -583,13 +590,26 @@ int main(int argc, char **argv)
         (void)steps;
         if (ok) puts("  ok  interrupted run resumes and completes byte-exact");
 
-        /* A stale journal (foreign session id) is rejected: cold start. */
+        /* A stale journal (foreign session id) is rejected: cold start.
+         *
+         * A checkpoint must be primed first. The case above completed an update,
+         * which clears the journal, so mutating whatever record is left would be
+         * rejected for having no magic at all - never reaching the session-id
+         * binding this case is named for. */
         {
             mcf_v2_journal_t j;
+            uint32_t primed = 0u;
+            memset(journal, 0, sizeof(journal));
+            journal_mutations = 0;
+            memset(flash, 0xFF, sizeof(flash));
+            ok &= run_partial(patch, patch_len, old, old_len, &crypto, 7u, &primed);
             memcpy(&j, journal, sizeof(j));
+            if (j.magic != MCF_V2_JOURNAL_MAGIC) {
+                fprintf(stderr, "resume: no checkpoint to make foreign\n");
+                ok = 0;
+            }
             j.session_id ^= 0xFFFFFFFFu;
             j.record_crc = 0u;
-            j.record_crc = mcf_crc32((const uint8_t *)&j, (uint32_t)sizeof(j));
             /* The library computes the CRC over the record with record_crc
              * zeroed, so rebuild it the same way. */
             {
@@ -599,7 +619,7 @@ int main(int argc, char **argv)
             }
             memcpy(journal, &j, sizeof(j));
             ok &= run_resume(patch, patch_len, old, old_len, &crypto,
-                             expected, new_len, 0, NULL);
+                             expected, new_len, MCF_E_NOT_FOUND, NULL);
             if (ok) puts("  ok  foreign journal rejected, cold start completes");
         }
 
@@ -611,7 +631,7 @@ int main(int argc, char **argv)
         ok &= run_partial(patch, patch_len, old, old_len, &crypto, 7u, &partial);
         flash[0] ^= 0xFFu; /* damage the programmed prefix */
         ok &= run_resume(patch, patch_len, old, old_len, &crypto,
-                         expected, new_len, 0, NULL);
+                         expected, new_len, MCF_E_NOT_FOUND, NULL);
         if (ok) puts("  ok  damaged prefix rejected, cold start completes");
 
         /* Journal disabled (addr 0): probe is a no-op, run still works. */
@@ -629,13 +649,24 @@ int main(int argc, char **argv)
             if (ok) puts("  ok  journal disabled: probe no-op, run byte-exact");
         }
 
-        /* A completed run clears the journal. */
+        /* A completed run clears the journal. The journal is primed with a
+         * checkpoint first, so "cleared" means a written record was removed -
+         * without that precondition the assertion below is satisfied by a
+         * journal that was never written at all. */
         {
             mcf_v2_journal_t j;
-            memset(journal, 0xFF, sizeof(journal));
+            uint32_t primed = 0u;
+            memset(journal, 0, sizeof(journal));
+            journal_mutations = 0;
             memset(flash, 0xFF, sizeof(flash));
+            ok &= run_partial(patch, patch_len, old, old_len, &crypto, 7u, &primed);
+            memcpy(&j, journal, sizeof(j));
+            if (j.magic != MCF_V2_JOURNAL_MAGIC) {
+                fprintf(stderr, "resume: no checkpoint to clear\n");
+                ok = 0;
+            }
             ok &= run_resume(patch, patch_len, old, old_len, &crypto,
-                             expected, new_len, 0, NULL);
+                             expected, new_len, MCF_OK, NULL);
             memcpy(&j, journal, sizeof(j));
             if (j.magic == MCF_V2_JOURNAL_MAGIC) {
                 fprintf(stderr, "resume: journal not cleared after success\n");

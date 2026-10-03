@@ -894,7 +894,15 @@ static void test_resume_cleared_when_done(void)
     patch_len = build_patch(g_patch, g_old, OLD_LEN, g_new, NEW_LEN, PRODUCT, VER_NEW,
                             VER_OLD, WS_LZ4, 0u, 9u);
     (void)run_partial(patch_len, 2u);
-    CHECK_EQ(mcf_crc32(g_journal, sizeof(mcf_journal_t)) != 0u, 1u, "journal was populated");
+
+    /* Prove the precondition before asserting the cleanup. Without this the
+     * test passes whenever no checkpoint was ever written - the "cleared"
+     * assertion is satisfied by a journal that was never populated - and the
+     * CRC != 0 check that used to stand here could not detect that, because a
+     * CRC over arbitrary bytes is essentially never zero. */
+    memcpy(&j, g_journal, sizeof(j));
+    CHECK_EQ(j.magic, MCF_JOURNAL_MAGIC, "a resume point was written");
+    CHECK(j.newpos > 0u, "the resume point records progress");
 
     cfg = journal_cfg(patch_len, 1u);
     mcf_session_open(s, &cfg);

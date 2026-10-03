@@ -583,8 +583,8 @@ the standard test configurations pass in both Debug and Release.
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `microfoam_tests` | 100 checks | round trip, the `mcf_ctx_size()` cost query, **resume journal**, and fault injection at every stage |
-| `custom_codec_test` | 41 checks | caller-owned codec descriptors, per-session table isolation, and failure propagation |
+| `microfoam_tests` | 101 checks | round trip, the `mcf_ctx_size()` cost query, **resume journal**, and fault injection at every stage |
+| `custom_codec_test` | 46 checks | caller-owned codec descriptors, per-session table isolation, and failure propagation at init, decode, and finish |
 | `hal_concurrency_test` | 27 checks | two sessions driven interleaved through the whole decode, each proving its own image |
 | `v2_format_test` | 45 checks | MFP2 header/TLV/record-framing rules, plus a ~4,200-case deterministic mutation/property loop |
 | `host_selftest` | 114 checks | 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, the measured LZ4-vs-LZMA payload ratio, LZMA props + policy fields, format layout agreement, signing, MFP2 KAT, the fixed-nonce-prefix guard, MFP2 host hygiene (no cached nonce prefix, device-matching TLV walk, computed `workspace_req`), and host-side tamper cases each pinned to the layer that rejects them |
