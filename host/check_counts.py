@@ -53,7 +53,7 @@ SUITES = {
 
 
 def documented_counts() -> dict[str, int]:
-    """Counts the README states, e.g. "| `host_selftest` | 104 checks: ...".
+    """Counts the README states, e.g. "| `host_selftest` | 114 checks: ...".
 
     Only rows that name a count are collected; descriptive rows in the other
     tables do not match and are ignored.

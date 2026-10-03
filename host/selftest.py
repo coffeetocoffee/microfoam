@@ -596,10 +596,12 @@ def test_v2_kat() -> None:
     h = M.parse_v2_header(patch)
     check(h.payload_size == 1870 and h.record_count == 10, "KAT structure")
     check(M.crc32(old) == 3091840966 and M.crc32(new) == 3330603793, "KAT image CRCs")
-    check(h.payload_crc32 == 2643552063, "KAT payload CRC")
+    check(h.workspace_req == M.v2_workspace_req(8, 192),
+          "KAT workspace_req is the computed streaming figure")
+    check(h.payload_crc32 == 2667140683, "KAT payload CRC")
     check(h.signature.hex() ==
-          "4cc98a0492159465aec27a1c247417255a356aaf954ff958daa4c2addcab8dbd"
-          "e661c067ee745e4b0cd18ec4ae091da6be5e5973f13cf192fd1733acc9b5bd0d",
+          "49babbd3143e80fef4c0ee132fcf0487d27a20a9a2eb8460d022fa6a86d34e82"
+          "e25d967e4dc3188281827eff49d7e0538e56a294bc70ca83fb6fca32449a3709",
           "KAT Ed25519ph signature")
     check(M.verify_v2(patch, pub, key=key, old=old) == new, "KAT round-trip")
 
@@ -688,6 +690,76 @@ def test_lzma_policy_guard() -> None:
         check(v // 45 == M.LZMA_DEFAULT_PB, "pb is in range")
 
 
+def test_v2_host_hygiene() -> None:
+    """The three host-side MFP2 defects fixed after the 2026-10 audit.
+
+    Each is a producer-side defect that no consumer can compensate for, so each
+    is pinned here by the property that was broken, not merely by "it runs".
+    """
+    print("MFP2 host hygiene: nonce caching, TLV padding, workspace_req")
+    try:
+        from nacl.signing import SigningKey
+    except Exception as exc:
+        print(f"  SKIP  PyNaCl unavailable: {exc}")
+        return
+    seed = bytes(range(32)); key = bytes(range(32, 64))
+    key_id = bytes(range(16)); nonce = bytes(range(16, 32))
+    old, new = make_firmware(96)
+
+    def make(**kw):
+        base = dict(old=old, new=new, product_id=0x1234, fw_version=2,
+                    old_version=1, private_key=seed, key=key, key_id=key_id,
+                    nonce_prefix=nonce, record_log2=10)
+        base.update(kw)
+        return M.V2Patch(**base)
+
+    # 1. build() must not cache a drawn prefix on the instance. If it does, a
+    #    second build() on the same object reuses the prefix with the same key
+    #    and every per-record nonce repeats, leaking the XOR of the plaintexts.
+    p = make(nonce_prefix=b"")
+    first = p.build()
+    second = p.build()
+    check(p.nonce_prefix == b"", "build() does not cache a drawn nonce prefix")
+    check(first[:M.V2_OFF_NONCE_PREFIX] != second[:M.V2_OFF_NONCE_PREFIX] or
+          first[M.V2_OFF_NONCE_PREFIX:M.V2_OFF_NONCE_PREFIX + 16] !=
+          second[M.V2_OFF_NONCE_PREFIX:M.V2_OFF_NONCE_PREFIX + 16],
+          "two builds draw different nonce prefixes")
+
+    # 2. The TLV walk must reject padding the device rejects. A zero-length
+    #    entry is 8 bytes and needs no padding; a one-byte value does, and the
+    #    pad bytes must be zero.
+    good = struct.pack("<HHI", 1, 0, 0)                    # critical type 1, empty
+    padded_ok = struct.pack("<HHI", 2, 0, 1) + b"\xAB" + b"\0\0\0"
+    padded_bad = struct.pack("<HHI", 2, 0, 1) + b"\xAB" + b"\0\xFF\0"
+    for label, blob, ok in (("well-formed TLV area", good, True),
+                            ("zero padding accepted", padded_ok, True),
+                            ("nonzero padding rejected", padded_bad, False)):
+        try:
+            M._v2_walk_tlvs(blob)
+            got = True
+        except SystemExit:
+            got = False
+        check(got == ok, f"MFP2 TLV: {label}")
+
+    # The same rule must hold through the public builder, not just the helper.
+    try:
+        make(tlvs=padded_bad).build()
+        check(False, "build() rejects nonzero TLV padding")
+    except SystemExit:
+        check(True, "build() rejects nonzero TLV padding")
+
+    # 3. workspace_req must be the real streaming figure, not the 16-byte LZ4
+    #    state placeholder, and must track the record size.
+    patch = make().build()
+    h = M.parse_v2_header(patch)
+    check(h.workspace_req == M.v2_workspace_req(10, h.header_len),
+          "MFP2 workspace_req is the computed streaming figure")
+    check(h.workspace_req > M.WS_LZ4,
+          "MFP2 workspace_req is not the LZ4 state placeholder")
+    check(M.v2_workspace_req(13, 192) > M.v2_workspace_req(8, 192),
+          "MFP2 workspace_req grows with the record size")
+
+
 def main() -> int:
     layout_only = "--layout-only" in sys.argv
     print("Microfoam host tool self-test\n")
@@ -708,6 +780,7 @@ def main() -> int:
     test_v2()
     test_v2_kat()
     test_v2_nonce_guard()
+    test_v2_host_hygiene()
 
     print(f"\n{PASS} checks, {FAIL} failures")
     return 0 if FAIL == 0 else 1

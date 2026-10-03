@@ -587,7 +587,7 @@ the standard test configurations pass in both Debug and Release.
 | `custom_codec_test` | 41 checks | caller-owned codec descriptors, per-session table isolation, and failure propagation |
 | `hal_concurrency_test` | 27 checks | two sessions driven interleaved through the whole decode, each proving its own image |
 | `v2_format_test` | 45 checks | MFP2 header/TLV/record-framing rules, plus a ~4,200-case deterministic mutation/property loop |
-| `host_selftest` | 104 checks | 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, the measured LZ4-vs-LZMA payload ratio, LZMA props + policy fields, format layout agreement, signing, MFP2 KAT, the fixed-nonce-prefix guard, and host-side tamper cases each pinned to the layer that rejects them |
+| `host_selftest` | 114 checks | 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, the measured LZ4-vs-LZMA payload ratio, LZMA props + policy fields, format layout agreement, signing, MFP2 KAT, the fixed-nonce-prefix guard, MFP2 host hygiene (no cached nonce prefix, device-matching TLV walk, computed `workspace_req`), and host-side tamper cases each pinned to the layer that rejects them |
 | `sodium_rfc_test` | 17 checks | published vectors for both constructions MFP2 depends on — RFC 8032 §7.1 Ed25519 and §7.3 Ed25519ph (with the three-span streaming verify and its domain separation from plain Ed25519) and the draft-irtf-cfrg-xchacha-03 §A.1 XChaCha20-Poly1305 AEAD vector — plus adapter tamper cases *(with `MCF_ENABLE_SODIUM=ON`)* |
 | `lzma_conformance_test` | 335 checks | 67 liblzma vectors at five block sizes each *(with `MCF_ENABLE_LZMA=ON`)* |
 | `lzma_policy_test` | 15 checks | dictionary and `lc+lp` policy rejections with their exact status and stage *(with `MCF_ENABLE_LZMA=ON`)* |

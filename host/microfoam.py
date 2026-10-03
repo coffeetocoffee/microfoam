@@ -611,6 +611,54 @@ def _v2_records(stream: bytes, record_size: int) -> list[bytes]:
     return records
 
 
+def _v2_walk_tlvs(tlvs: bytes) -> None:
+    """Validate the TLV area exactly as the device does.
+
+    An entry is u16 type, u16 flags, u32 length, value, then zero padding to a
+    four-byte boundary. Bit 0 of `flags` marks a critical entry, and the only
+    critical type defined is 1, so an unknown critical type is refused.
+
+    The padding check is a real walk, not a scan of every fourth byte: padding
+    only exists *after* an entry, so a byte inside a value is not padding and
+    must not be read as one. The previous one-line scan could never fire at all
+    (its index range was empty once the area length was a multiple of four,
+    which the format requires), so the tool accepted padding the device rejects.
+    """
+    off, n = 0, len(tlvs)
+    while off < n:
+        if n - off < 8:
+            raise SystemExit("MFP2 TLV entry is truncated")
+        type_, flags, length = struct.unpack_from("<HHI", tlvs, off)
+        if length > n - off - 8:
+            raise SystemExit("MFP2 TLV length overruns the area")
+        if (flags & 1) and type_ != 1:
+            raise SystemExit("MFP2 unknown critical TLV")
+        off += 8 + length
+        while off & 3:
+            if off >= n or tlvs[off] != 0:
+                raise SystemExit("MFP2 TLV padding must be zero")
+            off += 1
+    if off != n:
+        raise SystemExit("MFP2 TLV area does not end on a four-byte boundary")
+
+
+def v2_workspace_req(record_log2: int, header_len: int) -> int:
+    """Streaming workspace an MFP2 session needs, mirroring the device.
+
+    mcf_v2_session_begin() lays its scratch out as a synthetic MFP1 header
+    (124 bytes), a record window of two maximum-size records plus the terminal
+    marker, the AAD scratch ("MCF2REC\\0" + the header + the per-record index
+    and length), and then the inner MFP1 session's own workspace (two decode
+    blocks plus the LZ4 state). The header's `workspace_req` is that total. The
+    device only uses the field as a coarse budget gate and derives the real
+    figure itself, but a placeholder here misstates what the patch costs.
+    """
+    win = 2 * (1 << record_log2) + 4          # record window + terminal marker
+    ad = 8 + header_len + 8                   # prefix + header + index/length
+    inner_ws = 2 * (1 << record_log2) + 16    # inner engine blocks + LZ4 state
+    return 124 + win + ad + inner_ws
+
+
 @dataclass
 class V2HeaderView:
     header_len: int; version: int; flags: int; product_id: int; fw_version: int
@@ -630,7 +678,7 @@ def parse_v2_header(blob: bytes) -> V2HeaderView:
     if not record_count or struct.unpack_from("<I", blob, 164)[0] != 0: raise SystemExit("invalid MFP2 record/profile fields")
     if blob[168:192] != b"\0" * 24 or not blob[120:136].strip(b"\0") or not blob[136+16:160] == b"\0" * 8: raise SystemExit("invalid MFP2 reserved/key fields")
     tlvs = blob[192:hlen]
-    if any(tlvs[i] for i in range(0, len(tlvs), 4) if i + 3 >= len(tlvs)): raise SystemExit("nonzero MFP2 TLV padding")
+    _v2_walk_tlvs(tlvs)
     return V2HeaderView(hlen, ver, flags, product, fw, oldsz, newsz, psz, oldcrc, newcrc, pcrc, ws, oldver, codec, rlog2, tlv_len, blob[56:120], blob[120:136], blob[136:160], struct.unpack_from("<I", blob, 160)[0], struct.unpack_from("<I", blob, 164)[0], blob[192:hlen])
 
 
@@ -638,25 +686,33 @@ def parse_v2_header(blob: bytes) -> V2HeaderView:
 class V2Patch:
     old: bytes; new: bytes; product_id: int = 0; fw_version: int = 0; old_version: int = 0
     private_key: bytes = b""; key: bytes = b""; key_id: bytes = b""; nonce_prefix: bytes = b""
-    record_log2: int = 13; tlvs: bytes = b""; workspace_req: int = WS_LZ4
+    record_log2: int = 13; tlvs: bytes = b""
 
     def build(self) -> bytes:
         if len(self.key) != 32 or not self.private_key: raise SystemExit("MFP2 requires --key and a signing key")
-        if self.tlvs and any(self.tlvs[i] for i in range(0, len(self.tlvs), 4) if i + 3 >= len(self.tlvs)): raise SystemExit("MFP2 TLV padding must be zero")
         if len(self.key_id) != 16: raise SystemExit("MFP2 key id must be 16 bytes")
-        if not self.nonce_prefix: self.nonce_prefix = os.urandom(16)
-        if len(self.nonce_prefix) != 16 or not any(self.nonce_prefix): raise SystemExit("MFP2 nonce prefix must be 16 nonzero bytes")
         if not 8 <= self.record_log2 <= 13 or len(self.tlvs) % 4: raise SystemExit("invalid MFP2 record/TLV size")
+        _v2_walk_tlvs(self.tlvs)
+        # Draw the nonce prefix into a local, never onto self: caching it on the
+        # instance made a second build() reuse the first's prefix with the same
+        # key, repeating every per-record nonce and leaking the XOR of the two
+        # plaintexts. A caller that wants a reproducible vector passes one in.
+        nonce_prefix = self.nonce_prefix if self.nonce_prefix else os.urandom(16)
+        if len(nonce_prefix) != 16 or not any(nonce_prefix): raise SystemExit("MFP2 nonce prefix must be 16 nonzero bytes")
         delta = bsdiff(self.old, self.new)
         # Leave room for the LZ4 block header/literal extension so the complete
         # framed block (the record plaintext) always fits the wire limit.
         framed = lz4_frame(delta, max(1, (1 << self.record_log2) - 64))
         records = _v2_records(framed, 1 << self.record_log2)
         hlen = V2_HEADER_MIN + len(self.tlvs)
+        # Declared from the real layout, not a placeholder: the device uses the
+        # field as a budget gate and computes the true need itself, but a patch
+        # that misstates its own cost misleads anything reading it.
+        workspace_req = v2_workspace_req(self.record_log2, hlen)
         hdr = bytearray(hlen)
-        struct.pack_into("<IHHIIIIIIIIIII", hdr, 0, V2_MAGIC, hlen, V2_VERSION, V2_REQUIRED_FLAGS, self.product_id, self.fw_version, len(self.old), len(self.new), 0, crc32(self.old), crc32(self.new), 0, self.workspace_req, self.old_version)
+        struct.pack_into("<IHHIIIIIIIIIII", hdr, 0, V2_MAGIC, hlen, V2_VERSION, V2_REQUIRED_FLAGS, self.product_id, self.fw_version, len(self.old), len(self.new), 0, crc32(self.old), crc32(self.new), 0, workspace_req, self.old_version)
         struct.pack_into("<BBH", hdr, 52, CODEC_LZ4, self.record_log2, len(self.tlvs))
-        hdr[120:136] = self.key_id; hdr[136:152] = self.nonce_prefix
+        hdr[120:136] = self.key_id; hdr[136:152] = nonce_prefix
         struct.pack_into("<II", hdr, 160, len(records), 0); hdr[192:] = self.tlvs
         # The record area length is fixed by the plaintext record sizes, and
         # the payload CRC is computed over the ciphertext, so both are written
@@ -670,7 +726,7 @@ class V2Patch:
         area = bytearray()
         for i, plain in enumerate(records):
             clen = len(plain); aad = b"MCF2REC\0" + _v2_header_for_aad(hdr) + struct.pack("<II", i, clen)
-            enc = _v2_aead(self.key, self.nonce_prefix[:V2_NONCE_PREFIX_SIZE] + struct.pack("<Q", i), plain, aad)
+            enc = _v2_aead(self.key, nonce_prefix[:V2_NONCE_PREFIX_SIZE] + struct.pack("<Q", i), plain, aad)
             area += struct.pack("<I", clen) + enc
         assert len(area) == area_len, "record area length drifted"
         struct.pack_into("<I", hdr, 40, crc32(area))
