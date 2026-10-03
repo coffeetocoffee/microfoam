@@ -19,7 +19,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "microfoam"
-version = "1.9.1"
+version = "1.9.2"
 description = "Host-side patch builder for the Microfoam firmware delta-update library"
 readme = "README.md"
 requires-python = ">=3.8"
