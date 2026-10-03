@@ -72,14 +72,14 @@ typedef struct dev {
     uint32_t product;
     uint32_t version;
     int      contract_violation;
-} dev_t;
+} mcf_test_dev_t;
 
-static dev_t dev_a;
-static dev_t dev_b;
+static mcf_test_dev_t dev_a;
+static mcf_test_dev_t dev_b;
 
 static int32_t dev_erase(void *ctx, uint32_t addr, uint32_t len)
 {
-    dev_t   *d = (dev_t *)ctx;
+    mcf_test_dev_t *d = (mcf_test_dev_t *)ctx;
     uint32_t off;
 
     if (addr < DEV_BASE) {
@@ -97,7 +97,7 @@ static int32_t dev_erase(void *ctx, uint32_t addr, uint32_t len)
 
 static int32_t dev_write(void *ctx, uint32_t addr, const uint8_t *p, uint32_t len)
 {
-    dev_t   *d = (dev_t *)ctx;
+    mcf_test_dev_t *d = (mcf_test_dev_t *)ctx;
     uint32_t off;
 
     if (addr < DEV_BASE) {
@@ -116,7 +116,7 @@ static int32_t dev_write(void *ctx, uint32_t addr, const uint8_t *p, uint32_t le
 
 static int32_t dev_read(void *ctx, uint32_t addr, uint8_t *p, uint32_t len)
 {
-    dev_t   *d = (dev_t *)ctx;
+    mcf_test_dev_t *d = (mcf_test_dev_t *)ctx;
     uint32_t off;
 
     if (addr < DEV_BASE) {
@@ -131,8 +131,8 @@ static int32_t dev_read(void *ctx, uint32_t addr, uint8_t *p, uint32_t len)
 }
 
 static uint32_t dev_block_size(void *ctx) { (void)ctx; return DEV_BLOCK; }
-static uint32_t dev_product(void *ctx) { return ((const dev_t *)ctx)->product; }
-static uint32_t dev_version(void *ctx) { return ((const dev_t *)ctx)->version; }
+static uint32_t dev_product(void *ctx) { return ((const mcf_test_dev_t *)ctx)->product; }
+static uint32_t dev_version(void *ctx) { return ((const mcf_test_dev_t *)ctx)->version; }
 static void    *dev_alloc(void *ctx, uint32_t n) { (void)ctx; return malloc(n); }
 static void     dev_free(void *ctx, void *p) { (void)ctx; free(p); }
 
@@ -155,7 +155,7 @@ static const mcf_hal_t hal_b = {
     NULL, NULL, &dev_b
 };
 
-static void dev_init(dev_t *d, uint32_t product, uint8_t seed)
+static void dev_init(mcf_test_dev_t *d, uint32_t product, uint8_t seed)
 {
     uint32_t i;
 
@@ -176,7 +176,7 @@ static void dev_init(dev_t *d, uint32_t product, uint8_t seed)
                                       product, VER_NEW, VER_OLD, 16u, 0u, 9u);
 }
 
-static mcf_config_t dev_cfg(const dev_t *d, const mcf_hal_t *hal)
+static mcf_config_t dev_cfg(const mcf_test_dev_t *d, const mcf_hal_t *hal)
 {
     mcf_config_t cfg;
 
