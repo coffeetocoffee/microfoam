@@ -348,6 +348,20 @@ if(MCF_BUILD_TESTS)
 
         add_test(NAME host_selftest
                  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/host/selftest.py)
+
+        # The README states a check count per suite. Nothing checked those
+        # numbers, so they drifted (host_selftest was documented as 101 while
+        # reporting 104). This compares the documented figures against what the
+        # suites in this build tree actually report, so a stated number cannot
+        # silently stop being true. It depends on the C suites, so it runs after
+        # they are built.
+        add_test(NAME documented_counts
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/host/check_counts.py
+                         --build ${CMAKE_CURRENT_BINARY_DIR})
+        set_tests_properties(documented_counts PROPERTIES
+            DEPENDS "microfoam_tests;custom_codec_test;hal_concurrency_test;v2_format_test;host_selftest")
+
         add_test(NAME cross_test
                  COMMAND ${CMAKE_COMMAND}
                          -DOLD=${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/old.bin

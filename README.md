@@ -410,7 +410,7 @@ cmake -DCORE=cortex-m0 -DCC="$(which arm-none-eabi-gcc)" -DSRC="$PWD" \
 | Test | What it checks |
 |---|---|
 | `microfoam_tests` | Round trip and fault injection against a mock device |
-| `custom_codec_test` | Caller-owned codec descriptors: validation of every required member and the reserved id gap, per-session table isolation, built-in shadowing, budget enforcement, properties-less payload contract, and failure propagation |
+| `custom_codec_test` | Caller-owned codec descriptors — validation of every required member and the reserved id gap, per-session table isolation, built-in shadowing, budget enforcement, properties-less payload contract, and failure propagation |
 | `host_selftest` | The Python tool against an independent reference implementation |
 | `cross_test` | A Python-produced patch applied by the C library, plus a **signed** patch the device must refuse because no verifier is configured (needs a host signing module; the seed is generated into the build tree) |
 | `cross_test_raw` | A Python-produced **raw** patch applied by the C library |
@@ -420,7 +420,8 @@ cmake -DCORE=cortex-m0 -DCC="$(which arm-none-eabi-gcc)" -DSRC="$PWD" \
 | `sodium_rfc_test` | libsodium adapter against published vectors: RFC 8032 §7.1 Ed25519 and §7.3 Ed25519ph (including the three-span streaming verify and its domain separation from plain Ed25519), the draft-irtf-cfrg-xchacha-03 §A.1 XChaCha20-Poly1305 AEAD vector, and adapter tamper cases (with `MCF_ENABLE_SODIUM=ON`) |
 | `v2_format_test` | MFP2 structural parser: header/TLV/record-framing rules, plus a deterministic mutation loop (~4,200 truncations, byte mutations, and random blobs) |
 | `v2_fuzz_smoke` | The parser property oracle shared with the fuzz target, run over a built-in seed, every truncation of it, and any corpus files given on the command line: a defined status, an untouched input buffer, and an independently re-derived framing and record iteration on success. Portable, so the assertions have a gate on every platform |
-| `hal_concurrency_test` | Two independent sessions on separate HALs, with no shared state |
+| `hal_concurrency_test` | Two sessions with distinct contexts driven through the whole decode step by step, **alternating between them**, each writing its own image to its own device through its own HAL context. Interleaving is what makes it a reentrancy test: a step on one session runs between two steps on the other, so any state shared across sessions would corrupt one image. A sequential run would not expose it |
+| `documented_counts` | The check counts this README states, compared against what the suites in the build tree actually report, so a documented number cannot silently stop being true |
 | `mfp2_host_to_session` | PyNaCl-produced signed+encrypted MFP2 patch: the C session applies it byte-exact in a workspace far smaller than the payload, and rejects 14 tamper variants with zero flash mutations, each pinned to its exact status. Six of them are re-signed with a recomputed payload CRC, so a valid signature and payload CRC leave the AAD record index, the nonce derivation, the AEAD tag, the ciphertext, or the key provider as the only thing that can reject them. The successful apply asserts the flash-mutation counter moved, so "zero flash mutations" is falsifiable rather than a counter that can never increment (sodium + PyNaCl required). |
 
 `MCF_BUILD_FUZZER=ON` additionally builds `v2_parse_fuzzer`, a coverage-guided libFuzzer
@@ -464,8 +465,11 @@ src/mcf_util.c             CRC-32, version, diagnostics
 third_party/lzma-sdk/      vendored LZMA SDK decoder (public domain)
 host/microfoam.py          patch generator, inspector, verifier, reference decoder
 host/selftest.py           host tool self-test
+host/check_counts.py       checks the README's stated check counts against the suites
 host/lzma_vectors.py       generates the LZMA conformance vectors via liblzma
 tests/test_microfoam.c     fault-injection and round-trip tests
+tests/hal_concurrency_test.c  two sessions driven interleaved, proving reentrancy
+tests/patch_fixture.h      shared MFP1 patch builder used by the C suites
 tests/lzma_conformance_test.c  LZMA conformance harness (67 vectors x 5 block sizes)
 tests/cross_test.c         host-tool patch applied by the C library
 tests/v2_format_test.c     MFP2 structural parser cases and mutation/property loop
@@ -510,8 +514,10 @@ and the standard test configurations pass in both Debug and Release; the sodium 
 | Suite | What it proves |
 |---|---|
 | `microfoam_tests` | 100 checks: round trip, the `mcf_ctx_size()` cost query, **resume journal**, and fault injection at every stage |
-| `host_selftest` | 101 checks: 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, LZMA props + policy fields, format layout agreement, signing, MFP2 KAT, the fixed-nonce-prefix guard, and host-side tamper cases each pinned to the layer that rejects them |
+| `host_selftest` | 104 checks (with every optional dependency present; skips lower it): 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, the measured LZ4-vs-LZMA payload ratio, LZMA props + policy fields, format layout agreement, signing, MFP2 KAT, the fixed-nonce-prefix guard, and host-side tamper cases each pinned to the layer that rejects them |
 | `cross_test` | The Python host tool's patch, applied by the C library, byte-exact |
+| `custom_codec_test` | 41 checks: caller-owned codec descriptors, per-session table isolation, and failure propagation |
+| `hal_concurrency_test` | 27 checks: two sessions driven interleaved through the whole decode, each proving its own image |
 | `v2_format_test` | 45 checks: MFP2 header/TLV/record-framing rules, plus a ~4,200-case deterministic mutation/property loop |
 | `v2_fuzz_smoke` | The shared parser property oracle over a built-in seed and its truncations (portable; no sanitizer runtime needed) |
 | `sodium_rfc_test` | 17 checks: published Ed25519, Ed25519ph and XChaCha20-Poly1305 vectors, plus adapter tamper cases (opt-in build) |

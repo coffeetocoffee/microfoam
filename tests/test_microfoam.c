@@ -13,6 +13,7 @@
 
 #include "microfoam.h"
 #include "microfoam_v2.h"
+#include "patch_fixture.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -243,7 +244,10 @@ static void device_reset(void)
 }
 
 /* ---------------------------------------------------------------------- *
- * Patch construction. Mirrors the host tool's output byte for byte.
+ * Patch construction. The builder itself lives in patch_fixture.h so that this
+ * suite and the reentrancy suite describe exactly one format. These two
+ * little-endian writers stay local because the v2 tests below use them
+ * directly to stamp header fields.
  * ---------------------------------------------------------------------- */
 
 static void wr32(uint8_t *p, uint32_t v)
@@ -260,138 +264,16 @@ static void wr16(uint8_t *p, uint16_t v)
     p[1] = (uint8_t)((v >> 8) & 0xFFu);
 }
 
-/* BSDIFF43 sign-magnitude control triple. */
-static uint8_t *put_ctrl(uint8_t *p, int32_t x, int32_t y, int32_t seek)
-{
-    int32_t vals[3];
-    int     i;
-
-    vals[0] = x; vals[1] = y; vals[2] = seek;
-    for (i = 0; i < 3; i++) {
-        uint64_t m    = (uint64_t)(vals[i] < 0 ? -vals[i] : vals[i]);
-        uint8_t  sign = (vals[i] < 0) ? 0x80u : 0x00u;
-        int      b;
-
-        for (b = 0; b < 8; b++) {
-            uint8_t byte = (uint8_t)((m >> (8 * b)) & 0xFFu);
-            if (b == 7) {
-                byte = (uint8_t)((byte & 0x7Fu) | sign);
-            }
-            *p++ = byte;
-        }
-    }
-    return p;
-}
-
-/* One LZ4 block containing only literals. High nibble of the token is the
- * literal length, 15 meaning "continued in the following bytes". */
-static uint8_t *lz4_literal_block(uint8_t *p, const uint8_t *data, uint32_t n)
-{
-    if (n < 15u) {
-        *p++ = (uint8_t)(n << 4);
-    } else {
-        uint32_t rem = n - 15u;
-        *p++ = 0xF0u;
-        while (rem >= 255u) {
-            *p++ = 0xFFu;
-            rem -= 255u;
-        }
-        *p++ = (uint8_t)rem;
-    }
-    memcpy(p, data, n);
-    return p + n;
-}
-
-/*
- * Build a valid patch. `newb` is reconstructed as old[i] + delta[i].
- *
- * The delta is emitted as many control triples of `CHUNK` bytes rather than one
- * giant triple. That matters for the resume journal: a checkpoint can only be
- * taken at a triple boundary, and a single triple spanning the whole image has
- * no boundary until the end. Real firmware deltas have many triples, so the
- * fixture should too.
- *
- * The LZ4 stream is chunked to exactly block_size, matching the device's decode
- * buffer. This is a format constraint, not a convenience: the device decodes
- * into a buffer of block_size bytes and rejects a block that would overflow it.
- */
-#define PATCH_CHUNK 256u
-
+/* Adapts the shared builder to the call sites below, which all write into the
+ * file-scope g_patch buffer. The two signatures are otherwise identical. */
 static uint32_t build_patch(uint8_t *out, const uint8_t *old, uint32_t old_len,
                             const uint8_t *newb, uint32_t new_len, uint32_t product,
                             uint32_t new_ver, uint32_t old_ver, uint32_t workspace_req,
                             uint32_t flags, uint32_t block_log2)
 {
-    /* Sizing: the delta carries a 24-byte control header per PATCH_CHUNK of
-     * output, so it is NEW_LEN plus 24*(NEW_LEN/PATCH_CHUNK) plus slack. The
-     * LZ4 framing then adds a length prefix and a token per block. */
-    static uint8_t delta[NEW_LEN + 512];
-    static uint8_t stream[NEW_LEN + 512];
-    uint32_t block_size = 1u << block_log2;
-    uint32_t delta_len = 0;
-    uint32_t sp = 0;
-    uint32_t off;
-    uint32_t n;
-
-    for (off = 0; off < new_len; off += PATCH_CHUNK) {
-        n = new_len - off;
-        if (n > PATCH_CHUNK) {
-            n = PATCH_CHUNK;
-        }
-        put_ctrl(delta + delta_len, (int32_t)n, 0, 0);
-        delta_len += 24;
-        {
-            uint32_t k;
-            for (k = 0; k < n; k++) {
-                uint8_t base = ((off + k) < old_len) ? old[off + k] : 0u;
-                delta[delta_len++] = (uint8_t)(newb[off + k] - base);
-            }
-        }
-    }
-
-    /* LZ4 framing: one literal block per block_size slice, then the end marker. */
-    for (off = 0; off < delta_len; off += block_size) {
-        uint32_t m = delta_len - off;
-        uint8_t *blk;
-        uint8_t *end;
-
-        if (m > block_size) {
-            m = block_size;
-        }
-        /* The block body goes *after* the 4-byte length prefix, not on top of
-         * it. Writing the body at &stream[sp] and then stamping the length at
-         * &stream[sp] clobbers the token byte. */
-        blk = &stream[sp + 4u];
-        end = lz4_literal_block(blk, &delta[off], m);
-        wr32(&stream[sp], (uint32_t)(end - blk));
-        sp += 4u + (uint32_t)(end - blk);
-    }
-    wr32(&stream[sp], 0u);
-    sp += 4u;
-
-    memset(out, 0, MCF_HDR_MIN_SIZE);
-    wr32(&out[MCF_OFF_MAGIC], MCF_HDR_MAGIC);
-    wr16(&out[MCF_OFF_HDR_LEN], (uint16_t)MCF_HDR_MIN_SIZE);
-    wr16(&out[MCF_OFF_HDR_VER], (uint16_t)((MCF_HDR_VER_MAJOR << 8) | MCF_HDR_VER_MINOR));
-    wr32(&out[MCF_OFF_FLAGS], flags | MCF_FLAG_CODEC_LZ4);
-    wr32(&out[MCF_OFF_PRODUCT_ID], product);
-    wr32(&out[MCF_OFF_FW_VERSION], new_ver);
-    wr32(&out[MCF_OFF_OLD_SIZE], old_len);
-    wr32(&out[MCF_OFF_NEW_SIZE], new_len);
-    wr32(&out[MCF_OFF_PAYLOAD_SIZE], 4u + sp);
-    wr32(&out[MCF_OFF_OLD_CRC32], mcf_crc32(old, old_len));
-    wr32(&out[MCF_OFF_NEW_CRC32], mcf_crc32(newb, new_len));
-    wr32(&out[MCF_OFF_PAYLOAD_CRC32], mcf_crc32(stream, sp));
-    wr32(&out[MCF_OFF_WORKSPACE_REQ], workspace_req);
-    wr32(&out[MCF_OFF_OLD_VERSION], old_ver);
-    out[MCF_OFF_CODEC_ID]   = (uint8_t)MCF_CODEC_LZ4;
-    out[MCF_OFF_BLOCK_LOG2] = (uint8_t)block_log2;
-    wr16(&out[MCF_OFF_RESERVED], 0u);
-
-    wr32(&out[MCF_HDR_MIN_SIZE], delta_len);              /* codec properties */
-    memcpy(&out[MCF_HDR_MIN_SIZE + 4], stream, sp);
-
-    return (uint32_t)MCF_HDR_MIN_SIZE + 4u + sp;
+    return mcf_fx_build_patch(out, (uint32_t)sizeof(g_patch), old, old_len,
+                              newb, new_len, product, new_ver, old_ver,
+                              workspace_req, flags, block_log2);
 }
 
 #define VER_OLD 0x00010000u

@@ -283,7 +283,7 @@ would catch without deliberately injecting a fault.
 | **G1** | Total error transparency | Every failure path returns a specific negative code. A test that injects a fault at each allocation, read, decode, and write step observes the correct code in 100% of cases. |
 | **G2** | Explicit memory contract | `mcf_ctx_size()` returns the exact dynamic workspace a given configuration will allocate, computable before any flash is touched; the caller-owned session storage is sized separately by `mcf_session_sizeof()`. The library returns `MCF_E_DICT_TOO_LARGE` rather than failing to allocate. |
 | **G3** | Minimal porting surface | Five callbacks. No macros, no source edits, no header modification. |
-| **G4** | Reentrancy | No mutable global state. Two independent sessions with distinct contexts operate concurrently without interference. Verified by test. |
+| **G4** | Reentrancy | No mutable global state. Two independent sessions with distinct contexts operate concurrently without interference. Verified by test: `hal_concurrency_test` drives both through the whole decode **interleaved**, one step each in turn, and asserts each reconstructed its own image into its own device. |
 | **G5** | Authenticated updates | A patch without a valid signature over a header with an acceptable version counter is rejected. |
 | **G6** | Constrained-target support | Primary configuration fits in ≤ 4 KB RAM on a Cortex-M0. |
 | **G7** | Interruptibility | The restore is a resumable state machine. The caller may abort, yield, or power down between steps. |
@@ -793,7 +793,7 @@ enforced as a size gate (see 16.1 B7).
 | Property | Guarantee |
 |---|---|
 | Mutable global state | **None.** All state is in the caller-owned `mcf_session_t`. |
-| Reentrancy | **Yes.** Two sessions with distinct contexts are fully independent. |
+| Reentrancy | **Yes.** Two sessions with distinct contexts are fully independent, and this is exercised by driving two of them through the whole decode interleaved (`hal_concurrency_test`). |
 | Thread safety of one session | **No.** A single session must be driven by one context at a time. Documented, not defended against. |
 | HAL reentrancy | Depends on the implementation; stated as a HAL requirement. |
 | Blocking calls | **None.** Every call is bounded by one block of work. |
@@ -1236,6 +1236,7 @@ device executes attacker-supplied bytes, this is the most serious process gap.
 | **Conformance** | Golden `.bin` fixtures; host reference decoder cross-check; byte-exact output | Per commit |
 | **Static analysis** | `-Wall -Wextra -Wconversion -Werror`; cppcheck; ASan/UBSan host build | Per commit |
 | **Size** | `mcf_ctx_size()` and ROM size per configuration | Per commit (**B7**) |
+| **Documentation** | The check counts the README states, compared against what the suites report (`host/check_counts.py`) | Per commit |
 | **HIL** | STM32F0/M4, Renesas RX — real flash, real watchdog, real power cycling | Nightly |
 
 ### 18.2 The fault-injection suite is the core contribution
