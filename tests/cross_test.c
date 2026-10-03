@@ -7,7 +7,12 @@
  * written implementations is evidence. A library tested only against its own
  * encoder is not.
  *
- * Usage: cross_test <old.bin> <new.bin> <patch.bin>
+ * Usage: cross_test <old.bin> <new.bin> <patch.bin> [block_size] [ram_budget]
+ *
+ * block_size and ram_budget are optional and default to the values this test
+ * has always used. They are arguments so that a documentation guard can drive
+ * the same apply path with the exact configuration a README example shows, and
+ * assert that the example actually works rather than assuming it does.
  */
 
 #include "microfoam.h"
@@ -100,10 +105,19 @@ int main(int argc, char **argv)
     mcf_config_t   cfg;
     mcf_status_t   st;
     int            ok = 1;
+    uint32_t       cfg_block_size = 1024u;
+    uint32_t       cfg_ram_budget = 65536u;
 
-    if (argc != 4) {
-        printf("usage: cross_test <old.bin> <new.bin> <patch.bin>\n");
+    if (argc != 4 && argc != 5 && argc != 6) {
+        printf("usage: cross_test <old.bin> <new.bin> <patch.bin> "
+               "[block_size] [ram_budget]\n");
         return 2;
+    }
+    if (argc >= 5) {
+        cfg_block_size = (uint32_t)strtoul(argv[4], NULL, 0);
+    }
+    if (argc >= 6) {
+        cfg_ram_budget = (uint32_t)strtoul(argv[5], NULL, 0);
     }
 
     g_old   = slurp(argv[1], &g_old_len);
@@ -118,9 +132,11 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    printf("cross test: old=%u new=%u patch=%u (%.1f%% of new)\n",
+    printf("cross test: old=%u new=%u patch=%u (%.1f%% of new) "
+           "block_size=%u ram_budget=%u\n",
            g_old_len, g_new_len, g_patch_len,
-           (double)g_patch_len / (double)g_new_len * 100.0);
+           (double)g_patch_len / (double)g_new_len * 100.0,
+           cfg_block_size, cfg_ram_budget);
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.hal        = &g_hal;
@@ -130,10 +146,10 @@ int main(int argc, char **argv)
     cfg.old_size   = g_old_len;
     cfg.dst_addr   = FLASH_BASE;
     cfg.codec      = MCF_CODEC_AUTO;
-    cfg.block_size = 1024u;
-    /* Host test: RAM is free. Must cover LZMA's probability table (~16 KB at
-     * lc=3) + dictionary (16 KB default) + the two block buffers. */
-    cfg.ram_budget = 65536u;
+    cfg.block_size = cfg_block_size;
+    /* Host test: RAM is free by default. Must cover LZMA's probability table
+     * (~16 KB at lc=3) + dictionary (16 KB default) + the two block buffers. */
+    cfg.ram_budget = cfg_ram_budget;
 
     st = mcf_session_open(s, &cfg);
     if (st == MCF_OK) { st = mcf_session_run(s); }

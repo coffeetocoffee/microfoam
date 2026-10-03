@@ -136,8 +136,8 @@ void apply_update(const uint8_t *patch, uint32_t patch_size)
     cfg.old_size    = FW_SIZE;
     cfg.dst_addr    = 0x08020000u;                  /* staging slot    */
     cfg.codec       = MCF_CODEC_AUTO;
-    cfg.block_size  = 512u;
-    cfg.ram_budget  = 2048u;                        /* hard ceiling    */
+    cfg.block_size  = 1024u;   /* must be >= the patch's framing block size */
+    cfg.ram_budget  = 4096u;   /* >= 2*block_size + the codec's own state   */
 
     if (mcf_session_run(session) != MCF_OK) {
         /* Every failure is a distinct code. mcf_session_strerror() names it. */
@@ -153,21 +153,43 @@ No heap? Give each session its own static buffer instead — see
 ### 2. On the build host
 
 ```sh
-python host/microfoam.py keygen --private mfkey.priv --public mfkey.pub
-
 python host/microfoam.py make \
     --old old.bin --new new.bin --out patch.bin \
     --product 0x1234 --version 0x00020000 --old-version 0x00010000 \
-    --key mfkey.priv
+    --block-log2 10
 
 python host/microfoam.py inspect patch.bin
-python host/microfoam.py verify  patch.bin --pub mfkey.pub
 python host/microfoam.py apply   --old old.bin --patch patch.bin --out out.bin
 ```
+
+`--block-log2 10` frames each LZ4 block to 1024 bytes, matching the device snippet's
+`cfg.block_size`. The two are a pair: a patch framed larger than the device's window is
+rejected as corrupt, so the values must agree. (See
+[the block-size constraint](#the-lz4-block-size-is-a-hard-format-constraint).)
 
 `make` is deterministic: identical inputs produce a byte-identical patch. No timestamps, no
 randomness. (The encrypted `make --v2` profile is the exception — it draws a fresh random
 nonce prefix per patch, because reusing one with the same key would repeat every AEAD nonce.)
+
+<details>
+<summary><b>Signing a patch</b></summary>
+
+Generate a key and pass it to `make`:
+
+```sh
+python host/microfoam.py keygen --private mfkey.priv --public mfkey.pub
+python host/microfoam.py make --old old.bin --new new.bin --out patch.bin \
+    --product 0x1234 --version 0x00020000 --old-version 0x00010000 \
+    --key mfkey.priv
+python host/microfoam.py verify patch.bin --pub mfkey.pub
+```
+
+A signed patch is **rejected unless the device supplies a verifier** — that is the fail-closed
+property, not an oversight. The generic HAL sketch above configures none, so it applies
+unsigned patches only. To accept signed patches, set `verify` (or `cfg.verify`) to a vetted
+Ed25519 provider; see [the HAL contract](#the-hal-contract).
+
+</details>
 
 ### 3. Or install the host tool
 
@@ -521,6 +543,7 @@ third_party/lzma-sdk/      vendored LZMA SDK decoder (public domain)
 host/microfoam.py          patch generator, inspector, verifier, reference decoder
 host/selftest.py           host tool self-test
 host/check_counts.py       checks the README's stated check counts against the suites
+host/check_quickstart.py   builds the README's quick-start patch and applies it as documented
 host/lzma_vectors.py       generates the LZMA conformance vectors via liblzma
 tests/test_microfoam.c     fault-injection and round-trip tests
 tests/hal_concurrency_test.c  two sessions driven interleaved, proving reentrancy
@@ -574,6 +597,7 @@ the standard test configurations pass in both Debug and Release.
 | `cross_test_lzma` | — | a Python-produced **LZMA** patch applied by the C library *(with `MCF_ENABLE_LZMA=ON`)* |
 | `mfp2_host_to_session` | — | a PyNaCl-produced signed+encrypted MFP2 patch applied byte-exact, rejecting 14 tamper variants with zero flash mutations, each pinned to its exact status *(sodium + PyNaCl)* |
 | `documented_counts` | — | the counts in this table, compared against what the suites in the build tree actually report |
+| `quickstart_config` | — | the quick-start device configuration applied to a patch built by the quick-start host command, so the documented pairing is runnable and not just plausible |
 
 > [!IMPORTANT]
 > **The cross test is the one that matters most.** A library verified only against its own
@@ -679,15 +703,31 @@ clears the journal.
 
 ### The LZ4 block size is a hard format constraint
 
-A single LZ4 block may not expand past `block_size`, taken from the header's `block_size_log2`.
-The device decodes into a buffer of exactly that size and rejects anything larger as
-`MCF_E_CORRUPT`.
+The LZ4 payload is a sequence of length-prefixed blocks, and the device decodes each one into a
+single fixed buffer — the processing window, `cfg.block_size` (clamped to `new_size`). A block
+that would expand past that window is rejected as `MCF_E_CORRUPT` while decoding (site 17).
 
-This is not a hint. The host tool must chunk its framing to the same field the device reads, and
-the C test fixture must do the same. Getting it wrong produces a patch that is byte-perfect when
-decoded by a reference implementation and rejected by the device — which is exactly how this was
-found. The format is documented in `docs/format-v2.md` and the self-test asserts no block
-exceeds the window.
+The producer must therefore chunk its framing so no block exceeds the window. The host tool
+does this at `1 << block_size_log2` — the `--block-log2` flag, default 10 (1024 bytes) — and
+writes that field into the header. The rule is **window ≥ framing**: a larger device window is
+harmless, a smaller one rejects the patch.
+
+A mismatch can trip either of two gates, depending on the values:
+
+| Situation | Result |
+|---|---|
+| `cfg.block_size` smaller than the host's framing | `MCF_E_CORRUPT` at site 17 (decode) |
+| `1 << block_size_log2` too large for `ram_budget` | `MCF_E_DICT_TOO_LARGE` at site 14 (workspace), **before allocating anything** |
+
+The second is header validation, which refuses a patch whose declared window cannot fit the
+caller's budget (`1 << block_size_log2 > (ram_budget - workspace_req) / 2`).
+
+This is not a hint. The host tool must chunk its framing to a window the device will actually
+use, and the C test fixture must do the same. Getting it wrong produces a patch that is
+byte-perfect when decoded by a reference implementation and rejected by the device — which is
+exactly how this was found. The format is documented in `docs/format-v2.md`, the self-test
+asserts no block exceeds the window, and `check_quickstart.py` applies the README's own
+documented configuration to prove the pairing holds.
 
 <details>
 <summary><b>Defects found during bring-up</b> (recorded because they are the kind that survive to the field)</summary>

@@ -11,10 +11,13 @@
  * Properties block, 4 bytes:
  *   u32 le   content_size         exact decompressed length
  *
- * A single block may not expand past `block_size`, taken from the header's
- * block_size_log2. This is a format constraint, not a hint: the host tool chunks
- * its framing to the same field the device reads, because a block that would
- * overflow the device's decode buffer is rejected as corrupt.
+ * A single block may not expand past the decode window the caller supplies as
+ * `cap` (the session's `block_size`, clamped to new_size). This is a format
+ * constraint, not a hint: the host tool chunks its framing to a window the
+ * device will use, and the header's block_size_log2 records what it framed to,
+ * because a block that would overflow the decode buffer is rejected as corrupt.
+ * The window and the framing need not be equal - a larger window is harmless -
+ * but the framing must not exceed the window.
  *
  * The explicit content size is what makes truncation detectable: a stream cut
  * short leaves the decoder unable to reach the declared total, which

@@ -374,6 +374,16 @@ if(MCF_BUILD_TESTS)
                          -DCODEC=lz4
                          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/cross_test.cmake)
 
+        # The README's quick start is a device configuration paired with a host
+        # command, and the two must agree on the block size or the documented
+        # patch cannot apply. Nothing checked the pair, and it drifted. This
+        # builds the documented patch and applies it at the documented settings,
+        # then confirms the check can fail, so the example stays runnable.
+        add_test(NAME quickstart_config
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/host/check_quickstart.py
+                         --cross-test $<TARGET_FILE:cross_test>)
+
         # The same cross test with a raw (uncompressed) patch: proves the
         # identity codec round-trips through the C session.
         add_test(NAME cross_test_raw
