@@ -6,7 +6,7 @@
 cmake_minimum_required(VERSION 3.15)
 
 project(microfoam
-    VERSION 1.9.3
+    VERSION 1.9.4
     DESCRIPTION "Firmware delta update library for resource-constrained microcontrollers"
     LANGUAGES C)
 

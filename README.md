@@ -20,7 +20,7 @@ few kilobytes of RAM, with no heap and no RTOS.
 | **Language** | C99, MISRA-friendly, `-Wall -Wextra -Wconversion` clean |
 | **Verified targets** | arm-none-eabi-gcc: Cortex-M0, M3, M4, M7 — the four cores in the CI matrix. M0+ and M33 are untested portability targets. |
 | **Licence** | MIT |
-| **Status** | `1.9.3` — see [what works and what does not](#status) |
+| **Status** | `1.9.4` — see [what works and what does not](#status) |
 
 ```c
 #include "microfoam.h"   /* the v1 API; MFP2 adds microfoam_v2.h */
