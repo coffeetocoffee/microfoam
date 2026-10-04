@@ -783,12 +783,6 @@ clears the journal.
 
 ### Not yet done
 
-- **A verifier that is on by default.** Device-side Ed25519 now exists in-tree and is opt-in
-  (see [Signature verification](#signature-verification)). A build with no verifier still
-  refuses a signed patch with `MCF_E_SIGNATURE`, which is fail-closed and deliberately
-  unchanged. Promoting the built-in verifier to the default is a one-line CMake change plus a
-  deliberate raise of the size ceiling; it is not done because a product that already carries a
-  crypto stack should not pay roughly 6 KB of flash for a second one.
 - **armclang and IAR.** The code is written with portability to both in mind (C99, no GNU
   extensions, no VLAs, no designated-initialiser dependence in the public header, `extern "C"`
   guards), but neither toolchain is currently verified in CI or locally. The verified embedded
