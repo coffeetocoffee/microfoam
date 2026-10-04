@@ -1047,7 +1047,7 @@ implicitly violates by relying on CRC32 alone.
 
 | Control | Addresses | Mechanism |
 |---|---|---|
-| **Digital signature** | Arbitrary code execution | Ed25519 (default, ~2 KB flash for verify) or ECDSA-P256 where a hardware accelerator exists. Verified before any patch byte is applied. |
+| **Digital signature** | Arbitrary code execution | Ed25519 (built-in verifier, measured ≈ 6 KB flash for verify, opt-in) or ECDSA-P256 where a hardware accelerator exists. Verified before any patch byte is applied. |
 | **Anti-rollback** | Replay of vulnerable versions | `fw_version` must exceed the stored current version. Enforced against a monotonic counter in OTP/eFuse or a signed version record. |
 | **Product binding** | Cross-product patch application | `product_id` compared against a device-provisioned value. |
 | **Integrity** | Corruption in transit or storage | CRC32 for accidental corruption; the signature for authenticity. CRC is explicitly documented as *not* a security control. |
@@ -1058,7 +1058,7 @@ implicitly violates by relying on CRC32 alone.
 
 | | Ed25519 | ECDSA-P256 |
 |---|---|---|
-| Code size (verify) | ~2–3 KB | ~4–6 KB |
+| Code size (verify) | **≈ 6 KB, measured** | ~4–6 KB, unmeasured |
 | Public key | 32 B | 64 B uncompressed |
 | Verify time @ 20 MHz M0 | ~10–20 ms | ~40–80 ms, or ~1 ms with an accelerator |
 | Implementation risk | Low — self-contained, constant-time available | Moderate — needs constant-time scalar multiplication |
@@ -1067,6 +1067,28 @@ implicitly violates by relying on CRC32 alone.
 library. ECDSA-P256 offered where a hardware accelerator already exists. The verification
 hook is a `mcf_verify_fn` so integrators may supply a platform HSM or RoT-backed verifier
 without modifying the library.
+
+**Implemented.** Two providers ship. The built-in one
+(`-DMCF_ENABLE_ED25519=ON`, `src/mcf_ed25519.c`) implements plain Ed25519 for MFP1 and
+Ed25519ph for MFP2 with no external crypto library and no heap, using the vendored TweetNaCl
+for field and group arithmetic — see `third_party/tweetnacl/README.md` for why the arithmetic
+is borrowed rather than written, and the README's *Signature verification* section for the
+evidence. The libsodium adapter (`-DMCF_ENABLE_SODIUM=ON`, `src/mcf_sodium.c`) remains
+available. Both are opt-in, and a build with neither still rejects signed patches with
+`MCF_E_SIGNATURE`: fail-closed, unchanged. Promoting the built-in verifier to the default is
+a one-line CMake change plus a deliberate raise of the size ceiling, and is not done because
+a product that already carries a crypto stack should not pay ~6 KB of flash for a second one.
+
+The `~2–3 KB` estimate in the table above was **wrong by roughly 3×**, and a measured figure now
+stands in its place: the built-in verifier plus its SHA-512 and the TweetNaCl bridge costs
+**≈ 6.3 KB of flash** on Cortex-M4 with `--gc-sections` (`.text` 4,342 B + `.rodata` 1,928 B, of
+which ~0.3 KB is the measuring harness's own stubs). TweetNaCl's field arithmetic and the
+SHA-512 round-constant table are simply larger than the estimate assumed. The figure is obtained
+by linking only the verifier path and letting `--gc-sections` discard the rest; all of
+TweetNaCl's salsa20, poly1305, `crypto_box` and keypair code is discarded, so only the ed25519
+verify path is retained. This is the same class of correction the footprint table needed at
+v1.9.0, where an estimate written before the MFP2 path existed understated ROM by more than
+half.
 
 ### 14.4 Explicitly out of scope
 

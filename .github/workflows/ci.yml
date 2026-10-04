@@ -93,14 +93,35 @@ jobs:
           # The libsodium adapter is opt-in and requires a host crypto library;
           # keep it out of the bare-metal core compile unless a provider-specific
           # embedded integration supplies its own implementation. The LZMA codec
-          # is compiled separately below, where the SDK include path is set.
+          # and the built-in Ed25519 verifier are compiled separately below,
+          # where their extra include paths are set.
           for f in src/*.c; do
             case "$f" in
-              src/mcf_sodium.c|src/mcf_lzma.c) continue ;;
+              src/mcf_sodium.c|src/mcf_lzma.c|src/mcf_ed25519.c|src/mcf_sha512.c|src/mcf_tn_glue.c) continue ;;
             esac
             echo "  $f"
             arm-none-eabi-gcc $FLAGS -c "$f" -o "build-arm/$(basename "$f" .c).o"
           done
+
+      - name: Compile the built-in Ed25519 verifier for ${{ matrix.cortex }}
+        run: |
+          set -e
+          # Opt-in and supported, so it must compile for every target. Ours
+          # keeps the strict set; the vendored TweetNaCl wrapper is relaxed,
+          # matching how CMake builds it.
+          STRICT="-mcpu=${{ matrix.cortex }} -mthumb -std=c99 -Os \
+                 -ffunction-sections -fdata-sections -Wall -Wextra -Werror \
+                 -Wconversion -Wsign-conversion -Wshadow -Wcast-qual \
+                 -Iinclude -Isrc -Ithird_party/tweetnacl -DMCF_ENABLE_ED25519=1"
+          RELAXED="-mcpu=${{ matrix.cortex }} -mthumb -std=c99 -Os \
+                 -ffunction-sections -fdata-sections -Wall -Wextra \
+                 -Ithird_party/tweetnacl"
+          arm-none-eabi-gcc $STRICT -c src/mcf_ed25519.c -o build-arm/mcf_ed25519.o
+          arm-none-eabi-gcc $STRICT -c src/mcf_sha512.c -o build-arm/mcf_sha512.o
+          arm-none-eabi-gcc $RELAXED -c src/mcf_tn_glue.c \
+            -o build-arm/mcf_tn_glue.o
+          arm-none-eabi-size build-arm/mcf_ed25519.o build-arm/mcf_sha512.o \
+            build-arm/mcf_tn_glue.o >> "$GITHUB_STEP_SUMMARY"
 
       - name: Compile the LZMA codec for ${{ matrix.cortex }}
         run: |
@@ -255,7 +276,7 @@ jobs:
           cmp out-v1.bin "$FIX/new.bin"
 
   sodium:
-    name: libsodium RFC and MFP2 parser-boundary tests
+    name: libsodium RFC, built-in Ed25519, and MFP2 parser-boundary tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -267,12 +288,35 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libsodium-dev
           python -m pip install pynacl cryptography
-      - name: Configure with sodium enabled
-        run: cmake -B build-sodium -DCMAKE_BUILD_TYPE=Debug -DMCF_ENABLE_SODIUM=ON
+      # Both providers on in one build, which is what makes the differential
+      # section run: the built-in verifier and the libsodium adapter are
+      # asserted to return the same verdict for every case, including
+      # signatures libsodium generated over messages neither implementation
+      # chose.
+      - name: Configure with sodium and the built-in Ed25519 enabled
+        run: cmake -B build-sodium -DCMAKE_BUILD_TYPE=Debug -DMCF_ENABLE_SODIUM=ON -DMCF_ENABLE_ED25519=ON
       - name: Build
         run: cmake --build build-sodium --config Debug
       - name: Test registered sodium targets
         run: ctest --test-dir build-sodium --output-on-failure -C Debug
+
+  ed25519:
+    name: built-in Ed25519 with no external crypto
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure with only the built-in verifier
+        run: cmake -B build-ed25519 -DCMAKE_BUILD_TYPE=Debug -DMCF_ENABLE_ED25519=ON
+      - name: Build
+        run: cmake --build build-ed25519 --config Debug
+      # Separate from the sodium job on purpose: that one links libsodium, so a
+      # stray dependency on it inside mcf_ed25519.c would still resolve there.
+      # This build has no external crypto at all, so it is the one that proves
+      # the verifier is genuinely self-contained. The differential section
+      # reports SKIP here and runs in the sodium job.
+      - name: Test
+        run: ctest --test-dir build-ed25519 --output-on-failure -C Debug
 
   lzma:
     name: LZMA codec (host tests)

@@ -38,11 +38,15 @@ set(OBJECTS "")
 foreach(src ${SOURCES})
     get_filename_component(name "${src}" NAME_WE)
 
-    # The libsodium adapter needs a host crypto library and the LZMA codec has
-    # its own SDK include path; both are excluded from the bare-metal core
-    # compile by the CI workflow for the same reason. The LZMA codec's size is
-    # reported separately there.
-    if(name STREQUAL "mcf_sodium" OR name STREQUAL "mcf_lzma")
+    # The libsodium adapter needs a host crypto library, the LZMA codec has its
+    # own SDK include path, and the built-in Ed25519 verifier pulls in the
+    # vendored TweetNaCl; all three are opt-in and excluded from the bare-metal
+    # core compile by the CI workflow for the same reason. Their sizes are
+    # reported separately there, and each is compiled for the target by its own
+    # CI step, so being outside this gate is not the same as being unbuilt.
+    if(name STREQUAL "mcf_sodium" OR name STREQUAL "mcf_lzma" OR
+       name STREQUAL "mcf_ed25519" OR name STREQUAL "mcf_sha512" OR
+       name STREQUAL "mcf_tn_glue")
         continue()
     endif()
 

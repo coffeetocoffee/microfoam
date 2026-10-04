@@ -74,4 +74,22 @@ Provenance and per-file checksums are recorded in third_party/lzma-sdk/README.md
 
 The SDK is also the historical origin of the BSDIFF43 `offtin` sign-magnitude
 integer encoding used by the delta format.
+
+--------------------------------------------------------------------------------
+TweetNaCl
+--------------------------------------------------------------------------------
+
+The built-in Ed25519 / Ed25519ph verifier (opt-in via -DMCF_ENABLE_ED25519=ON)
+uses the field and group arithmetic of TweetNaCl, which lives in
+third_party/tweetnacl/ (tweetnacl.c, tweetnacl.h). Those two files are
+incorporated byte-for-byte unmodified; provenance and per-file checksums are
+recorded in third_party/tweetnacl/README.md.
+
+  TweetNaCl was released into the public domain by its authors: Daniel J.
+  Bernstein, Bernard van Gastel, Wesley Janssen, Tanja Lange, Peter Schwabe and
+  Sjaak Smetsers.
+
+Only the verification path is used. src/mcf_ed25519.c and src/mcf_sha512.c are
+Microfoam's own code (MIT, as above) and are what assemble the two
+verifications on top of those primitives.
 ================================================================================

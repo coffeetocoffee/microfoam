@@ -63,9 +63,26 @@ if(MCF_ENABLE_LZMA)
     list(APPEND MCF_SOURCES src/mcf_lzma.c)
 endif()
 
+# Ed25519 is opt-in and fully supported when enabled: it gives the library
+# in-tree Ed25519 and Ed25519ph verification with no external crypto library,
+# so a product that wants signed updates is not forced to supply its own
+# mcf_verify_fn or link libsodium. The field and group arithmetic is the
+# vendored TweetNaCl (third_party/tweetnacl, public domain) rather than
+# something written here - see that directory's README for why. It is opt-in
+# because it is ~2 KB of flash that a product already holding a crypto stack
+# does not need, and because the default build's size ceiling should only move
+# deliberately.
+option(MCF_ENABLE_ED25519 "Build the built-in Ed25519/Ed25519ph verifier (vendored TweetNaCl)" OFF)
+if(MCF_ENABLE_ED25519)
+    list(APPEND MCF_SOURCES src/mcf_ed25519.c src/mcf_sha512.c)
+endif()
+
 set(MCF_HEADERS include/microfoam.h include/microfoam_v2.h)
 if(MCF_ENABLE_SODIUM)
     list(APPEND MCF_HEADERS include/microfoam_sodium.h)
+endif()
+if(MCF_ENABLE_ED25519)
+    list(APPEND MCF_HEADERS include/microfoam_ed25519.h)
 endif()
 
 # ------------------------------------------------------------------ warnings
@@ -193,6 +210,31 @@ if(MCF_ENABLE_LZMA)
     target_compile_definitions(microfoam PRIVATE MCF_ENABLE_LZMA=1)
 endif()
 
+if(MCF_ENABLE_ED25519)
+    # mcf_tn_glue.c includes the vendored tweetnacl.c textually, because
+    # TweetNaCl keeps its field and group arithmetic in `static` functions and
+    # no separate translation unit can reach them. It therefore contains
+    # third-party code we do not edit, and it is compiled with warnings off -
+    # see the note below. src/mcf_ed25519.c and src/mcf_sha512.c hold every line
+    # of our own logic and keep the full strict set. The vendored files are never
+    # modified; their sha256 is recorded in third_party/tweetnacl/README.md.
+    add_library(mcf_tweetnacl OBJECT src/mcf_tn_glue.c)
+    target_include_directories(mcf_tweetnacl PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tweetnacl)
+    if(MSVC)
+        target_compile_options(mcf_tweetnacl PRIVATE /w)
+    else()
+        target_compile_options(mcf_tweetnacl PRIVATE -w)
+    endif()
+
+    target_sources(microfoam PRIVATE
+        $<TARGET_OBJECTS:mcf_tweetnacl>)
+    target_include_directories(microfoam PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/tweetnacl)
+    target_compile_definitions(microfoam PRIVATE MCF_ENABLE_ED25519=1)
+endif()
+
 
 set_target_properties(microfoam PROPERTIES
     C_VISIBILITY_PRESET hidden
@@ -216,6 +258,27 @@ if(MCF_BUILD_TESTS)
         target_link_libraries(mfp2_boundary_test PRIVATE microfoam)
         target_include_directories(mfp2_boundary_test PRIVATE ${SODIUM_INCLUDE_DIR})
         target_compile_options(mfp2_boundary_test PRIVATE ${MCF_WARNINGS})
+    endif()
+
+    # The built-in verifier: RFC 8032 vectors for both constructions it
+    # implements, a negative matrix, and - when the libsodium adapter is also
+    # built - a differential section asserting the two agree verdict-for-verdict
+    # on every case. That differential is the strongest evidence available for a
+    # verifier: agreement with an independently written implementation on inputs
+    # neither of them chose.
+    if(MCF_ENABLE_ED25519)
+        add_executable(ed25519_test tests/ed25519_test.c)
+        target_link_libraries(ed25519_test PRIVATE microfoam)
+        target_compile_options(ed25519_test PRIVATE ${MCF_WARNINGS})
+        # White-box: the SHA-512 vectors are asserted directly, and mcf_sha512.h
+        # is an internal header, so the test sees src/.
+        target_include_directories(ed25519_test PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        if(MCF_ENABLE_SODIUM)
+            target_compile_definitions(ed25519_test PRIVATE MCF_TEST_HAVE_SODIUM=1)
+            target_include_directories(ed25519_test PRIVATE ${SODIUM_INCLUDE_DIR})
+        endif()
+        add_test(NAME ed25519_test COMMAND ed25519_test)
     endif()
 
     add_executable(v2_format_test tests/v2_format_test.c)

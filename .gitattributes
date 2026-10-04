@@ -1,0 +1,10 @@
+# Vendored third-party sources are kept byte-identical to upstream.
+#
+# core.autocrlf is true in this repository's usual Windows checkout, which would
+# rewrite LF to CRLF on checkout and break the sha256 recorded in each vendored
+# README. These paths are declared binary so Git never touches a byte of them.
+#
+# The licence-header CI job skips third_party/ for the same reason: these files
+# carry their own upstream SPDX identifiers, not ours.
+third_party/tweetnacl/tweetnacl.c -text
+third_party/tweetnacl/tweetnacl.h -text

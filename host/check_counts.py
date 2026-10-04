@@ -46,6 +46,7 @@ SUITES = {
     "hal_concurrency_test":  ("binary",  r"(\d+) checks"),
     "v2_format_test":        ("binary",  r"(\d+) checks"),
     "sodium_rfc_test":       ("binary",  r"(\d+) checks"),
+    "ed25519_test":          ("binary",  r"(\d+) checks"),
     "lzma_policy_test":      ("binary",  r"(\d+) checks"),
     "lzma_conformance_test": ("vectors", r"(\d+) passed"),
     "host_selftest":         ("selftest", r"(\d+) checks"),

@@ -36,6 +36,7 @@ few kilobytes of RAM, with no heap and no RTOS.
 [Quick start](#quick-start) ·
 [Design commitments](#design-commitments) ·
 [The HAL contract](#the-hal-contract) ·
+[Signature verification](#signature-verification) ·
 [Codecs](#codecs) ·
 [Footprint](#verified-footprint) ·
 [Building and testing](#building-and-testing) ·
@@ -278,10 +279,18 @@ a static workspace. Everything else is optional. This is the entire platform dep
 **No heap?** Set `workspace` and `workspace_size` on each session's `mcf_config_t`; each
 simultaneously active session must receive a distinct buffer.
 
-**Device-side Ed25519.** Configure `-DMCF_ENABLE_SODIUM=ON`, keep a 32-byte public key in
-immutable storage, and install `mcf_sodium_verify` as the HAL's `verify` callback. The adapter
-uses the context's allocator for its temporary concatenated message; default builds include no
-cryptography and reject signed patches unless a verifier callback is configured.
+**Device-side Ed25519.** Two options, both fail-closed by default.
+
+- **Built-in, no external library:** configure `-DMCF_ENABLE_ED25519=ON` and install
+  `mcf_ed25519_verify` as the HAL's `verify` callback (and `mcf_ed25519ph_verify3` as the MFP2
+  `verify`). Keep a 32-byte public key in immutable storage. The verifier streams the signed
+  message, so it needs **no allocator and no buffer proportional to the patch**. See
+  [Signature verification](#signature-verification).
+- **libsodium:** configure `-DMCF_ENABLE_SODIUM=ON` and install `mcf_sodium_verify`. The adapter
+  uses the context's allocator for its temporary concatenated message.
+
+A default build includes no cryptography and rejects signed patches unless a verifier callback
+is configured. That is deliberate: it fails closed, visibly.
 
 <details>
 <summary><b>Deprecated compatibility helpers</b></summary>
@@ -294,6 +303,76 @@ it. Neither is on any session path — `mcf_session_open()` repeats the same HAL
 both are removal candidates for the next major version.
 
 </details>
+
+---
+
+## Signature verification
+
+Two providers ship, and neither is in a default build. Both are opt-in and supported.
+
+| | Built-in | libsodium adapter |
+|---|---|---|
+| Enable with | `-DMCF_ENABLE_ED25519=ON` | `-DMCF_ENABLE_SODIUM=ON` |
+| External dependency | **none** | libsodium |
+| Heap | **none** | the context's allocator, for one temporary message buffer |
+| Signed-message handling | **streamed** | concatenated into one buffer |
+| Callbacks | `mcf_ed25519_verify`, `mcf_ed25519ph_verify3` | `mcf_sodium_verify`, `mcf_sodium_ed25519ph_verify3` |
+
+The built-in verifier implements both constructions this library needs — plain **Ed25519**
+(RFC 8032 §5.1) for MFP1 and **Ed25519ph** (§5.1 with the `dom2` prehash) for MFP2 — and
+streams the signed message, so verifying a patch needs **no allocator and no buffer
+proportional to the patch**. It costs **≈ 6.3 KB of flash** on Cortex-M4 with `--gc-sections`
+(`.text` 4,342 B + `.rodata` 1,928 B, 0 B static RAM), measured by linking only the verifier
+path - see [`third_party/tweetnacl/README.md`](third_party/tweetnacl/README.md#measured-footprint).
+All of TweetNaCl's salsa20, poly1305, `crypto_box` and keypair code is discarded by
+`--gc-sections`, so only the ed25519 verify path is retained.
+
+```c
+#include "microfoam_ed25519.h"
+
+static mcf_ed25519_ctx_t g_verify = { g_public_key };   /* 32 bytes, immutable */
+
+cfg.verify     = mcf_ed25519_verify;      /* MFP1: plain Ed25519    */
+cfg.verify_ctx = &g_verify;
+/* MFP2 takes the same context through mcf_v2_config_t.verify, with
+ * mcf_ed25519ph_verify3 as the function. */
+```
+
+**The field and group arithmetic is vendored, not written here.** It is
+[TweetNaCl](third_party/tweetnacl/README.md) — public domain, ~700 lines, no `__int128` — which
+is the reviewed part. `src/mcf_sha512.c` and `src/mcf_ed25519.c` are ours and supply the hash,
+the two constructions and the callback adapters. That split is the whole point: an earlier
+from-scratch verifier was written for this project and **rejected**. After twelve fixed defects,
+one of them permissive — a transposed point comparison that made *forged* signatures verify — it
+could not be shown to reject forgeries reliably. Writing the arithmetic is exactly what failed,
+so the arithmetic is what is now borrowed. That work and its defect log remain in
+[`contrib/ed25519-wip/`](contrib/ed25519-wip/README.md) as a record; it is never compiled and
+**must not be linked into production.**
+
+Three things are worth stating precisely, because each is a place a verifier quietly goes wrong:
+
+- **The `S < L` canonicality check is enforced, and it is load-bearing.** TweetNaCl's own
+  `crypto_sign_open` does **not** enforce it and libsodium does, so a signature carrying `S + L`
+  satisfies the group equation — `[S+L]B == [S]B` — and is accepted by one while the other
+  rejects it. Both halves were checked by execution: TweetNaCl accepts the `S + L` form of the
+  RFC 8032 §7.1 vector, libsodium rejects it, and `ed25519_test` asserts the built-in verifier
+  refuses it too. Deleting the check makes that case fail, so the test is falsifiable rather than
+  merely green.
+- **Domain separation is real.** An Ed25519ph signature is refused by the plain-Ed25519 path and
+  vice versa, asserted in both directions. This is why a `ph` verifier cannot be built by handing
+  TweetNaCl's `crypto_sign_open` a prehashed message: the `dom2` prefix precedes `R` and `A` in
+  the hash input, so it cannot be injected by choosing the message.
+- **The verifier streams, so it cannot lean on a one-shot hash.** That is what makes
+  `mcf_sha512.c` necessary, and it is checked against published digests at the block boundaries
+  (112, 128, 129 bytes) and on the streamed million-byte case, not only on short inputs.
+
+**The evidence is differential, not just round-trip.** `ed25519_test` checks the published
+RFC 8032 §7.1 and §7.3 vectors and a negative matrix, and then — when libsodium is *also*
+built — asserts that the two implementations return the **same verdict for every case**,
+including signatures libsodium generated over messages neither implementation chose, with the
+tampering mutation applied to both. Agreement with an independently written implementation on
+inputs it generated is not something a self-consistent bug can fake; a round-trip through one's
+own code can be.
 
 ---
 
@@ -570,6 +649,10 @@ tests/fuzz_v2_parse.c      MFP2 parser fuzz target (libFuzzer entry and portable
 tests/mfp2_boundary_test.c MFP2 session boundary: tamper matrix and resume
 tests/mfp2_fixtures.py     re-signed MFP2 tamper variants for the boundary test
 tests/sodium_rfc_test.c    published Ed25519/Ed25519ph/XChaCha20-Poly1305 vectors
+tests/ed25519_test.c       built-in verifier: vectors, negatives, differential vs libsodium
+src/mcf_ed25519.c          built-in Ed25519/Ed25519ph verifier (opt-in)
+src/mcf_sha512.c           streaming SHA-512 over TweetNaCl's compression function
+third_party/tweetnacl/     vendored public-domain field/group arithmetic (unmodified)
 tests/fixtures/            deterministic firmware pair and a test key
 contrib/ed25519-wip/       rejected verifier, defect log, and conformance harness
 docs/architecture.md       the design this implements, and why
@@ -591,11 +674,17 @@ Honest accounting of what exists and what does not.
 ### Working and tested
 
 The production/session path supports MFP1 and MFP2. MFP2 execution is a caller-owned session
-(`mcf_v2_session_*`, libsodium-backed through the application's Ed25519ph and
-XChaCha20-Poly1305 providers): it verifies the signature **before** key lookup, authenticates
-every record **before** decode, decrypts records one at a time into a small sliding window (the
-whole decrypted payload is never resident), and hands the reconstructed delta stream to the
-unchanged MFP1 engine. Resume is opt-in via `journal_addr` and record-aligned.
+(`mcf_v2_session_*`, with Ed25519ph and XChaCha20-Poly1305 supplied either by the built-in
+verifier or by the application's own providers): it verifies the signature **before** key
+lookup, authenticates every record **before** decode, decrypts records one at a time into a
+small sliding window (the whole decrypted payload is never resident), and hands the
+reconstructed delta stream to the unchanged MFP1 engine. Resume is opt-in via `journal_addr`
+and record-aligned.
+
+Signature verification is available in-tree, with no external crypto library, via
+`-DMCF_ENABLE_ED25519=ON` — see [Signature verification](#signature-verification). It is opt-in
+rather than default so that a product which already carries a crypto stack does not pay for a
+second one.
 
 The build is warning-clean under `-Wall -Wextra -Wconversion -Wsign-conversion -Werror`, and
 the standard test configurations pass in both Debug and Release.
@@ -608,6 +697,7 @@ the standard test configurations pass in both Debug and Release.
 | `v2_format_test` | 45 checks | MFP2 header/TLV/record-framing rules, plus a ~4,200-case deterministic mutation/property loop |
 | `host_selftest` | 119 checks | 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, the measured LZ4-vs-LZMA payload ratio, LZMA props + policy fields, format layout agreement, signing, small-image framing decoded at the device's window, MFP2 KAT, the fixed-nonce-prefix guard, MFP2 host hygiene (no cached nonce prefix, device-matching TLV walk, computed `workspace_req`), and host-side tamper cases each pinned to the layer that rejects them |
 | `sodium_rfc_test` | 17 checks | published vectors for both constructions MFP2 depends on — RFC 8032 §7.1 Ed25519 and §7.3 Ed25519ph (with the three-span streaming verify and its domain separation from plain Ed25519) and the draft-irtf-cfrg-xchacha-03 §A.1 XChaCha20-Poly1305 AEAD vector — plus adapter tamper cases *(with `MCF_ENABLE_SODIUM=ON`)* |
+| `ed25519_test` | 354 checks | the built-in verifier: NIST SHA-512 digests including the streamed million-byte case and the 112/128/129-byte padding boundaries, RFC 8032 §7.1 and §7.3 vectors, a negative matrix, the `S + L` malleability case, domain separation between the two constructions, and — with libsodium also built — a **differential** asserting both verifiers return the *same verdict* on every case, including signatures libsodium generated over messages neither implementation chose *(with `MCF_ENABLE_ED25519=ON`; the differential section needs `MCF_ENABLE_SODIUM=ON` too and reports `SKIP` without it)* |
 | `lzma_conformance_test` | 335 checks | 67 liblzma vectors at five block sizes each *(with `MCF_ENABLE_LZMA=ON`)* |
 | `lzma_policy_test` | 15 checks | dictionary and `lc+lp` policy rejections with their exact status and stage *(with `MCF_ENABLE_LZMA=ON`)* |
 | `v2_fuzz_smoke` | — | the shared parser property oracle over a built-in seed and its truncations (portable; no sanitizer runtime needed) |
@@ -693,23 +783,12 @@ clears the journal.
 
 ### Not yet done
 
-- **Device-side Ed25519.** A from-scratch verifier was written and **rejected**: after fixing
-  twelve real defects, every primitive tested correct in isolation yet end-to-end verification
-  still failed — and partway through, a transposed comparison made *forged* signatures verify. A
-  verifier that is subtly wrong in the permissive direction silently defeats the one control
-  this library exists to provide. Work, defect log, and the conformance harness are in
-  [`contrib/ed25519-wip/`](contrib/ed25519-wip/README.md). The arithmetic remains quarantined and
-  is never part of `MCF_SOURCES`. Signed patches are rejected with `MCF_E_SIGNATURE` unless the
-  application supplies a vetted provider through `mcf_verify_fn`. An optional libsodium adapter
-  is available with `-DMCF_ENABLE_SODIUM=ON`; `sodium_rfc_test` checks published vectors for
-  both constructions the MFP2 profile depends on — RFC 8032 §7.3 Ed25519ph (the streaming
-  three-span verify and its domain separation from plain Ed25519) and the
-  draft-irtf-cfrg-xchacha-03 §A.1 XChaCha20-Poly1305 AEAD vector — plus adapter tamper
-  rejection. Pinning these matters because a round-trip through the same library that produced
-  the ciphertext proves only self-consistency; the published vectors are what prove the
-  construction is the standard one. Separately, `mfp2_host_to_session` uses PyNaCl to produce a
-  signed+encrypted patch and has the C session apply it end to end, byte-exact, with the full
-  tamper matrix. **Do not link `contrib/ed25519-wip/mcf_ed25519.c` into production.**
+- **A verifier that is on by default.** Device-side Ed25519 now exists in-tree and is opt-in
+  (see [Signature verification](#signature-verification)). A build with no verifier still
+  refuses a signed patch with `MCF_E_SIGNATURE`, which is fail-closed and deliberately
+  unchanged. Promoting the built-in verifier to the default is a one-line CMake change plus a
+  deliberate raise of the size ceiling; it is not done because a product that already carries a
+  crypto stack should not pay roughly 6 KB of flash for a second one.
 - **armclang and IAR.** The code is written with portability to both in mind (C99, no GNU
   extensions, no VLAs, no designated-initialiser dependence in the public header, `extern "C"`
   guards), but neither toolchain is currently verified in CI or locally. The verified embedded
