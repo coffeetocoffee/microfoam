@@ -182,7 +182,8 @@ def main() -> int:
             failures += 1
 
         # 3b. Non-vacuity, window too small: the patch must be refused at the
-        #     decode stage, which is the failure the known-issue section names.
+        #     decode stage, which is the failure the LZ4 window rule names
+        #     (docs/format-v2.md, "LZ4 stream").
         if cfg["block_size"] > 8:
             rc, out = apply_with(cfg["block_size"] // 2, cfg["ram_budget"])
             if rc != 0 and f"site {SITE_CODEC_DECODE}" in out:

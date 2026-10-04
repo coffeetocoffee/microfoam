@@ -163,6 +163,18 @@ cut short leaves the decoder unable to reach the declared total or to find the e
 and `mcf_lz4_finish()` reports `MCF_E_TRUNCATED` rather than accepting a short
 reconstruction.
 
+**The decode window is a hard constraint.** The device decodes each block into a single fixed
+buffer — the processing window, `cfg.block_size` clamped to `new_size` — so the widest window any
+configuration can reach is exactly `new_size`. A block that would expand past it is rejected as
+`MCF_E_CORRUPT` at site 17. A producer must therefore frame within the image
+(`framing <= new_size`), and the device window must be at least the framing
+(`cfg.block_size >= framing`). The host tool caps its framing at the image automatically and
+writes the exponent it actually used to the header's `block_size_log2`; that header field drives
+only the pre-allocation budget check (`1 << block_size_log2 > (ram_budget - workspace_req) / 2`
+is `MCF_E_DICT_TOO_LARGE` at site 14, before anything is allocated), while the decode buffer comes
+from the caller's `cfg.block_size`. MFP2 has the same inner window with the record size in the
+framing role: its window is `min(record_size, new_size)`.
+
 ## Delta stream
 
 After decompression, the stream is BSDIFF43: a sequence of control triples.
