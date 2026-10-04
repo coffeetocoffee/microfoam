@@ -758,7 +758,7 @@ Let `B` = block size (default 1024), `W` = codec workspace, `S` = session state,
 | Block read buffer | `B` | Engine input staging |
 | Codec workspace | `W` | From `workspace_size(props)` |
 | **Dynamic total** | **`2B + W`** | what `mcf_ctx_size()` returns |
-| Session state | `S` | `mcf_session_sizeof()`: 352 B on Cortex-M0, 464 B on a 64-bit host. Caller-declared storage, not part of the dynamic total |
+| Session state | `S` | `mcf_session_sizeof()`: 340 B on Cortex-M0, 456 B on a 64-bit host. Caller-declared storage, not part of the dynamic total |
 
 `H` is owned by the HAL for erase/program buffering and is not included. The session state
 is deliberately listed apart from the dynamic total: it lives in the caller's
@@ -787,10 +787,10 @@ Figures below are the actual outputs of `mcf_ctx_size()` (workspace) and
 
 | Profile | Codec | B | Workspace (`mcf_ctx_size`) | Session | **Total RAM** | ROM |
 |---|---|---|---|---|---|---|
-| **Constrained, minimal** | LZ4 | 256 | 528 | 352 | **880 B** | ~12.4 KB |
-| **Constrained (M0)** | LZ4 | 512 | 1,040 | 352 | **1,392 B** | ~12.4 KB |
-| **Standard (M3/M4)** — default | LZ4 | 1024 | 2,064 | 352 | **2,416 B** | ~11.5 KB |
-| **Max ratio (M3/M4)** | LZMA | 1024 | 32,896 | 352 | **≈ 33.3 KB** | ~18 KB |
+| **Constrained, minimal** | LZ4 | 256 | 528 | 340 | **868 B** | ~12.4 KB |
+| **Constrained (M0)** | LZ4 | 512 | 1,040 | 340 | **1,380 B** | ~12.4 KB |
+| **Standard (M3/M4)** — default | LZ4 | 1024 | 2,064 | 340 | **2,404 B** | ~11.5 KB |
+| **Max ratio (M3/M4)** | LZMA | 1024 | 32,896 | 340 | **≈ 33.2 KB** | ~18 KB |
 
 The LZ4 workspace figures are `2B + sizeof(mcf_lz4_t)`, which is exactly what the query
 returns. The ROM column is the whole library as measured by the CI size gate; it is larger
@@ -1480,7 +1480,7 @@ P0–P2 to the field.
 | Q-04 | Should the journal be a required HAL capability or optional? | Integrator | P4 |
 | Q-05 | Is A/B slot support worth building in, given the "out of scope" decision (§4.2 N2)? Most integrators need it. | Product | P5 |
 | Q-06 | Should the host tool be Python or Rust? Affects the static-binary distribution story. | Maintainer | P5 |
-| Q-07 | Target minimum: is the Constrained profile (880 B, Cortex-M0) genuinely in scope, or is the Standard profile (2,416 B) sufficient? Affects whether further optimisation is warranted. | Product | P2 |
+| Q-07 | Target minimum: is the Constrained profile (868 B, Cortex-M0) genuinely in scope, or is the Standard profile (2,404 B) sufficient? Affects whether further optimisation is warranted. | Product | P2 |
 
 ---
 

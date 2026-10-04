@@ -268,9 +268,10 @@ touches NVM and behaves exactly as a cold run.
 The session arms the inner engine to halt exactly on erase-block boundaries
 (`mcf_session_set_stop`); whenever it halts there, the session captures the
 engine's complete position (`mcf_session_snapshot`: next unconsumed
-decompressed byte, output offset, base cursor, phase, and the outstanding diff
-and literal counts - a mid-triple point included) and writes one
-`mcf_v2_journal_t`. `record_index` and `record_base_d` name the record whose
+decompressed byte, output offset, base cursor, phase, the outstanding diff and
+literal counts, and the current triple's seek when it has not yet been applied
+- a mid-triple point included) and writes one `mcf_v2_journal_t`.
+`record_index` and `record_base_d` name the record whose
 plaintext contains that byte and the decoded offset where the record starts.
 
 A resume re-authenticates and re-feeds the codec from that record onward only.

@@ -1014,6 +1014,60 @@ static void test_resume_disabled(void)
     mcf_session_close(s);
 }
 
+/* BSDIFF43 applies a triple's seek *after* its diff and extra bytes, so the
+ * seek positions the base cursor for the next triple, not its own. This is the
+ * case that distinguishes the two orderings: a triple with both a diff and a
+ * nonzero seek. Get it backwards and the base is read from the wrong place, the
+ * reconstruction is silently wrong, and only the whole-image CRC notices. */
+static void test_seek_positions_next_triple(void)
+{
+    static uint8_t delta[MCF_FX_SCRATCH];
+    uint8_t *p = delta;
+    uint32_t len;
+    uint32_t i;
+
+    banner("delta engine: a seek positions the base for the next triple");
+    device_reset();
+
+    /* old[i] = i % 251 gives a base whose bytes at 0 and at 768 differ, which is
+     * what makes the two orderings observable at all. */
+    for (i = 0; i < OLD_LEN; i++) {
+        g_old[i] = (uint8_t)(i % 251u);
+    }
+    CHECK(memcmp(&g_old[0], &g_old[768], 256u) != 0,
+          "the base bytes at 0 and 768 differ, so the ordering is observable");
+
+    /* new = old[0..255] ++ old[1024..1279]: two diff triples reading
+     * non-contiguous base regions, so the first carries a nonzero seek (its
+     * diff advances oldpos by 256, then the seek advances it by 768 to 1024,
+     * where the second triple reads). An engine that applied the seek first
+     * would read the first triple from 768 instead of 0. */
+    for (i = 0; i < 256u; i++) {
+        g_new[i]        = g_old[i];
+        g_new[256u + i] = g_old[1024u + i];
+    }
+
+    p = mcf_fx_put_ctrl(p, 256, 0, 768);
+    for (i = 0; i < 256u; i++) {
+        *p++ = (uint8_t)(g_new[i] - g_old[i]);
+    }
+    p = mcf_fx_put_ctrl(p, 256, 0, 0);
+    for (i = 0; i < 256u; i++) {
+        *p++ = (uint8_t)(g_new[256u + i] - g_old[1024u + i]);
+    }
+
+    len = mcf_fx_build_patch_from_delta(g_patch, (uint32_t)sizeof(g_patch),
+                                        delta, (uint32_t)(p - delta),
+                                        g_old, OLD_LEN, g_new, 512u,
+                                        PRODUCT, VER_NEW, VER_OLD, WS_LZ4, 0u, 9u);
+    CHECK(len > 0u, "a patch with a seek on a diff-bearing triple builds");
+
+    CHECK_EQ(apply(len, NULL), MCF_OK,
+             "a delta with a seek on a diff-bearing triple applies");
+    CHECK(memcmp(&g_flash[0], g_new, 512u) == 0,
+          "the reconstructed image is byte-exact");
+}
+
 /* ====================================================================== */
 
 int main(void)
@@ -1051,6 +1105,9 @@ int main(void)
     test_resume_cleared_when_done();
     test_resume_rejects_bad_records();
     test_resume_disabled();
+
+    /* Last: it rewrites the shared old/new fixtures with a delta of its own. */
+    test_seek_positions_next_triple();
 
     printf("\n%d checks, %d failures\n", g_checks, g_fail);
     return (g_fail == 0) ? EXIT_SUCCESS : EXIT_FAILURE;

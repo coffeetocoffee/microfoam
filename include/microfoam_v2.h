@@ -159,14 +159,15 @@ typedef struct mcf_v2_config {
  * resume can return to; the record is self-contained so a probe never has to
  * trust anything it cannot re-derive.
  *
- * The resume point is (d_off, out_off, old_off, phase, remaining): the next
- * unconsumed decompressed byte, the output offset at that instant (an erase
- * block boundary), the base-image cursor, and the engine phase with its
- * outstanding counts - a point that may be mid-triple. record_index names the
- * record whose plaintext contains d_off; a resume re-feeds the codec from
- * that record and drops (d_off - record base) decompressed bytes. Everything
- * below out_off is left exactly as the interrupted run left it; the block at
- * out_off is erased and rewritten whole. */
+ * The resume point is (d_off, out_off, old_off, phase, remaining, seek): the
+ * next unconsumed decompressed byte, the output offset at that instant (an
+ * erase block boundary), the base-image cursor, the engine phase with its
+ * outstanding counts, and the current triple's seek when it has not yet been
+ * applied - a point that may be mid-triple. record_index names the record whose
+ * plaintext contains d_off; a resume re-feeds the codec from that record and
+ * drops (d_off - record base) decompressed bytes. Everything below out_off is
+ * left exactly as the interrupted run left it; the block at out_off is erased
+ * and rewritten whole. */
 typedef struct mcf_v2_journal {
     uint32_t magic;         /*!< MCF_V2_JOURNAL_MAGIC, or 0 if never written.  */
     uint32_t session_id;    /*!< CRC-32 of the patch header.                   */
@@ -179,8 +180,9 @@ typedef struct mcf_v2_journal {
     uint32_t phase;         /*!< Engine phase at the resume point.             */
     uint32_t diff_remaining;/*!< Diff bytes still to apply.                    */
     uint32_t extra_remaining;/*!< Literal bytes still to copy.                 */
+    uint32_t seek;          /*!< Current triple's seek, still to be applied.   */
     uint32_t prefix_crc32;  /*!< CRC-32 of the reconstructed prefix on flash.  */
-    uint32_t record_crc;    /*!< CRC-32 of the eleven fields above.            */
+    uint32_t record_crc;    /*!< CRC-32 of the twelve fields above.            */
 } mcf_v2_journal_t;
 
 #define MCF_V2_JOURNAL_MAGIC 0x32504A52u /* 'RJP2', little-endian */
@@ -213,6 +215,7 @@ typedef struct mcf_v2_session {
     uint32_t resume_phase;      /*!< Engine phase at the point.               */
     int32_t  resume_diff_remaining; /*!< Diff bytes still to apply.          */
     int32_t  resume_extra_remaining;/*!< Literal bytes still to copy.         */
+    int32_t  resume_seek;       /*!< Current triple's seek, still to apply.   */
 
     uint32_t session_id;        /*!< CRC-32 of the patch header.              */
     uint32_t journal_interval;  /*!< Blocks between checkpoints; 0 disables.  */

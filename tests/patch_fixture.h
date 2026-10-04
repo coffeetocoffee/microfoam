@@ -87,6 +87,20 @@ static inline uint8_t *mcf_fx_lz4_literal_block(uint8_t *p, const uint8_t *data,
 }
 
 /*
+ * Frame a delta the caller built and emit the complete patch. Split out from
+ * the builder below so a test can supply a delta whose control triples it chose
+ * itself - in particular one carrying a nonzero seek on a diff-bearing triple,
+ * which is the case that distinguishes the BSDIFF43 seek ordering.
+ */
+static inline uint32_t mcf_fx_build_patch_from_delta(uint8_t *out, uint32_t out_cap,
+                                                     const uint8_t *delta, uint32_t delta_len,
+                                                     const uint8_t *old, uint32_t old_len,
+                                                     const uint8_t *newb, uint32_t new_len,
+                                                     uint32_t product, uint32_t new_ver,
+                                                     uint32_t old_ver, uint32_t workspace_req,
+                                                     uint32_t flags, uint32_t block_log2);
+
+/*
  * Build a valid patch into `out` (`out` must have room for the header plus the
  * framed stream; `out_cap` is checked). `newb` is reconstructed as
  * old[i] + delta[i]. Returns the patch length, or 0 if it would not fit.
@@ -99,10 +113,7 @@ static inline uint32_t mcf_fx_build_patch(uint8_t *out, uint32_t out_cap,
                                           uint32_t flags, uint32_t block_log2)
 {
     static uint8_t delta[MCF_FX_SCRATCH];
-    static uint8_t stream[MCF_FX_SCRATCH];
-    uint32_t block_size = 1u << block_log2;
     uint32_t delta_len = 0;
-    uint32_t sp = 0;
     uint32_t off;
     uint32_t n;
 
@@ -127,6 +138,29 @@ static inline uint32_t mcf_fx_build_patch(uint8_t *out, uint32_t out_cap,
                 delta[delta_len++] = (uint8_t)(newb[off + k] - base);
             }
         }
+    }
+
+    return mcf_fx_build_patch_from_delta(out, out_cap, delta, delta_len,
+                                         old, old_len, newb, new_len,
+                                         product, new_ver, old_ver,
+                                         workspace_req, flags, block_log2);
+}
+
+static inline uint32_t mcf_fx_build_patch_from_delta(uint8_t *out, uint32_t out_cap,
+                                                     const uint8_t *delta, uint32_t delta_len,
+                                                     const uint8_t *old, uint32_t old_len,
+                                                     const uint8_t *newb, uint32_t new_len,
+                                                     uint32_t product, uint32_t new_ver,
+                                                     uint32_t old_ver, uint32_t workspace_req,
+                                                     uint32_t flags, uint32_t block_log2)
+{
+    static uint8_t stream[MCF_FX_SCRATCH];
+    uint32_t block_size = 1u << block_log2;
+    uint32_t sp = 0;
+    uint32_t off;
+
+    if (out == NULL || delta == NULL || block_log2 == 0u || block_log2 > 20u) {
+        return 0u;
     }
 
     /* LZ4 framing: one literal block per block_size slice, then the end marker. */

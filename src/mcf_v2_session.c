@@ -354,6 +354,7 @@ mcf_status_t mcf_v2_resume_probe(mcf_v2_session_t *s)
     s->resume_phase         = j.phase;
     s->resume_diff_remaining  = (int32_t)j.diff_remaining;
     s->resume_extra_remaining = (int32_t)j.extra_remaining;
+    s->resume_seek            = (int32_t)j.seek;
     return MCF_OK;
 }
 
@@ -402,6 +403,7 @@ static void v2_checkpoint(mcf_v2_session_t *s)
     j.phase           = pt.phase;
     j.diff_remaining  = (uint32_t)pt.diff_remaining;
     j.extra_remaining = (uint32_t)pt.extra_remaining;
+    j.seek            = (uint32_t)pt.seek;
     r = mcf_dst_prefix_crc(s->cfg->hal, s->cfg->dst_addr, pt.out_off, &j.prefix_crc32);
     if (r != MCF_OK) goto degrade;
     j.record_crc = v2_journal_crc(&j);
@@ -593,6 +595,7 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
         pt.phase           = s->resume_phase;
         pt.diff_remaining  = s->resume_diff_remaining;
         pt.extra_remaining = s->resume_extra_remaining;
+        pt.seek            = s->resume_seek;
         mcf_session_restore(s->inner, &pt);
     }
     r=mcf_session_begin(s->inner); if(r!=MCF_OK) return v2_fail(s,(mcf_status_t)r);

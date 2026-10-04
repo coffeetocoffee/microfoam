@@ -138,20 +138,11 @@ static int32_t mcf_engine_ensure(mcf_engine_t *e, uint32_t want)
 
 /* ---------------------------------------------------------------------- */
 
-/* Record the position the engine is currently at as a safe resume point.
- *
- * Only valid between control triples. The recorded compressed offset is where
- * the *next* triple's header is or will be, so a session that checkpoints here
- * resumes by re-reading that header and re-applying its seek - which is exactly
- * why oldpos is captured before the seek rather than after. */
+/* Mark the engine as being between triples: nothing is partially consumed, so
+ * a session may capture a resumable point. */
 static void mcf_engine_mark_safe(mcf_engine_t *e)
 {
-    uint32_t origin = (e->io->raw_origin != NULL) ? *e->io->raw_origin : 0u;
-
-    e->tri_payload = origin + e->raw_pos;
-    e->tri_newpos  = e->newpos;
-    e->tri_oldpos  = e->oldpos;
-    e->safe        = 1;
+    e->safe = 1;
 }
 
 void mcf_engine_resume(mcf_engine_t *e, uint32_t skip)
@@ -178,18 +169,21 @@ void mcf_engine_resume(mcf_engine_t *e, uint32_t skip)
     e->safe            = 0;
     e->discard         = (int32_t)skip;
     e->in_discard      = 0u;
+    e->pending_seek    = 0;
 }
 
 void mcf_engine_resume_at(mcf_engine_t *e, uint32_t out_off, int32_t old_off,
                           uint32_t in_skip, mcf_engine_phase_t phase,
-                          int32_t diff_remaining, int32_t extra_remaining)
+                          int32_t diff_remaining, int32_t extra_remaining,
+                          int32_t seek)
 {
     /* Positioning resume: the caller has arranged for the fed stream to begin
      * at the frame boundary the resume point recorded and states how many
      * decompressed bytes to drop before the byte that point named. Unlike
      * mcf_engine_resume(), nothing is re-derived: the engine restarts in the
      * exact recorded phase - which may be mid-triple, so the remaining diff
-     * and literal counts are restored too. Output coordinates remain absolute,
+     * and literal counts are restored too, along with the current triple's
+     * seek if it had not been applied yet. Output coordinates remain absolute,
      * so the engine stops at the original newsize and never rewrites anything
      * below out_off. */
     e->newpos          = (int32_t)out_off;
@@ -204,6 +198,7 @@ void mcf_engine_resume_at(mcf_engine_t *e, uint32_t out_off, int32_t old_off,
     e->discard         = 0;
     e->in_discard      = in_skip;
     e->stop_at         = 0u;
+    e->pending_seek    = seek;
 }
 
 mcf_status_t mcf_engine_step(mcf_engine_t *e, int *finished)
@@ -259,6 +254,29 @@ mcf_status_t mcf_engine_step(mcf_engine_t *e, int *finished)
             int32_t  avail;
             uint32_t i;
 
+            /* Apply the previous triple's seek before reading the next header.
+             * BSDIFF43 applies a triple's seek after its diff and extra bytes,
+             * so it positions the base cursor for the *next* triple, not its
+             * own. Deferring it to here is what makes that so: by the time the
+             * next header is read, the previous triple's bytes have all been
+             * consumed. The value is part of the resumable state, so a
+             * checkpoint taken in between carries it across a restart. */
+            if (e->pending_seek != 0) {
+                int32_t prev = e->pending_seek;
+
+                if (prev > 0) {
+                    if (e->oldpos > (INT32_MAX - prev)) {
+                        *e->io->site = MCF_SITE_SANITY_SEEK;
+                        return MCF_E_CORRUPT;
+                    }
+                } else if (e->oldpos < (INT32_MIN - prev)) {
+                    *e->io->site = MCF_SITE_SANITY_SEEK;
+                    return MCF_E_CORRUPT;
+                }
+                e->oldpos += prev;
+                e->pending_seek = 0;
+            }
+
             /* About to consume a header, so the current position is no longer a
              * safe place to resume from. */
             e->safe = 0;
@@ -296,18 +314,9 @@ mcf_status_t mcf_engine_step(mcf_engine_t *e, int *finished)
             e->extra_remaining = y;
             e->phase           = (x > 0) ? MCF_EP_DIFF : MCF_EP_EXTRA;
 
-            if (seek > 0) {
-                if (e->oldpos > (INT32_MAX - seek)) {
-                    *e->io->site = MCF_SITE_SANITY_SEEK;
-                    return MCF_E_CORRUPT;
-                }
-            } else if (seek < 0) {
-                if (e->oldpos < (INT32_MIN - seek)) {
-                    *e->io->site = MCF_SITE_SANITY_SEEK;
-                    return MCF_E_CORRUPT;
-                }
-            }
-            e->oldpos += seek;
+            /* Hold the seek for the next triple. Its overflow bound is checked
+             * where it is applied, against the cursor as it then stands. */
+            e->pending_seek = seek;
             e->safe = 0;
             break;
         }

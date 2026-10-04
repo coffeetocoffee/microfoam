@@ -136,14 +136,10 @@ typedef struct mcf_engine_io {
     mcf_emit_fn      emit;
     mcf_base_read_fn base_read;
     /* Called before a refill when the buffer holds consumed bytes. The session
-     * compacts the buffer and advances its record of which compressed-stream
-     * position raw[0] corresponds to; the engine cannot do that itself because
-     * only the session knows the compressed stream's position. May be NULL, in
-     * which case the engine compacts in place. */
+     * compacts the buffer and advances its record of which decompressed-stream
+     * position raw[0] corresponds to. May be NULL, in which case the engine
+     * compacts in place. */
     void          (*shift)(void *ctx, uint32_t consumed);
-    /* Points at the session's record of which compressed-stream position
-     * raw[0] corresponds to. The engine needs it to name a resume point. */
-    uint32_t       *raw_origin;
     void            *ctx;
     uint32_t        *site; /*!< Set to a MCF_SITE_* value on failure. */
 } mcf_engine_io_t;
@@ -194,17 +190,17 @@ typedef struct mcf_engine {
     uint32_t stop_at;
 
 
-    /* Entry state of the triple currently being applied. Written the moment a
-     * control triple is consumed, so a session that checkpoints here can resume
-     * by re-reading that triple from its start - at most one triple of
-     * redundant work, and never a resume into the middle of a diff.
-     *
-     * `safe` means the engine is between triples, so the compressed position of
-     * the next control header is meaningful to the caller. */
-    uint32_t tri_payload;   /*!< Compressed offset of this triple's header. */
-    int32_t  tri_newpos;    /*!< Output position at the triple's start.     */
-    int32_t  tri_oldpos;    /*!< Base cursor, before the triple's seek.    */
+    /* `safe` means the engine is between triples: no triple is partially
+     * consumed, so a session may capture a resumable point here. */
     int      safe;          /*!< Between triples, position is resumable.    */
+
+    /* The seek of the most recently consumed control triple, still to be
+     * applied. BSDIFF43 applies the seek *after* the triple's diff and extra
+     * bytes, so it positions the base cursor for the next triple rather than
+     * its own. Holding it here, instead of folding it into oldpos when the
+     * header is read, is what makes that ordering expressible - and it is part
+     * of the resumable state, because a checkpoint can fall between the two. */
+    int32_t  pending_seek;
 
     int32_t  newpos;
     int32_t  oldpos;
@@ -232,12 +228,15 @@ void mcf_engine_resume(mcf_engine_t *e, uint32_t skip);
  * read is the one the resume point recorded. `phase`, `diff_remaining` and
  * `extra_remaining` restore the exact mid-triple state captured by the
  * session, so the resume point may be anywhere - not only between triples.
+ * `seek` is the current triple's seek when it has not yet been applied (a
+ * mid-triple or between-triples point), or zero once it has.
  * Output coordinates remain absolute, so the engine stops at the original
  * newsize, and emission begins at `out_off` because the dropped prefix never
  * advances newpos. */
 void mcf_engine_resume_at(mcf_engine_t *e, uint32_t out_off, int32_t old_off,
                           uint32_t in_skip, mcf_engine_phase_t phase,
-                          int32_t diff_remaining, int32_t extra_remaining);
+                          int32_t diff_remaining, int32_t extra_remaining,
+                          int32_t seek);
 
 /* ------------------------------------------------------------------------ *
  * Codec registry. Write-once during initialisation, read-only thereafter.
@@ -282,6 +281,7 @@ typedef struct mcf_resume_point {
     uint32_t phase;           /*!< mcf_engine_phase_t at the capture point.  */
     int32_t  diff_remaining;  /*!< Diff bytes still to apply.                */
     int32_t  extra_remaining; /*!< Literal bytes still to copy.              */
+    int32_t  seek;            /*!< Current triple's seek, if not yet applied.*/
 } mcf_resume_point_t;
 
 
@@ -289,7 +289,6 @@ typedef struct mcf_resume_point {
  * refill adapter needs no allocation of its own. */
 typedef struct mcf_sess_io {
     uint32_t payload_pos; /*!< Bytes consumed from the codec stream. */
-    uint32_t raw_origin;  /*!< Compressed position that engine.raw[0] maps to. */
     int32_t  stream_end;  /*!< The codec reported end of stream.     */
     uint32_t feed_base;   /*!< Decompressed offset of feed byte 0.       */
     uint32_t produced_total; /*!< Decompressed bytes produced, absolute. */

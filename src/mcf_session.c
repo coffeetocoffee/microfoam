@@ -155,10 +155,6 @@ static int32_t mcf_sess_refill(void *ctx, uint8_t *buf, uint32_t cap, uint32_t *
         return 0;
     }
 
-    /* The bytes about to be produced correspond to this compressed offset.
-     * The engine needs it to name a resume point. */
-    s->io.raw_origin = s->io.payload_pos;
-
     r = s->ops->decode(s->codec, buf, cap, &produced, src, avail, &consumed);
     if (r != MCF_OK) {
         s->site = MCF_SITE_CODEC_DECODE;
@@ -266,8 +262,8 @@ static int32_t mcf_sess_emit(void *ctx, const uint8_t *p, uint32_t len)
     return 0;
 }
 
-/* Compact the engine's input buffer and keep raw_origin consistent with it.
- * Called by the engine through mcf_engine_io_t.shift. */
+/* Compact the engine's input buffer and keep the decompressed-offset cursor
+ * consistent with it. Called by the engine through mcf_engine_io_t.shift. */
 static void mcf_sess_shift(void *ctx, uint32_t consumed)
 {
     mcf_session_t *s = (mcf_session_t *)ctx;
@@ -278,7 +274,6 @@ static void mcf_sess_shift(void *ctx, uint32_t consumed)
     }
     s->engine.raw_len = rem;
     s->engine.raw_pos  = 0u;
-    s->io.raw_origin += consumed;
     s->io.raw_D      += consumed;
 }
 
@@ -733,7 +728,6 @@ mcf_status_t mcf_session_begin(mcf_session_t *s)
     s->eio.emit      = mcf_sess_emit;
     s->eio.base_read = mcf_sess_base_read;
     s->eio.shift     = mcf_sess_shift;
-    s->eio.raw_origin = &s->io.raw_origin;
     s->eio.ctx       = (void *)s;
     s->eio.site      = &s->site;
 
@@ -763,7 +757,6 @@ mcf_status_t mcf_session_begin(mcf_session_t *s)
          * every path, and costs at most one erase block of redundant work. */
         uint32_t rewind = (s->resume_newpos / s->flash_block) * s->flash_block;
         s->io.payload_pos  = 0u;
-        s->io.raw_origin   = 0u;
         s->io.raw_D        = 0u;
         s->io.produced_total = 0u;
         s->io.stream_end   = 0;
@@ -784,13 +777,12 @@ mcf_status_t mcf_session_begin(mcf_session_t *s)
         s->io.raw_D          = pt->feed_D;
         s->io.produced_total = pt->feed_D;
         s->io.payload_pos    = 0u;
-        s->io.raw_origin     = 0u;
         s->io.stream_end     = 0;
         s->dst_written       = pt->out_off;
         s->dst_erased_upto   = s->cfg->dst_addr + pt->out_off;
         mcf_engine_resume_at(&s->engine, pt->out_off, pt->old_off,
                              pt->d_off - pt->feed_D, (mcf_engine_phase_t)pt->phase,
-                             pt->diff_remaining, pt->extra_remaining);
+                             pt->diff_remaining, pt->extra_remaining, pt->seek);
         s->resume_positioned = 0;
     }
     return MCF_OK;
@@ -850,6 +842,7 @@ int mcf_session_snapshot(const mcf_session_t *s, mcf_resume_point_t *pt)
     pt->phase           = (uint32_t)s->engine.phase;
     pt->diff_remaining  = s->engine.diff_remaining;
     pt->extra_remaining = s->engine.extra_remaining;
+    pt->seek            = s->engine.pending_seek;
     return 1;
 }
 

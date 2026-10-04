@@ -9,13 +9,13 @@ few kilobytes of RAM, with no heap and no RTOS.
 [![CI](https://github.com/coffeetocoffee/microfoam/actions/workflows/ci.yml/badge.svg)](https://github.com/coffeetocoffee/microfoam/actions/workflows/ci.yml)
 [![Licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
 ![Language: C99](https://img.shields.io/badge/language-C99-blue.svg)
-[![RAM: 880 B, no heap](https://img.shields.io/badge/RAM-880%20B%20%C2%B7%20no%20heap-success.svg)](#verified-footprint)
+[![RAM: 868 B, no heap](https://img.shields.io/badge/RAM-868%20B%20%C2%B7%20no%20heap-success.svg)](#verified-footprint)
 
 | At a glance | |
 |---|---|
 | **Delta size** | typically **1–15%** of the image |
-| **RAM** | **880 B** total (LZ4, 256 B block) — 352 B session + 528 B workspace, no heap; ~1.4 KB at a 512 B block |
-| **ROM** | **12,386 B** on Cortex-M0; all tables `const`, enforced by a CI size gate |
+| **RAM** | **868 B** total (LZ4, 256 B block) — 340 B session + 528 B workspace, no heap; ~1.4 KB at a 512 B block |
+| **ROM** | **12,358 B** on Cortex-M0; all tables `const`, enforced by a CI size gate |
 | **Dependencies** | `<stdint.h>`, `<stddef.h>`, `<string.h>`. No heap. No RTOS. |
 | **Language** | C99, MISRA-friendly, `-Wall -Wextra -Wconversion` clean |
 | **Verified targets** | arm-none-eabi-gcc: Cortex-M0, M3, M4, M7 — the four cores in the CI matrix. M0+ and M33 are untested portability targets. |
@@ -428,15 +428,15 @@ claimed for them.
 
 | Target | Code (`.text`) | Static RAM |
 |---|---|---|
-| Cortex-M0 | **12,386 B** | 0 B |
-| Cortex-M3 | 11,444 B | 0 B |
-| Cortex-M4 | 11,450 B | 0 B |
-| Cortex-M7 | 11,446 B | 0 B |
+| Cortex-M0 | **12,358 B** | 0 B |
+| Cortex-M3 | 11,420 B | 0 B |
+| Cortex-M4 | 11,426 B | 0 B |
+| Cortex-M7 | 11,422 B | 0 B |
 
-The baseline ceilings sit about 2% above these figures, because the CI runner's
+The baseline ceilings sit a few percent above these figures, because the CI runner's
 `gcc-arm-none-eabi` minor version differs from the one used here and moves code size by tens of
-bytes (CI reports 12,482 B for Cortex-M0). A real regression is an order of magnitude larger,
-so the allowance costs no sensitivity.
+bytes (CI's Cortex-M0 figure runs about 100 B above the one here). A real regression is an
+order of magnitude larger, so the allowance costs no sensitivity.
 
 All tables are `const`, so nothing lands in RAM — a property the size gate enforces per target
 rather than asserts in prose. The variation between cores is the architectures' different
@@ -450,7 +450,7 @@ MFP1 can drop that one source from `MCF_SOURCES`.
 
 | Item | Bytes | Notes |
 |---|---|---|
-| `mcf_session_t` | **352** | Caller-owned; can be `static`, so not heap |
+| `mcf_session_t` | **340** | Caller-owned; can be `static`, so not heap |
 | `mcf_journal_t` | **20** | Resume record; lives in NVM, not RAM |
 | Workspace, `block_size = 256` | **528** | 2 × 256 processing + 16 LZ4 state |
 | Workspace, `block_size = 512` | 1,040 | |
@@ -463,7 +463,7 @@ The workspace figures are what `mcf_ctx_size()` returns for that configuration; 
 asserts the query against the allocator's actual request rather than trusting the table.
 
 > [!TIP]
-> **Constrained profile: 352 + 528 = 880 bytes of RAM**, plus a small stack for the integrity
+> **Constrained profile: 340 + 528 = 868 bytes of RAM**, plus a small stack for the integrity
 > chunks. No heap needed, on a part with 8 KB.
 
 The LZMA codec, when enabled, adds its probability table (16 KB at the default `lc=3`) plus a
@@ -601,7 +601,7 @@ the standard test configurations pass in both Debug and Release.
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `microfoam_tests` | 101 checks | round trip, the `mcf_ctx_size()` cost query, **resume journal**, and fault injection at every stage |
+| `microfoam_tests` | 105 checks | round trip, the `mcf_ctx_size()` cost query, **resume journal**, the BSDIFF43 seek ordering, and fault injection at every stage |
 | `custom_codec_test` | 46 checks | caller-owned codec descriptors, per-session table isolation, and failure propagation at init, decode, and finish |
 | `hal_concurrency_test` | 27 checks | two sessions driven interleaved through the whole decode, each proving its own image |
 | `v2_format_test` | 45 checks | MFP2 header/TLV/record-framing rules, plus a ~4,200-case deterministic mutation/property loop |
