@@ -40,7 +40,7 @@ from typing import Optional
 # MCF_VERSION_* by the release procedure; selftest.py asserts the format
 # constants that actually affect patch bytes, which is the part that can
 # corrupt something if it drifts.
-TOOL_VERSION = "1.9.4"
+TOOL_VERSION = "1.9.5"
 
 MAGIC = 0x3150464D          # 'MFP1'
 HDR_LEN = 120
