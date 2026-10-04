@@ -337,33 +337,80 @@ static int run_resume(const uint8_t *patch, uint32_t patch_len,
     }
     return 1;
 }
+
+/* A small image whose new_size is below the record framing. The device's decode
+ * window is min(record_size, new_size) - clamped to the image - so a producer
+ * that framed at the full record size emits a patch no configuration can apply:
+ * the delta is always larger than new_size (every BSDIFF43 control triple adds
+ * to it), so its single block overruns the clamped window at every
+ * cfg.block_size. The host producer caps its framing at the image; this case
+ * applies that patch through the real session.
+ *
+ * It is falsifiable, not merely passing: the fixture is produced by the host
+ * tool, so deleting the producer's cap regenerates it with a full-size frame
+ * and this case fails with MCF_E_CORRUPT (site 17), which is exactly how the
+ * gap was found. The large fixture cannot see it - there new_size is far above
+ * the framing - so this case is the only device-side coverage of the regime. */
+static int small_image_case(const uint8_t *patch, uint32_t patch_len,
+                            const uint8_t *old, uint32_t old_len,
+                            const uint8_t *expected, uint32_t new_len,
+                            crypto_ctx_t *crypto)
+{
+    mcf_status_t st;
+    memset(flash, 0xFF, sizeof(flash));
+    mutations = 0;
+    st = run_patch(patch, patch_len, old, old_len, crypto);
+    if (st != MCF_OK) {
+        fprintf(stderr, "small-image patch rejected: status %d\n", (int)st);
+        return 0;
+    }
+    if (memcmp(flash, expected, new_len) != 0) {
+        fprintf(stderr, "small-image reconstruction is not byte-exact\n");
+        return 0;
+    }
+    if (mutations == 0u) {
+        fprintf(stderr, "small-image apply programmed no flash\n");
+        return 0;
+    }
+    printf("  ok  small-image patch applies byte-exact (%u-byte image)\n",
+           (unsigned)new_len);
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     uint32_t patch_len, old_len, new_len, pub_len, key_len = 0;
     uint32_t reord_len = 0, wrong_nonce_len = 0, off;
     uint32_t tag_tamper_len = 0, ct_tamper_len = 0, bad_key_id_len = 0;
     uint32_t dupe_len = 0;
+    uint32_t small_len = 0, small_old_len = 0, small_new_len = 0;
     uint8_t *patch, *old, *expected, *pub, *key;
     uint8_t *reord = NULL, *wrong_nonce = NULL, *tag_tamper = NULL;
     uint8_t *ct_tamper = NULL, *bad_key_id = NULL, *dupe = NULL;
+    uint8_t *small = NULL, *small_old = NULL, *small_new = NULL;
     mcf_v2_view_t view; crypto_ctx_t crypto;
     int ok = 1;
-    /* argv: patch old new pub key [reordered wrong_nonce tag_tamper ct_tamper
-     * bad_key_id duplicated] — the trailing six are the re-signed variants
-     * built by tests/mfp2_fixtures.py. */
-    if (argc < 6 || argc > 12 || sodium_init() < 0) return 2;
+    /* argv: patch old new pub key reordered wrong_nonce tag_tamper ct_tamper
+     * bad_key_id duplicated small_patch small_old small_new — the six variants
+     * come from tests/mfp2_fixtures.py, the trailing three from a second host
+     * make run over a small image. All fifteen are required: a case that can
+     * quietly disappear is not a case. */
+    if (argc != 15 || sodium_init() < 0) return 2;
     patch = read_file(argv[1], &patch_len); old = read_file(argv[2], &old_len);
     expected = read_file(argv[3], &new_len); pub = read_file(argv[4], &pub_len);
     key = read_file(argv[5], &key_len);
     if (!patch || !old || !expected || !pub || !key || pub_len != sizeof(crypto.public_key)) return 2;
     /* The symmetric key is supplied separately from the Ed25519 public key. */
     if (key_len != sizeof(crypto.symmetric_key)) return 2;
-    if (argc > 6 && !(reord = read_file(argv[6], &reord_len))) return 2;
-    if (argc > 7 && !(wrong_nonce = read_file(argv[7], &wrong_nonce_len))) return 2;
-    if (argc > 8 && !(tag_tamper = read_file(argv[8], &tag_tamper_len))) return 2;
-    if (argc > 9 && !(ct_tamper = read_file(argv[9], &ct_tamper_len))) return 2;
-    if (argc > 10 && !(bad_key_id = read_file(argv[10], &bad_key_id_len))) return 2;
-    if (argc > 11 && !(dupe = read_file(argv[11], &dupe_len))) return 2;
+    if (!(reord = read_file(argv[6], &reord_len))) return 2;
+    if (!(wrong_nonce = read_file(argv[7], &wrong_nonce_len))) return 2;
+    if (!(tag_tamper = read_file(argv[8], &tag_tamper_len))) return 2;
+    if (!(ct_tamper = read_file(argv[9], &ct_tamper_len))) return 2;
+    if (!(bad_key_id = read_file(argv[10], &bad_key_id_len))) return 2;
+    if (!(dupe = read_file(argv[11], &dupe_len))) return 2;
+    if (!(small = read_file(argv[12], &small_len))) return 2;
+    if (!(small_old = read_file(argv[13], &small_old_len))) return 2;
+    if (!(small_new = read_file(argv[14], &small_new_len))) return 2;
     memcpy(crypto.public_key, pub, sizeof(crypto.public_key));
     memcpy(crypto.symmetric_key, key, sizeof(crypto.symmetric_key));
     /* Fixture key id is 00112233445566778899aabbccddeeff. */
@@ -677,9 +724,17 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Small image: the producer must cap its framing at the image, because the
+     * device's window is min(record_size, new_size). The large fixture above
+     * never enters this regime, so without this case the cap is untested on the
+     * device. */
+    ok &= small_image_case(small, small_len, small_old, small_old_len,
+                           small_new, small_new_len, &crypto);
+
     (void)view;
     free(reord); free(wrong_nonce); free(tag_tamper); free(ct_tamper);
     free(bad_key_id); free(dupe);
+    free(small); free(small_old); free(small_new);
     free(patch); free(old); free(expected); free(pub); free(key);
     if (!ok) { fprintf(stderr, "MFP2 session integration test FAILED\n"); return 1; }
     puts("MFP2 session success, Ed25519ph/AEAD tamper tests passed"); return 0;

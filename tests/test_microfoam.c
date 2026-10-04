@@ -1068,6 +1068,48 @@ static void test_seek_positions_next_triple(void)
           "the reconstructed image is byte-exact");
 }
 
+static void test_small_image_framing(void)
+{
+    static mcf_session_storage_t storage;
+    mcf_session_t *s = (mcf_session_t *)(void *)&storage;
+    mcf_config_t cfg;
+    uint32_t patch_len;
+    uint32_t i;
+
+    banner("small images: framing is capped at new_size");
+    device_reset();
+    for (i = 0u; i < 512u; i++) {
+        g_old[i] = (uint8_t)((i * 7u + 3u) & 0xFFu);
+    }
+    for (i = 0u; i < 256u; i++) {
+        g_new[i] = (uint8_t)((i * 5u + 11u) & 0xFFu);
+    }
+
+    /* The requested/default framing is 1024, but new_size is 256. The builder
+     * must cap its actual frame to 256 (and declare log2=8), because the device
+     * clamps its decode window to min(cfg.block_size, new_size). Without that
+     * cap no device configuration can apply the patch: the delta's control
+     * triples make its decompressed stream larger than the 256-byte window. */
+    patch_len = mcf_fx_build_patch(g_patch, (uint32_t)sizeof(g_patch),
+                                   g_old, 512u, g_new, 256u,
+                                   PRODUCT, VER_NEW, VER_OLD, WS_LZ4, 0u, 10u);
+    CHECK(patch_len > 0u, "a small-image patch builds");
+    CHECK_EQ(g_patch[MCF_OFF_BLOCK_LOG2], 8u,
+             "small-image framing declares the capped exponent");
+
+    cfg = make_cfg(patch_len);
+    cfg.old = g_old;
+    cfg.old_size = 512u;
+    cfg.block_size = 1024u;
+    cfg.ram_budget = 4096u;
+    CHECK_EQ(mcf_session_open(s, &cfg), MCF_OK, "small-image session opens");
+    CHECK_EQ(mcf_session_run(s), MCF_OK,
+             "small-image patch applies with the default device window");
+    CHECK(memcmp(g_flash, g_new, 256u) == 0,
+          "small-image reconstruction is byte-exact");
+    mcf_session_close(s);
+}
+
 /* ====================================================================== */
 
 int main(void)
@@ -1108,6 +1150,7 @@ int main(void)
 
     /* Last: it rewrites the shared old/new fixtures with a delta of its own. */
     test_seek_positions_next_triple();
+    test_small_image_framing();
 
     printf("\n%d checks, %d failures\n", g_checks, g_fail);
     return (g_fail == 0) ? EXIT_SUCCESS : EXIT_FAILURE;

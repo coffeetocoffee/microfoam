@@ -69,10 +69,36 @@ execute_process(
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "MFP2 variant fixture generation failed:\n${out}\n${err}")
 endif()
+# A second fixture over a small image (512-byte base, 128-byte target). The
+# device's decode window is min(record_size, new_size), clamped to the image, so
+# the producer must cap its framing at the image; a patch framed at the full
+# record size is rejected at site 17 on the device. The C test's small-image
+# case consumes this, and deleting the producer's cap regenerates the fixture
+# uncapped so that case fails - the check is falsifiable, not merely green.
+execute_process(
+    COMMAND "${PY}" -c "from pathlib import Path; d=Path(r'${WORK}'); d.joinpath('small_old.bin').write_bytes(bytes((i*7+3)&0xFF for i in range(512))); d.joinpath('small_new.bin').write_bytes(bytes((i*5+11)&0xFF for i in range(128)))"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+if(NOT rc EQUAL 0)
+    message(FATAL_ERROR "small-image fixture generation failed:\n${out}\n${err}")
+endif()
+execute_process(
+    COMMAND "${PY}" "${TOOL}" make --v2
+            --old "${WORK}/small_old.bin" --new "${WORK}/small_new.bin" --out "${WORK}/small.mfp2"
+            --product 0x1234 --version 0x00020000 --old-version 0x00010000
+            --signing-key "${WORK}/signing.key" --key "${WORK}/symmetric.key"
+            --key-id 00112233445566778899aabbccddeeff
+            --nonce-prefix 102132435465768798a9bacbdcedfe0f
+            --nonce-prefix-ack-reuse
+            --record-log2 8
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+if(NOT rc EQUAL 0)
+    message(FATAL_ERROR "small-image MFP2 fixture generation failed:\n${out}\n${err}")
+endif()
 execute_process(COMMAND "${MCF}" "${WORK}/valid.mfp2" "${OLD}" "${NEW}" "${WORK}/public.key" "${WORK}/symmetric.key"
                 "${WORK}/reordered.mfp2" "${WORK}/wrong_nonce.mfp2"
                 "${WORK}/tag_tamper.mfp2" "${WORK}/ct_tamper.mfp2" "${WORK}/bad_key_id.mfp2"
                 "${WORK}/duplicated.mfp2"
+                "${WORK}/small.mfp2" "${WORK}/small_old.bin" "${WORK}/small_new.bin"
     RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "MFP2 host-to-session integration failed:\n${out}\n${err}")

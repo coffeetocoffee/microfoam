@@ -516,6 +516,94 @@ def test_raw() -> None:
           "a flipped raw payload byte is detected by the CRC")
 
 
+def test_small_image_framing() -> None:
+    """Producer framing must remain applicable when the image is smaller than
+    the normal 1 KiB window.
+
+    The device clamps its decode window to new_size. Before the producer cap was
+    added, a default 1024-byte frame around a 512-byte image created a patch no
+    device configuration could apply; a block expanded past the clamped window
+    and failed site 17. MFP2 has the same inner LZ4 window, so pin both paths.
+
+    The MFP2 half models the device window explicitly. A verifier that decodes
+    with an unbounded buffer accepts the uncapped patch too, so asserting only
+    "it round-trips" would pass with the producer cap deleted - the assertion
+    has to apply the patch the way the device would, at window
+    min(record_size, new_size), or it proves nothing.
+    """
+    print("small-image LZ4 framing stays within the device window")
+    old = bytes((i * 7 + 3) & 0xFF for i in range(512))
+    new = bytes((i * 5 + 11) & 0xFF for i in range(512))
+
+    patch = M.Patch(old, new, product_id=0x1234, fw_version=2, old_version=1,
+                    block_log2=10, codec=M.CODEC_LZ4).build()
+    h = M.parse_header(patch)
+    check(h.block_log2 == 9, "MFP1 lowers framing exponent for a 512-byte image")
+    payload = patch[h.hdr_len:h.hdr_len + h.payload_size]
+    # Model the device: its window is the configured block size clamped to the
+    # image, so decode at min(1024, new_size) rather than an unbounded buffer.
+    try:
+        delta = M.lz4_decompress(payload[M.LZ4_PROPS_LEN:], min(1 << 10, len(new)))
+        check(M.bspatch(old, delta, h.new_size) == new,
+              "MFP1 small-image framing reconstructs byte-exact")
+    except ValueError as exc:
+        check(False, f"MFP1 small-image framing reconstructs byte-exact: {exc}")
+
+    # The window has to apply to a literal run, not only to a match: a block can
+    # be all literals and still overflow. The device rejects both (mcf_lz4_block
+    # checks `(oend - op) < lit` before copying), so a host decoder that only
+    # bounds matches is more permissive than the device - which is exactly why
+    # the small-image case above read as passing while the device refused it.
+    over = False
+    try:
+        M.lz4_decode_block(M.lz4_literal_block(bytes(64)), 32)
+    except ValueError:
+        over = True
+    check(over, "a literal-only block over the window is rejected")
+
+    try:
+        from nacl.signing import SigningKey
+    except Exception as exc:
+        print(f"  SKIP  PyNaCl unavailable: {exc}")
+        return
+    seed = bytes(range(32)); key = bytes(range(32, 64))
+    pub = bytes(SigningKey(seed).verify_key)
+    tiny = bytes((i * 5 + 11) & 0xFF for i in range(128))
+    rlog2 = 8
+    v2 = M.V2Patch(old[:128], tiny, product_id=0x1234, fw_version=2,
+                   old_version=1, private_key=seed, key=key,
+                   key_id=bytes(range(16)), record_log2=rlog2).build()
+    # The device's inner window is the record size clamped to the image.
+    window = min(1 << rlog2, len(tiny))
+    try:
+        got = M.verify_v2(v2, pub, key=key, old=old[:128], window=window)
+        check(got == tiny,
+              "MFP2 small-image framing applies at the device window")
+    except (SystemExit, ValueError) as exc:
+        check(False, f"MFP2 small-image framing applies at the device window: {exc}")
+
+    # The default window must be the device's, not an unbounded buffer. The CLI
+    # (`microfoam apply`) and the fixture tools call verify_v2 without a window,
+    # so a default that accepted anything would let the host bless a patch the
+    # device refuses - the divergence the explicit-window check above exists to
+    # remove. Simulate the uncapped producer by making the framer ignore the
+    # block size it is handed, then require the default to reject the result.
+    orig_frame = M.lz4_frame
+    M.lz4_frame = lambda data, block_size: orig_frame(data, max(1, (1 << rlog2) - 64))
+    try:
+        uncapped = M.V2Patch(old[:128], tiny, product_id=0x1234, fw_version=2,
+                             old_version=1, private_key=seed, key=key,
+                             key_id=bytes(range(16)), record_log2=rlog2).build()
+    finally:
+        M.lz4_frame = orig_frame
+    over = False
+    try:
+        M.verify_v2(uncapped, pub, key=key, old=old[:128])
+    except (SystemExit, ValueError):
+        over = True
+    check(over, "verify_v2 defaults to the device window, not an unbounded buffer")
+
+
 def test_v2() -> None:
     print("MFP2 signed/encrypted LZ4 make / verify / apply")
     try:
@@ -777,6 +865,7 @@ def main() -> int:
     test_codec_ratio()
     test_lzma_policy_guard()
     test_signing()
+    test_small_image_framing()
     test_v2()
     test_v2_kat()
     test_v2_nonce_guard()

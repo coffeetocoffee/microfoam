@@ -420,6 +420,32 @@ def lz4_frame(data: bytes, block_size: int) -> bytes:
     return bytes(out)
 
 
+def image_framing(block_log2: int, new_size: int) -> tuple[int, int]:
+    """Framing size, and the exponent to declare, for an image of `new_size`.
+
+    The device's decode window is `min(cfg.block_size, new_size)` - capped at
+    the image - so a producer that frames larger than the image emits a patch no
+    device configuration can apply: the window can never exceed `new_size`,
+    while the delta is never smaller than it (the control triples add to it), so
+    such a block overruns the window on every apply, at every `cfg.block_size`.
+    The producer therefore frames within the image.
+
+    Returns `(frame_size, declared_log2)`: the frame size is capped at the image,
+    and the declared exponent is the one actually used, floored at 8 (the
+    format's minimum). An image below 256 bytes cannot express its framing
+    exactly; the declared value then overstates it, which only makes the
+    device's budget pre-check conservative. The header field drives nothing but
+    that pre-check - the decode window comes from the caller's configuration -
+    so declaring the real figure is what keeps the two honest.
+    """
+    if new_size <= 0:
+        return (1 << block_log2, block_log2)
+    eff = block_log2
+    while eff > 8 and (1 << eff) > new_size:
+        eff -= 1
+    return (min(1 << block_log2, new_size), eff)
+
+
 # --------------------------------------------------------------------------
 # LZMA. The encoder is Python's stdlib lzma module (liblzma), which is the
 # reference implementation for the format the device decoder consumes. The
@@ -701,8 +727,13 @@ class V2Patch:
         if len(nonce_prefix) != 16 or not any(nonce_prefix): raise SystemExit("MFP2 nonce prefix must be 16 nonzero bytes")
         delta = bsdiff(self.old, self.new)
         # Leave room for the LZ4 block header/literal extension so the complete
-        # framed block (the record plaintext) always fits the wire limit.
-        framed = lz4_frame(delta, max(1, (1 << self.record_log2) - 64))
+        # framed block (the record plaintext) always fits the wire limit - and
+        # cap the frame at the image, because the device's decode window is the
+        # smaller of the record size and new_size. Framing larger than a small
+        # image yields a patch no configuration can apply; see image_framing().
+        rec_frame = max(1, (1 << self.record_log2) - 64)
+        frame_size = min(rec_frame, len(self.new)) if self.new else rec_frame
+        framed = lz4_frame(delta, max(1, frame_size))
         records = _v2_records(framed, 1 << self.record_log2)
         hlen = V2_HEADER_MIN + len(self.tlvs)
         # Declared from the real layout, not a placeholder: the device uses the
@@ -735,7 +766,7 @@ class V2Patch:
         return bytes(hdr) + bytes(area)
 
 
-def verify_v2(blob: bytes, public_key: bytes, key: Optional[bytes] = None, apply: bool = False, old: bytes = b"") -> bytes:
+def verify_v2(blob: bytes, public_key: bytes, key: Optional[bytes] = None, apply: bool = False, old: bytes = b"", window: Optional[int] = None) -> bytes:
     h = parse_v2_header(blob)
     if h.payload_size != len(blob) - h.header_len: raise SystemExit("MFP2 payload length mismatch")
     area = blob[h.header_len:]
@@ -753,7 +784,16 @@ def verify_v2(blob: bytes, public_key: bytes, key: Optional[bytes] = None, apply
         try: stream += _v2_open(key, h.nonce_prefix[:V2_NONCE_PREFIX_SIZE] + struct.pack("<Q", i), enc, aad)
         except Exception as exc: raise SystemExit("MFP2 record authentication failed") from exc
     if pos != len(area): raise SystemExit("MFP2 trailing record bytes")
-    delta = lz4_decompress(bytes(stream)); result = bspatch(old, delta, h.new_size)
+    # Decode at the window the device will use, so this verifier answers "can
+    # that device apply this patch" and not merely "is it self-consistent". The
+    # inner session is handed block_size = 1 << record_log2 and clamps it to the
+    # image (mcf_v2_session.c), so the device window is min(record_size,
+    # new_size) whatever the integrator configured. A patch framed larger than a
+    # small image verifies under an unbounded buffer and is rejected on the
+    # device at site 17 - the divergence this bound removes.
+    if window is None:
+        window = min(1 << h.record_log2, h.new_size)
+    delta = lz4_decompress(bytes(stream), window); result = bspatch(old, delta, h.new_size)
     if crc32(result) != h.new_crc32: raise SystemExit("MFP2 reconstructed image CRC mismatch")
     return result
 
@@ -778,6 +818,10 @@ class Patch:
 
     def build(self) -> bytes:
         delta = bsdiff(self.old, self.new)
+        # Frame within the image, and declare the exponent actually used. The
+        # device's window is capped at new_size, so framing larger than the
+        # image produces a patch no configuration can apply. See image_framing().
+        frame_size, declared_log2 = image_framing(self.block_log2, len(self.new))
 
         if self.codec == CODEC_RAW:
             # The delta verbatim: no framing, no properties, no per-block cost.
@@ -804,7 +848,7 @@ class Patch:
             # The device decodes into a block_size buffer and rejects anything
             # that would overflow, so the framing must respect the same field
             # the device reads out of the header.
-            framed = lz4_frame(delta, 1 << self.block_log2)
+            framed = lz4_frame(delta, frame_size)
             stream = struct.pack("<I", len(delta)) + framed
             payload_size = len(stream)
             codec_id = CODEC_LZ4
@@ -832,7 +876,7 @@ class Patch:
             workspace_req,
             self.old_version,
             codec_id,
-            self.block_log2,
+            declared_log2,
             0,
         )
 
@@ -932,6 +976,14 @@ def lz4_decode_block(src: bytes, dst_cap: int) -> bytes:
             raise ValueError("literal overrun")
         out += src[ip:ip + lit]
         ip += lit
+        # The window applies to the literal run too, and a block may end right
+        # after its literals. Checking the cap only after a match - as this did -
+        # accepts a literal-only block that overflows the window, which is
+        # exactly the shape a producer emits for a small image. The device
+        # checks both (mcf_lz4_block: `(oend - op) < lit`), so this has to as
+        # well or the host verifier approves patches the device rejects.
+        if len(out) > dst_cap:
+            raise ValueError("output overflow")
         if ip == n:
             break
         if ip + 2 > n:
@@ -959,7 +1011,14 @@ def lz4_decode_block(src: bytes, dst_cap: int) -> bytes:
     return bytes(out)
 
 
-def lz4_decompress(stream: bytes) -> bytes:
+def lz4_decompress(stream: bytes, max_block: int = 1 << 24) -> bytes:
+    """Decode a framed stream, refusing any block that expands past `max_block`.
+
+    `max_block` defaults to a window far larger than any real patch so that a
+    caller which only wants the bytes gets them; a caller modelling a device
+    passes that device's actual window, because the device decodes into a
+    buffer of exactly that size and rejects a block that would overflow.
+    """
     out = bytearray()
     pos = 0
     while pos + 4 <= len(stream):
@@ -967,7 +1026,7 @@ def lz4_decompress(stream: bytes) -> bytes:
         pos += 4
         if blen == 0:
             return bytes(out)
-        out += lz4_decode_block(stream[pos:pos + blen], 1 << 24)
+        out += lz4_decode_block(stream[pos:pos + blen], max_block)
         pos += blen
     raise ValueError("stream ended without an end marker")
 

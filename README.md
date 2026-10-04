@@ -601,11 +601,11 @@ the standard test configurations pass in both Debug and Release.
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `microfoam_tests` | 105 checks | round trip, the `mcf_ctx_size()` cost query, **resume journal**, the BSDIFF43 seek ordering, and fault injection at every stage |
+| `microfoam_tests` | 110 checks | round trip, the `mcf_ctx_size()` cost query, **resume journal**, the BSDIFF43 seek ordering, small-image framing, and fault injection at every stage |
 | `custom_codec_test` | 46 checks | caller-owned codec descriptors, per-session table isolation, and failure propagation at init, decode, and finish |
 | `hal_concurrency_test` | 27 checks | two sessions driven interleaved through the whole decode, each proving its own image |
 | `v2_format_test` | 45 checks | MFP2 header/TLV/record-framing rules, plus a ~4,200-case deterministic mutation/property loop |
-| `host_selftest` | 114 checks | 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, the measured LZ4-vs-LZMA payload ratio, LZMA props + policy fields, format layout agreement, signing, MFP2 KAT, the fixed-nonce-prefix guard, MFP2 host hygiene (no cached nonce prefix, device-matching TLV walk, computed `workspace_req`), and host-side tamper cases each pinned to the layer that rejects them |
+| `host_selftest` | 119 checks | 500 randomised delta round-trips, LZ4/raw/LZMA round-trips, the measured LZ4-vs-LZMA payload ratio, LZMA props + policy fields, format layout agreement, signing, small-image framing decoded at the device's window, MFP2 KAT, the fixed-nonce-prefix guard, MFP2 host hygiene (no cached nonce prefix, device-matching TLV walk, computed `workspace_req`), and host-side tamper cases each pinned to the layer that rejects them |
 | `sodium_rfc_test` | 17 checks | published vectors for both constructions MFP2 depends on — RFC 8032 §7.1 Ed25519 and §7.3 Ed25519ph (with the three-span streaming verify and its domain separation from plain Ed25519) and the draft-irtf-cfrg-xchacha-03 §A.1 XChaCha20-Poly1305 AEAD vector — plus adapter tamper cases *(with `MCF_ENABLE_SODIUM=ON`)* |
 | `lzma_conformance_test` | 335 checks | 67 liblzma vectors at five block sizes each *(with `MCF_ENABLE_LZMA=ON`)* |
 | `lzma_policy_test` | 15 checks | dictionary and `lc+lp` policy rejections with their exact status and stage *(with `MCF_ENABLE_LZMA=ON`)* |
@@ -725,27 +725,42 @@ The LZ4 payload is a sequence of length-prefixed blocks, and the device decodes 
 single fixed buffer — the processing window, `cfg.block_size` (clamped to `new_size`). A block
 that would expand past that window is rejected as `MCF_E_CORRUPT` while decoding (site 17).
 
-The producer must therefore chunk its framing so no block exceeds the window. The host tool
-does this at `1 << block_size_log2` — the `--block-log2` flag, default 10 (1024 bytes) — and
-writes that field into the header. The rule is **window ≥ framing**: a larger device window is
-harmless, a smaller one rejects the patch.
+The producer must therefore chunk its framing so no block exceeds the device's actual window.
+There are **two** conditions:
+
+1. The framing must be no larger than the image (`framing <= new_size`), because the device
+   clamps `cfg.block_size` to `new_size`; if framing is larger than the image, no device
+   configuration can apply the patch. The host tool caps its framing at the image and writes the
+   exponent it actually uses. This matters for small images: a 512-byte image must not use the
+   default 1024-byte framing; the host automatically selects 512-byte framing instead.
+2. The device window must be at least the framing (`cfg.block_size >= framing`). A larger device
+   window is harmless; a smaller one rejects the patch.
+
+The host's `--block-log2` flag still selects the preferred maximum (default 10 / 1024 bytes),
+but the producer lowers it when `new_size` is smaller. The header's `block_size_log2` records
+that effective framing exponent; the device uses the caller's `cfg.block_size` for the actual
+decode buffer and uses the header field only for the pre-allocation budget check.
 
 A mismatch can trip either of two gates, depending on the values:
 
 | Situation | Result |
 |---|---|
-| `cfg.block_size` smaller than the host's framing | `MCF_E_CORRUPT` at site 17 (decode) |
-| `1 << block_size_log2` too large for `ram_budget` | `MCF_E_DICT_TOO_LARGE` at site 14 (workspace), **before allocating anything** |
+| framing larger than `new_size` (a malformed/legacy producer) or `cfg.block_size` smaller than framing | `MCF_E_CORRUPT` at site 17 (decode) |
+| declared `1 << block_size_log2` too large for `ram_budget` | `MCF_E_DICT_TOO_LARGE` at site 14 (workspace), **before allocating anything** |
 
-The second is header validation, which refuses a patch whose declared window cannot fit the
-caller's budget (`1 << block_size_log2 > (ram_budget - workspace_req) / 2`).
+The budget check is header validation: `1 << block_size_log2 > (ram_budget - workspace_req) / 2`.
+The host's image cap prevents the first case for newly produced patches, and the C fixture
+follows the same rule.
 
-This is not a hint. The host tool must chunk its framing to a window the device will actually
-use, and the C test fixture must do the same. Getting it wrong produces a patch that is
-byte-perfect when decoded by a reference implementation and rejected by the device — which is
-exactly how this was found. The format is documented in `docs/format-v2.md`, the self-test
-asserts no block exceeds the window, and `check_quickstart.py` applies the README's own
-documented configuration to prove the pairing holds.
+**MFP2 has the same inner window.** Its record size plays the role of the framing, and the
+inner session's window is `min(record_size, new_size)`, so the producer caps the framed record
+at the image there too. `verify_v2` decodes at that same window rather than an unbounded buffer:
+a verifier more permissive than the device reports success for a patch the device refuses, which
+is precisely how this was missed. Coverage is on the device path — `tests/test_microfoam.c`
+builds a small image for MFP1 and `tests/mfp2_boundary_test.c` applies a host-produced small-image
+MFP2 patch through the real session, each regenerated by the host tool so removing the producer
+cap fails the test. The format is documented in `docs/format-v2.md`, and `check_quickstart.py`
+applies the README's own documented configuration to prove the pairing holds.
 
 <details>
 <summary><b>Defects found during bring-up</b> (recorded because they are the kind that survive to the field)</summary>

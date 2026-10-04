@@ -156,11 +156,24 @@ static inline uint32_t mcf_fx_build_patch_from_delta(uint8_t *out, uint32_t out_
 {
     static uint8_t stream[MCF_FX_SCRATCH];
     uint32_t block_size = 1u << block_log2;
+    uint32_t declared_log2 = block_log2;
     uint32_t sp = 0;
     uint32_t off;
 
     if (out == NULL || delta == NULL || block_log2 == 0u || block_log2 > 20u) {
         return 0u;
+    }
+
+    /* The device's decode window is min(cfg.block_size, new_size), so a frame
+     * larger than the image can never be decoded by any configuration: the
+     * window is capped at new_size while the delta is never smaller than it
+     * (each output byte consumes a delta byte, and the control triples add to
+     * it). Frame within the image, as the host tool does. */
+    if (new_len != 0u && block_size > new_len) {
+        block_size = new_len;
+        while (declared_log2 > 8u && (1u << declared_log2) > new_len) {
+            declared_log2--;
+        }
     }
 
     /* LZ4 framing: one literal block per block_size slice, then the end marker. */
@@ -210,7 +223,7 @@ static inline uint32_t mcf_fx_build_patch_from_delta(uint8_t *out, uint32_t out_
     mcf_fx_wr32(&out[MCF_OFF_WORKSPACE_REQ], workspace_req);
     mcf_fx_wr32(&out[MCF_OFF_OLD_VERSION], old_ver);
     out[MCF_OFF_CODEC_ID]   = (uint8_t)MCF_CODEC_LZ4;
-    out[MCF_OFF_BLOCK_LOG2] = (uint8_t)block_log2;
+    out[MCF_OFF_BLOCK_LOG2] = (uint8_t)declared_log2;
     mcf_fx_wr16(&out[MCF_OFF_RESERVED], 0u);
 
     mcf_fx_wr32(&out[MCF_HDR_MIN_SIZE], delta_len);       /* codec properties */
