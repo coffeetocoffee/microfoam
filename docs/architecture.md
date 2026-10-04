@@ -67,7 +67,7 @@ is a **forward-looking specification**, not a description of existing code.
 > **Reading this against the shipped library.** The architecture was written as a design
 > ahead of the implementation, so parts of it are aspirational. Where a statement is
 > present-tense about the code — a named symbol, a struct layout, a CI gate, a guarantee —
-> it has been reconciled with the `1.9.2` tree and now matches it. Where a statement is a
+> it has been reconciled with the `1.9.3` tree and now matches it. Where a statement is a
 > plan (the §21 roadmap, and the HIL and static-analysis tiers marked as such in §16.4 and
 > §18.1), it is not yet implemented and says so. Treat any unmarked future-tense item as a
 > target, not a claim.
