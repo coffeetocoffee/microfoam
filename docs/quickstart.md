@@ -6,9 +6,29 @@ complete worked example — a full HAL for a generic Cortex-M part — and how t
 
 Everything platform-specific lives in the HAL. The library itself is portable C99 with no
 scheduler, no timers, no locks and no RTOS headers, so the same code runs on a bare-metal
-superloop or an RTOS. The callback contract is in
-[the README](../README.md#the-hal-contract); its rationale is in
+superloop or an RTOS. The callback contract is below; its rationale is in
 [architecture §12](architecture.md#12-flash-write-contract).
+
+## The callback contract
+
+Six callbacks are required on every path, plus `alloc`/`free` unless you supply a static
+workspace. Everything else is optional. That is the entire platform dependency.
+
+| Callback | Required | The rule, in one line |
+|---|---|---|
+| `flash_erase(ctx, addr, len)` | yes | `addr` aligned to, `len` a whole multiple of, `flash_block_size()`. `MCF_OK` or a negative status. |
+| `flash_write(ctx, addr, p, len)` | yes | Never crosses an erase-block boundary; may be called repeatedly for one logical block. `MCF_OK` or negative — a byte count is not a valid return. |
+| `flash_read(ctx, addr, p, len)` | yes | Returns exactly `len`, or a negative status. Required on every path, write-only regions included: the finish CRC reads the destination back out of flash. The base-image `old_read` callback follows the same exact-count rule. |
+| `flash_block_size(ctx)` | yes | Erase granularity in bytes, a power of two. |
+| `get_product_id`, `get_fw_version` | yes | Your provisioned identity and running version. |
+| `alloc` / `free` | unless static | `NULL` from `alloc` is reported as `MCF_E_NOMEM`. |
+| `flash_is_readonly` | no | Non-zero skips the per-write compare. It does **not** remove `flash_read`: the finish CRC still reads back. |
+| `verify` | no | Signature verifier. `NULL` means none available, so signed patches are rejected. |
+| `log` | no | Diagnostics. |
+
+Two return-value rules catch integrators out, so they are worth stating twice: a `flash_write`
+that programs correctly and returns a byte count is a **failure**, not a success; and a
+`flash_read` that returns short is a failure even when it read something useful.
 
 ## A complete HAL
 
@@ -193,6 +213,8 @@ the Ed25519ph verifier. The design is in
 
 ## Where to go next
 
-- [README](../README.md) — overview, the HAL contract table, codecs, proof.
+- [README](../README.md) — overview, footprint, codecs, and where the evidence lives.
+- [verification.md](verification.md) — the suites, the fault-injection catalogue, and the
+  measured size tables.
 - [architecture.md](architecture.md) — the full design and the rationale for each commitment.
 - [format-v2.md](format-v2.md) — the on-flash container format, validation order, LZ4 window.

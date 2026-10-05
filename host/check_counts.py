@@ -3,24 +3,24 @@
 """
 Microfoam - check that documented test counts match what the suites report.
 
-The README's status table states how many checks each suite runs. Those numbers
-are prose, and nothing in the build has ever checked them against reality, so
-they drift: the LZ4-ratio commit added three checks to host_selftest and left the
-README saying "101" while the suite reported 104. A stated number the suite does
+docs/verification.md states how many checks each suite runs. Those numbers are
+prose, and nothing in the build has ever checked them against reality, so they
+drift: the LZ4-ratio commit added three checks to host_selftest and left the
+docs saying "101" while the suite reported 104. A stated number the suite does
 not hold is the same defect class the project already fixed twice in the code
 (the mcf_ctx_size() false claim, the LZ4 ratio wrong in sign), and the same fix
 applies: make the number a thing that is checked, not a thing that is remembered.
 
 This script runs each suite it can find in a build tree, reads the count the
-suite reports for itself, and compares it against the README. A suite that is
+suite reports for itself, and compares it against the document. A suite that is
 not built in this configuration, or that skipped work because an optional
-dependency is absent, is reported as skipped rather than failed - the counts in
-the README assume every optional dependency is present.
+dependency is absent, is reported as skipped rather than failed - the documented
+counts assume every optional dependency is present.
 
 Usage:
     python host/check_counts.py --build build
 
-Exit status is 0 when every suite that ran agrees with the README, and 1 on any
+Exit status is 0 when every suite that ran agrees with the document, and 1 on any
 mismatch.
 """
 
@@ -33,7 +33,7 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-README = os.path.join(REPO, "README.md")
+DEFAULT_DOC = os.path.join(REPO, "docs", "verification.md")
 SELFTEST = os.path.join(REPO, "host", "selftest.py")
 
 # suite name -> (kind, count pattern). `kind` decides how the suite is invoked:
@@ -53,14 +53,14 @@ SUITES = {
 }
 
 
-def documented_counts() -> dict[str, int]:
-    """Counts the README states, e.g. "| `host_selftest` | 114 checks: ...".
+def documented_counts(doc: str) -> dict[str, int]:
+    """Counts the document states, e.g. "| `host_selftest` | 114 checks: ...".
 
     Only rows that name a count are collected; descriptive rows in the other
     tables do not match and are ignored.
     """
     out: dict[str, int] = {}
-    with open(README, "r", encoding="utf-8") as f:
+    with open(doc, "r", encoding="utf-8") as f:
         for line in f:
             m = re.match(r"\s*\|\s*`([a-z0-9_]+)`\s*\|\s*(\d+)\s+checks\b", line)
             if m:
@@ -98,6 +98,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--build", required=True,
                     help="build directory holding the compiled test binaries")
+    ap.add_argument("--doc", default=DEFAULT_DOC,
+                    help="document stating the check counts "
+                         "(default: docs/verification.md)")
     args = ap.parse_args()
 
     build = os.path.abspath(args.build)
@@ -105,9 +108,14 @@ def main() -> int:
         print(f"error: build directory not found: {build}", file=sys.stderr)
         return 2
 
-    documented = documented_counts()
+    doc = os.path.abspath(args.doc)
+    if not os.path.isfile(doc):
+        print(f"error: document not found: {doc}", file=sys.stderr)
+        return 2
+
+    documented = documented_counts(doc)
     if not documented:
-        print("error: no documented check counts found in the README",
+        print(f"error: no documented check counts found in {doc}",
               file=sys.stderr)
         return 2
 
@@ -159,9 +167,9 @@ def main() -> int:
         got = int(m.group(1))
         checked += 1
         if got == want:
-            print(f"  ok {suite}: {got} checks (matches the README)")
+            print(f"  ok {suite}: {got} checks (matches the docs)")
         else:
-            print(f"  XX {suite}: README says {want}, the suite reports {got}")
+            print(f"  XX {suite}: docs say {want}, the suite reports {got}")
             mismatches += 1
 
     print(f"\n{checked} suite(s) checked, {skipped} skipped, "
