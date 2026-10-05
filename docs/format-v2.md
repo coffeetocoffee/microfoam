@@ -144,11 +144,24 @@ is part of the stream's meaning — a match reaching further back cannot be reso
 the host tool compresses with a dictionary the device can hold, and the declared size is
 what the device allocates. The exact `content_size` is the truncation guard:
 `mcf_lzma_finish()` reports `MCF_E_TRUNCATED` unless the decoder produced exactly that many
-bytes. The device workspace is `2 * (1984 + (768 << (lc + lp)))` (probability table) plus
-the SDK-rounded dictionary plus 256 bytes of decoder state; the host tool writes that figure
-into `workspace_req`, and a build without `-DMCF_ENABLE_LZMA=ON` rejects the patch as
-`MCF_E_UNSUPPORTED` before any allocation. See the README's Codecs section for the host
-tool's `--codec lzma` usage and `docs/lzma-history.md` for why the decoder is the SDK.
+bytes. A build without `-DMCF_ENABLE_LZMA=ON` rejects the patch as `MCF_E_UNSUPPORTED` before
+any allocation.
+
+The device workspace, as reported by `mcf_lzma_workspace()` and written into `workspace_req` by
+the host tool:
+
+```
+2 * (1984 + (768 << (lc + lp)))    probability table   (16,256 B at lc=3, lp=0)
++ dicBufSize                       dictionary, SDK-rounded (default 16,384 B)
++ 256 B                            decoder state
+```
+
+At the host tool's defaults (`lc=3`, `lp=0`, `pb=2`, 16 KB dictionary) that is **32,896 bytes**
+of workspace — a Cortex-M4/M7-class figure, not a Cortex-M0 one. Use `--dict-size 4096` to
+trade ratio for RAM (≈20 KB total). The host tool computes the same figure, so the device
+refuses an over-budget LZMA patch during header validation, before allocating anything. See the
+README's Codecs section for the host tool's `--codec lzma` usage and `docs/lzma-history.md` for
+why the decoder is the SDK.
 
 ## LZ4 stream
 

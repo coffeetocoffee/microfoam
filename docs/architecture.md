@@ -43,7 +43,7 @@ in an integrator's existing tree, and consistent with the word's own length.
 10. [Memory Model and Budget](#10-memory-model-and-budget)
 11. [Concurrency and Real-Time Model](#11-concurrency-and-real-time-model)
 12. [Flash Write Contract](#12-flash-write-contract)
-13. [On-Flash Format Specification (v2)](#13-on-flash-format-specification-v2)
+13. [On-Flash Format Specification](#13-on-flash-format-specification)
 14. [Security Model](#14-security-model)
 15. [Power-Fail Resilience and Recovery](#15-power-fail-resilience-and-recovery)
 16. [Build System and Toolchain Support](#16-build-system-and-toolchain-support)
@@ -932,7 +932,9 @@ documented rather than hidden.
 
 ---
 
-## 13. On-Flash Format Specification (v1 shipped; v2 design proposal in `docs/format-v2-design.md`)
+## 13. On-Flash Format Specification
+
+The v1 container is shipped; the v2 design proposal is in `docs/format-v2-design.md`.
 
 ### 13.1 Requirements
 
@@ -1354,6 +1356,51 @@ four defects that cause silent field failures. This suite is the enforcement mec
 | G-03 cross-product | Correct patch, wrong `product_id` → expect `MCF_E_PRODUCT` |
 | W-01 implicit dict | Regenerate patches at many dict sizes; every rejection is an error, never a fault |
 
+### 18.4 The fault-injection catalog
+
+`microfoam_tests` forces each of the following and asserts a *specific* status code — never
+`MCF_OK`:
+
+- erase failure, program failure, and *program succeeding but storing the wrong bytes* (caught
+  by the read-back compare) — all `MCF_E_FLASH`;
+- truncated payloads and flipped payload bits — rejected, never `MCF_OK`;
+- wrong product (`MCF_E_PRODUCT`), downgrade attempts (`MCF_E_ROLLBACK`), base-version mismatch
+  and base-image CRC mismatch (`MCF_E_MISMATCH`);
+- over-budget workspace (`MCF_E_DICT_TOO_LARGE`), an unknown codec marker (`MCF_E_FORMAT`), a
+  future format major version (`MCF_E_UNSUPPORTED`), and a wrong new-image CRC
+  (`MCF_E_CORRUPT`);
+- abort through the progress callback (`MCF_E_ABORTED`), and a signed patch presented to a
+  build with no verifier (`MCF_E_SIGNATURE`).
+
+Property 2 of §18.2 — "the return value is not `MCF_OK`" — is what makes each of these a
+regression test for the silent-failure findings rather than a smoke test.
+
+### 18.5 The MFP2 parser property contract
+
+The MFP2 structural parser (`mcf_v2_parse`) is the one surface that consumes
+attacker-controlled bytes, so it is held to a property contract rather than a list of cases:
+for *every* input it must return a defined status, must not modify its input buffer, and on
+success must produce a view that an independent re-derivation of the frozen framing
+reproduces, with iteration yielding exactly the declared records.
+
+`v2_format_test` samples that space deterministically; `v2_fuzz_smoke` asserts the same oracle
+on every platform; and with `MCF_BUILD_FUZZER=ON` a Clang/libFuzzer target searches it with
+coverage feedback under ASan/UBSan. The oracle is proven non-vacuous — it rejects a view with
+an inflated record count, a shifted header length, or a mutated framing byte — so a passing
+run is evidence rather than a tautology.
+
+### 18.6 Falsifiable claims
+
+Two headline claims are held to a form that can fail:
+
+- **The zero-flash-mutation claim.** The successful MFP2 apply asserts the flash-mutation
+  counter moved, so a counter that could never increment fails the suite instead of quietly
+  making every tamper assertion vacuous.
+- **The cross test.** A library verified only against its own encoder proves nothing about the
+  format. `cross_test` applies a patch produced by the independently written Python host tool
+  with the C library and requires byte-exact output; two independent implementations agreeing
+  on a real 35 KB firmware pair is evidence.
+
 ---
 
 ## 19. Versioning and Compatibility
@@ -1377,6 +1424,19 @@ without a library major bump.
 No API is removed within a major version. Deprecated entry points remain for one major
 cycle with a compile-time warning. `mcf_session_run()` provides the migration path from
 single-call to step-wise usage.
+
+Two compatibility helpers are deprecated today, and neither is on any session path —
+`mcf_session_open()` repeats the same HAL checks:
+
+- **`mcf_hal_set_static_workspace()`** — the former global workspace entry point. It returns
+  `MCF_E_UNSUPPORTED`; a heapless build sets `workspace` / `workspace_size` on each session's
+  `mcf_config_t` instead (§10.5).
+- **`mcf_hal_register()`** — compatibility-only and stores nothing; every session must set
+  `cfg.hal`.
+
+Both carry `MCF_DEPRECATED`, so a migrating caller gets a compiler diagnostic rather than
+silence; define `MCF_NO_DEPRECATED` to suppress it. Both are removal candidates for the next
+major version.
 
 ---
 
