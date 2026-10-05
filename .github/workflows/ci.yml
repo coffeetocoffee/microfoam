@@ -179,7 +179,7 @@ jobs:
 
     # Hoisted so the three compile groups below cannot drift apart.
     env:
-      TARGET: "--target=arm-none-eabi -mcpu=${{ matrix.cortex }} -mthumb -std=c99 -Os"
+      TARGET: "--target=arm-none-eabi -mcpu=${{ matrix.cortex }} -mthumb -std=c99 -Os -isystem /usr/include/newlib"
       SECTIONS: "-ffunction-sections -fdata-sections"
       STRICT: >-
         -Wall -Wextra -Wshadow -Wundef -Wcast-qual -Wpointer-arith
@@ -190,10 +190,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install clang
+      - name: Install clang and the bare-metal C headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang
+          sudo apt-get install -y clang gcc-arm-none-eabi libnewlib-dev libnewlib-arm-none-eabi
 
       # Why this job exists. docs/architecture.md section 14.3 selects Ed25519 for
       # signature verification, and the README lists armclang as an unverified
