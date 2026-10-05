@@ -1090,6 +1090,12 @@ verify path is retained. This is the same class of correction the footprint tabl
 v1.9.0, where an estimate written before the MFP2 path existed understated ROM by more than
 half.
 
+**Portability coverage.** The shipping size gate is measured with ARM GCC. CI also compiles the
+same core and opt-in source set with upstream clang targeting `arm-none-eabi` on Cortex-M0/M3/M4/M7
+using the full strict warning set. This is a free, redistributable proxy for armclang's LLVM/Clang
+frontend and diagnostics, not proof of Arm's licensed backend, driver or runtime. Licensed
+armclang and IAR builds remain pending; IAR has no comparable free proxy.
+
 ### 14.4 Explicitly out of scope
 
 Encryption (§4.2 N4) and transport authentication. Both are layered above this library.

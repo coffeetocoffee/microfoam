@@ -169,6 +169,101 @@ jobs:
           arm-none-eabi-size build-arm/*.o >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
+  cross-clang:
+    name: cross-compile clang arm (${{ matrix.cortex }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cortex: [cortex-m0, cortex-m3, cortex-m4, cortex-m7]
+
+    # Hoisted so the three compile groups below cannot drift apart.
+    env:
+      TARGET: "--target=arm-none-eabi -mcpu=${{ matrix.cortex }} -mthumb -std=c99 -Os"
+      SECTIONS: "-ffunction-sections -fdata-sections"
+      STRICT: >-
+        -Wall -Wextra -Wshadow -Wundef -Wcast-qual -Wpointer-arith
+        -Wstrict-prototypes -Wmissing-prototypes -Wconversion -Wsign-conversion
+        -Wdouble-promotion -Werror=return-type -Wformat=2 -Wvla -Wwrite-strings
+        -Wcast-function-type -Werror
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      # Why this job exists. docs/architecture.md section 14.3 selects Ed25519 for
+      # signature verification, and the README lists armclang as an unverified
+      # portability target pending a licensed toolchain. armclang IS clang - LLVM
+      # with Arm's backend patches - so upstream clang targeting arm-none-eabi is
+      # a free, redistributable, CI-able proxy for a large part of that
+      # assurance: the same frontend, the same diagnostic engine, the same
+      # code-generator family. It is not armclang and does not claim to be; the
+      # licensed build stays pending, and the README says so.
+      #
+      # Two things worth knowing about this gate:
+      #
+      #   - The strict set is the same one the GCC job uses. Clang accepts every
+      #     flag in it, so the two jobs check the same contract with two
+      #     independent diagnostic engines. That is the point: -Wconversion and
+      #     -Wsign-conversion in particular have different implementations in the
+      #     two frontends, and this source set is clean under both.
+      #   - Clang makes an unknown -W flag FATAL under -Werror (verified: it
+      #     reports -Wunknown-warning-option as an error). So if a future clang
+      #     drops a flag, this job fails loudly instead of silently checking
+      #     less. That is the behaviour a gate should have.
+      #
+      # No size comparison here, deliberately. The size gate stays on the
+      # shipping toolchain (ARM GCC) where the committed ceilings mean something;
+      # a clang ceiling would be a baseline for a compiler nobody ships. The
+      # measured GCC-vs-clang code-size difference is recorded in the README
+      # instead, where it informs the armclang decision rather than gating CI.
+      - name: Compile every source for ${{ matrix.cortex }} with clang
+        run: |
+          set -e
+          mkdir -p build-clang-arm
+          # Core sources: everything except the opt-in modules, which need extra
+          # include paths and are compiled below. The libsodium adapter is
+          # excluded for the same reason as in the GCC job - it needs a host
+          # crypto library that a bare-metal target does not have.
+          for f in src/*.c; do
+            case "$f" in
+              src/mcf_sodium.c|src/mcf_lzma.c|src/mcf_ed25519.c|src/mcf_sha512.c|src/mcf_tn_glue.c) continue ;;
+            esac
+            echo "  $f"
+            clang $TARGET $SECTIONS $STRICT -Iinclude -Isrc \
+              -c "$f" -o "build-clang-arm/$(basename "$f" .c).o"
+          done
+
+          # The built-in Ed25519 verifier. mcf_tn_glue.c includes the vendored
+          # TweetNaCl, so warnings are off for that one file; our two keep the
+          # full set.
+          echo "  src/mcf_ed25519.c (opt-in)"
+          clang $TARGET $SECTIONS $STRICT -Iinclude -Isrc -Ithird_party/tweetnacl \
+            -DMCF_ENABLE_ED25519=1 -c src/mcf_ed25519.c \
+            -o build-clang-arm/mcf_ed25519.o
+          echo "  src/mcf_sha512.c (opt-in)"
+          clang $TARGET $SECTIONS $STRICT -Iinclude -Isrc -Ithird_party/tweetnacl \
+            -DMCF_ENABLE_ED25519=1 -c src/mcf_sha512.c \
+            -o build-clang-arm/mcf_sha512.o
+          echo "  src/mcf_tn_glue.c (opt-in, vendored include)"
+          clang $TARGET $SECTIONS -w -Iinclude -Isrc -Ithird_party/tweetnacl \
+            -DMCF_ENABLE_ED25519=1 -c src/mcf_tn_glue.c \
+            -o build-clang-arm/mcf_tn_glue.o
+
+          # The LZMA codec: our adapter strict, the vendored SDK relaxed.
+          echo "  src/mcf_lzma.c (opt-in)"
+          clang $TARGET $SECTIONS $STRICT -Iinclude -Isrc -Ithird_party/lzma-sdk \
+            -DMCF_ENABLE_LZMA=1 -c src/mcf_lzma.c -o build-clang-arm/mcf_lzma.o
+          echo "  third_party/lzma-sdk/LzmaDec.c (vendored)"
+          clang $TARGET $SECTIONS -w -Ithird_party/lzma-sdk \
+            -c third_party/lzma-sdk/LzmaDec.c -o build-clang-arm/lzma_sdk_LzmaDec.o
+
+          echo "clang cross-compile clean for ${{ matrix.cortex }}"
+
   python:
     name: host tool self-test
     runs-on: ubuntu-latest

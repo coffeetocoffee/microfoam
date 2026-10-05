@@ -18,7 +18,7 @@ few kilobytes of RAM, with no heap and no RTOS.
 | **ROM** | **12,358 B** on Cortex-M0; all tables `const`, enforced by a CI size gate |
 | **Dependencies** | `<stdint.h>`, `<stddef.h>`, `<string.h>`. No heap. No RTOS. |
 | **Language** | C99, MISRA-friendly, `-Wall -Wextra -Wconversion` clean |
-| **Verified targets** | arm-none-eabi-gcc: Cortex-M0, M3, M4, M7 — the four cores in the CI matrix. M0+ and M33 are untested portability targets. |
+| **Verified targets** | arm-none-eabi-gcc (shipping size gate): Cortex-M0, M3, M4, M7; upstream clang `--target=arm-none-eabi` (portability proxy): same four cores, full strict warning set. Licensed armclang and IAR builds remain unverified. |
 | **Licence** | MIT |
 | **Status** | `1.9.5` — see [what works and what does not](#status) |
 
@@ -503,7 +503,10 @@ All four configurations compile with zero warnings. These figures are checked in
 `cmake/size_gate.cmake`, which fails if `.text` grows past the ceiling in
 `cmake/size_baseline.txt` or if any static RAM appears at all. The four cores below are the
 ones the CI matrix builds; M0+ and M33 are untested portability targets and no figure is
-claimed for them.
+claimed for them. Separately, a CI job compiles the same core and opt-in source set with upstream
+clang `--target=arm-none-eabi` on these four cores, under the same full strict warning set. This is
+a free, redistributable **armclang frontend/diagnostic proxy**, not proof of Arm's licensed
+backend, driver or runtime; licensed armclang and IAR builds remain unverified.
 
 | Target | Code (`.text`) | Static RAM |
 |---|---|---|
@@ -597,6 +600,7 @@ cmake -DCORE=cortex-m0 -DCC="$(which arm-none-eabi-gcc)" -DSRC="$PWD" \
 |---|---|---|
 | `MCF_ENABLE_LZMA` | `OFF` | Build the LZMA codec (vendored LZMA SDK) |
 | `MCF_ENABLE_SODIUM` | `OFF` | Build libsodium adapters and MFP2 host-to-session integration tests |
+| `MCF_ENABLE_ED25519` | `OFF` | Build the built-in Ed25519/Ed25519ph verifier (vendored TweetNaCl; no external crypto or heap) |
 | `MCF_BUILD_TESTS` | `ON` | Build the host test suite |
 | `MCF_BUILD_FUZZER` | `OFF` | Build the coverage-guided `v2_parse_fuzzer` with ASan/UBSan (requires Clang) |
 | `MCF_WERROR` | `ON` | Warnings are errors |
@@ -783,11 +787,15 @@ clears the journal.
 
 ### Not yet done
 
-- **armclang and IAR.** The code is written with portability to both in mind (C99, no GNU
-  extensions, no VLAs, no designated-initialiser dependence in the public header, `extern "C"`
-  guards), but neither toolchain is currently verified in CI or locally. The verified embedded
-  compiler path is ARM GCC; armclang/IAR support remains an unverified portability target
-  pending licensed toolchain builds.
+- **armclang and IAR.** Neither licensed toolchain is verified in CI or locally; the environment
+  does not have their commercial licenses. The README's portability table records the coverage
+  we do have: the shipping size gate uses arm-none-eabi-gcc, and a new CI job compiles the same
+  core and opt-in modules with **upstream clang targeting `arm-none-eabi`** on Cortex-M0/M3/M4/M7,
+  using the same full strict warning set. This is a **free, redistributable portability proxy**
+  for armclang (same LLVM/Clang frontend and diagnostic engine), **not armclang itself**; it does
+  not prove Arm's patched backend, driver or runtime. IAR has no comparable free proxy. These
+  items remain here because writing for a compiler and running that compiler are different
+  claims; a commercial library needs the licensed builds before it can say armclang/IAR-verified.
 
 ---
 
