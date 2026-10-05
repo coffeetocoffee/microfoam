@@ -785,18 +785,6 @@ clears the journal.
 
 </details>
 
-### Not yet done
-
-- **armclang and IAR.** Neither licensed toolchain is verified in CI or locally; the environment
-  does not have their commercial licenses. The README's portability table records the coverage
-  we do have: the shipping size gate uses arm-none-eabi-gcc, and a new CI job compiles the same
-  core and opt-in modules with **upstream clang targeting `arm-none-eabi`** on Cortex-M0/M3/M4/M7,
-  using the same full strict warning set. This is a **free, redistributable portability proxy**
-  for armclang (same LLVM/Clang frontend and diagnostic engine), **not armclang itself**; it does
-  not prove Arm's patched backend, driver or runtime. IAR has no comparable free proxy. These
-  items remain here because writing for a compiler and running that compiler are different
-  claims; a commercial library needs the licensed builds before it can say armclang/IAR-verified.
-
 ---
 
 ## Licence
