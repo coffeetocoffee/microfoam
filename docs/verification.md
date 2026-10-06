@@ -35,6 +35,13 @@ Also in the ctest matrix:
 | `documented_counts` | this table against what the suites report |
 | `quickstart_config` | the README's quick-start pair is runnable, not just plausible |
 
+One check is not a ctest because it does not need a built tree: `cmake/deprecation_probe.cmake`
+runs at **configure** time on every platform and toolchain, compiling
+`tests/deprecation_probe.c` twice — once asserting that both `MCF_DEPRECATED` messages reach the
+compiler's output verbatim, and once asserting `MCF_NO_DEPRECATED` removes them. The message is
+the only part of the deprecation contract nothing else can observe, so it is the part that is
+asserted rather than remembered.
+
 > [!IMPORTANT]
 > **The cross test is the one that matters most.** A library verified only against its own
 > encoder proves nothing about the format. Two independently written implementations agreeing

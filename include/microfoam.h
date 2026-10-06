@@ -26,22 +26,31 @@ extern "C" {
  * Deprecation marker
  *
  * Applied to entry points retained only for source compatibility, so a caller
- * migrating away gets a compiler diagnostic rather than silence. This is the
- * one macro in this header; it expands to a compiler attribute, never to
- * control flow, and expands to nothing where no attribute is available.
+ * migrating away gets a compiler diagnostic rather than silence. The argument
+ * is the replacement hint: GCC, Clang, and MSVC print it as part of the
+ * diagnostic, so the message reaches the caller at the moment of the mistake
+ * instead of waiting in a header comment. This is the one macro in this
+ * header; it expands to a compiler attribute, never to control flow, and
+ * expands to nothing - dropping the message - where no attribute is
+ * available.
  *
  * Define MCF_NO_DEPRECATED to suppress the diagnostics, for a downstream tree
  * that is mid-migration.
+ *
+ * The messages are asserted, not assumed: cmake/deprecation_probe.cmake
+ * compiles tests/deprecation_probe.c with the configured compiler at configure
+ * time and fails unless each one appears in the output, and unless
+ * MCF_NO_DEPRECATED removes it again. Nothing else can observe that string.
  * ------------------------------------------------------------------------ */
 
 #if defined(MCF_NO_DEPRECATED)
-#define MCF_DEPRECATED
+#define MCF_DEPRECATED(msg)
 #elif defined(__GNUC__) || defined(__clang__)
-#define MCF_DEPRECATED __attribute__((deprecated))
+#define MCF_DEPRECATED(msg) __attribute__((deprecated(msg)))
 #elif defined(_MSC_VER)
-#define MCF_DEPRECATED __declspec(deprecated)
+#define MCF_DEPRECATED(msg) __declspec(deprecated(msg))
 #else
-#define MCF_DEPRECATED
+#define MCF_DEPRECATED(msg)
 #endif
 
 /* ======================================================================== *
@@ -217,14 +226,14 @@ typedef struct mcf_hal {
  * supplied per session through mcf_config_t.hal and is not stored globally.
  * Validation is the only behaviour it ever performs, and mcf_session_open()
  * repeats the same checks, so a caller that sets cfg.hal can drop this call. */
-MCF_DEPRECATED
+MCF_DEPRECATED("set cfg.hal in mcf_config_t instead (the HAL is per session)")
 mcf_status_t mcf_hal_register(const mcf_hal_t *hal);
 
 /* Deprecated: static workspace is now supplied in each mcf_config_t. This
  * function performs no work and returns MCF_E_UNSUPPORTED; it is retained for
  * source compatibility only, and is a removal candidate for the next major
- * version. Use mcf_config_t.workspace / workspace_size instead. */
-MCF_DEPRECATED
+ * version. */
+MCF_DEPRECATED("set cfg.workspace and cfg.workspace_size in mcf_config_t instead")
 mcf_status_t mcf_hal_set_static_workspace(const mcf_hal_t *hal, void *bytes, uint32_t size);
 
 /* ======================================================================== *

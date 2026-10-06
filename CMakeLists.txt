@@ -158,6 +158,16 @@ if(MCF_SANITIZE)
     message(STATUS "Sanitizers enabled: address,undefined (unrecoverable)")
 endif()
 
+# ------------------------------------------------------------------ deprecation gate
+# The MCF_DEPRECATED messages are the migration path a caller sees at the
+# moment of the mistake, and they are the one part of the deprecation contract
+# nothing else can observe: the header compiles with or without them. This
+# compiles tests/deprecation_probe.c with the configured toolchain, at
+# configure time, and fails unless both messages reach the compiler's output
+# and MCF_NO_DEPRECATED removes them again. It is compile-only, so a bare-metal
+# cross toolchain is checked too. See cmake/deprecation_probe.cmake.
+include(cmake/deprecation_probe.cmake)
+
 if(MCF_ENABLE_SODIUM)
     find_path(SODIUM_INCLUDE_DIR sodium.h)
     find_library(SODIUM_LIBRARY NAMES sodium libsodium)

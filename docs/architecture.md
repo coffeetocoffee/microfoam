@@ -1320,6 +1320,7 @@ device executes attacker-supplied bytes, this is the most serious process gap.
 | **Static analysis** | `-Wall -Wextra -Wconversion -Werror`; a separate sanitizer job builds the host suite under ASan/UBSan | Per commit |
 | **Size** | `mcf_ctx_size()` and ROM size per configuration | Per commit (**B7**) |
 | **Documentation** | The check counts the README states, compared against what the suites report (`host/check_counts.py`) | Per commit |
+| **API contract** | The deprecation messages reach the compiler and `MCF_NO_DEPRECATED` suppresses them (`cmake/deprecation_probe.cmake`) | Per configure |
 | **Fuzzing** | The MFP2 parser under a coverage-guided libFuzzer target (Clang) plus a portable mutation smoke target | Per commit / continuous |
 
 A **hardware-in-the-loop** tier — real flash, a real watchdog, real power cycling on STM32 and
@@ -1435,8 +1436,13 @@ Two compatibility helpers are deprecated today, and neither is on any session pa
   `cfg.hal`.
 
 Both carry `MCF_DEPRECATED`, so a migrating caller gets a compiler diagnostic rather than
-silence; define `MCF_NO_DEPRECATED` to suppress it. Both are removal candidates for the next
-major version.
+silence; define `MCF_NO_DEPRECATED` to suppress it. Each declaration passes a message — the
+replacement to use instead — which GCC, Clang, and MSVC print as part of the diagnostic, so the
+migration path is named at the call site rather than only in this document. The messages are
+checked, not trusted: `cmake/deprecation_probe.cmake` compiles
+`tests/deprecation_probe.c` with the configured toolchain at configure time and fails unless both
+messages appear in the compiler's output and unless `MCF_NO_DEPRECATED` removes them again. Both
+are removal candidates for the next major version.
 
 ---
 
