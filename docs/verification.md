@@ -31,7 +31,7 @@ Also in the ctest matrix:
 |---|---|
 | `v2_fuzz_smoke` | the parser property oracle, portable build |
 | `cross_test`, `cross_test_raw`, `cross_test_lzma` | host-tool patches applied by the C library, byte-exact |
-| `mfp2_host_to_session` | a PyNaCl signed+encrypted patch rejecting 14 tamper variants with zero flash mutations, each pinned to its exact status |
+| `mfp2_host_to_session` | a PyNaCl signed+encrypted patch rejecting 14 tamper variants with zero flash mutations, each pinned to its exact status; resume interrupted at many step counts, resuming byte-exact from every checkpoint (journal advances, no degrade; mid-DIFF captures included; a many-triples patch whose `d_off > new_size` and whose final checkpoint is at `out_off == new_size`) |
 | `documented_counts` | this table against what the suites report |
 | `quickstart_config` | the README's quick-start pair is runnable, not just plausible |
 
@@ -43,7 +43,10 @@ Also in the ctest matrix:
 ## The parser and the faults
 
 The **MFP2 parser** is the one surface that consumes attacker-controlled bytes, so it is held to
-a property contract rather than a list of cases.
+a property contract rather than a list of cases. Coverage-guided fuzzing runs in two places: a
+bounded 90-second run on every push (the `fuzz` job), and a scheduled ten-minute run against a
+corpus cached across runs (the `Long fuzz` workflow), so coverage compounds instead of being
+rediscovered each time.
 
 **Fault injection** covers erase failure, program failure, *program succeeding but storing the
 wrong bytes*, truncated payloads, flipped bits, wrong product, downgrade attempts, base-version

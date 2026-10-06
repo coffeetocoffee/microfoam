@@ -378,7 +378,8 @@ cmake --build build-san && ctest --test-dir build-san --output-on-failure
 
 # Coverage-guided fuzzing of the MFP2 parser (Clang, libFuzzer). Run it directly
 # with a corpus directory rather than through ctest; the CI fuzz job seeds it from
-# real host-produced patches and runs it for a bounded time.
+# real host-produced patches and runs it for a bounded time, and the scheduled
+# "Long fuzz" workflow runs it for ten minutes against a corpus cached across runs.
 cmake -S . -B build-fuzz -DMCF_BUILD_FUZZER=ON -DCMAKE_C_COMPILER=clang
 ```
 

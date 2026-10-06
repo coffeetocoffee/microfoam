@@ -94,11 +94,51 @@ execute_process(
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "small-image MFP2 fixture generation failed:\n${out}\n${err}")
 endif()
+# A many-triples fixture: a 4 KB image whose delta stream is longer than the
+# image (every control triple adds 24 bytes on top of its output), so a
+# legitimate checkpoint carries d_off > new_size, and the final block boundary
+# checkpoint has out_off == new_size. The probe used to reject both. The bytes
+# are generated deterministically from a multiplicative hash so the fixture is
+# reproducible without a random source.
+execute_process(
+    COMMAND "${PY}" -c "from pathlib import Path; d=Path(r'${WORK}'); o=bytes(((i*2654435761)>>13)&0xFF for i in range(8192)); n=bytearray(o[:4096]); [n.__setitem__(i, n[i]^0x5A) for i in range(0,4096,32)]; d.joinpath('dense_old.bin').write_bytes(o); d.joinpath('dense_new.bin').write_bytes(bytes(n))"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+if(NOT rc EQUAL 0)
+    message(FATAL_ERROR "dense-triple fixture generation failed:\n${out}\n${err}")
+endif()
+execute_process(
+    COMMAND "${PY}" "${TOOL}" make --v2
+            --old "${WORK}/dense_old.bin" --new "${WORK}/dense_new.bin" --out "${WORK}/dense.mfp2"
+            --product 0x1234 --version 0x00020000 --old-version 0x00010000
+            --signing-key "${WORK}/signing.key" --key "${WORK}/symmetric.key"
+            --key-id 00112233445566778899aabbccddeeff
+            --nonce-prefix 102132435465768798a9bacbdcedfe0f
+            --nonce-prefix-ack-reuse
+            --record-log2 8
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+if(NOT rc EQUAL 0)
+    message(FATAL_ERROR "dense-triple MFP2 fixture generation failed:\n${out}\n${err}")
+endif()
+# The host tool must also reconstruct the dense image byte-exact, so the C test
+# cannot pass on a patch the producer itself cannot apply.
+execute_process(
+    COMMAND "${PY}" "${TOOL}" apply --old "${WORK}/dense_old.bin" --patch "${WORK}/dense.mfp2"
+            --out "${WORK}/dense_applied.bin" --pub "${WORK}/public.key" --key "${WORK}/symmetric.key"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+if(NOT rc EQUAL 0)
+    message(FATAL_ERROR "dense-triple host apply failed:\n${out}\n${err}")
+endif()
+execute_process(COMMAND "${CMAKE_COMMAND}" -E compare_files "${WORK}/dense_applied.bin" "${WORK}/dense_new.bin"
+    RESULT_VARIABLE rc)
+if(NOT rc EQUAL 0)
+    message(FATAL_ERROR "dense-triple host apply output differs from dense_new.bin")
+endif()
 execute_process(COMMAND "${MCF}" "${WORK}/valid.mfp2" "${OLD}" "${NEW}" "${WORK}/public.key" "${WORK}/symmetric.key"
                 "${WORK}/reordered.mfp2" "${WORK}/wrong_nonce.mfp2"
                 "${WORK}/tag_tamper.mfp2" "${WORK}/ct_tamper.mfp2" "${WORK}/bad_key_id.mfp2"
                 "${WORK}/duplicated.mfp2"
                 "${WORK}/small.mfp2" "${WORK}/small_old.bin" "${WORK}/small_new.bin"
+                "${WORK}/dense.mfp2" "${WORK}/dense_old.bin" "${WORK}/dense_new.bin"
     RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "MFP2 host-to-session integration failed:\n${out}\n${err}")

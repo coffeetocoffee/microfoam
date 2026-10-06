@@ -189,7 +189,6 @@ static uint32_t v2_feed_avail(const mcf_v2_session_t *s)
 static int32_t v2_feed_run(void *ctx, uint32_t pos, const uint8_t **src, uint32_t *avail)
 {
     mcf_v2_session_t *s = (mcf_v2_session_t *)ctx;
-    uint32_t rlog = 1u << s->view.record_log2;
 
     *src = NULL;
     *avail = 0u;
@@ -205,15 +204,20 @@ static int32_t v2_feed_run(void *ctx, uint32_t pos, const uint8_t **src, uint32_
         s->win_base  = pos;
     }
 
-    /* Pull records until at least one complete block is resident, then keep
-     * pulling while there is room and more records to come. */
+    /* Pull records only until one complete block is resident. Deliberately no
+     * read-ahead past that: the checkpoint names the record containing the
+     * engine's position from a small ring of recently decrypted records, and
+     * the engine trails the feed by at most the records a single raw fill
+     * needed. Filling the window instead lets the feed run dozens of records
+     * ahead (the window is 2*2^record_log2 bytes and records can be a few
+     * dozen bytes each), which pushes the engine's record out of the ring:
+     * every checkpoint after the first is then missed and the run continues
+     * unresumable. Measured before the change: the feed ran ten records ahead
+     * on the integration fixture and the journal never advanced past the
+     * first checkpoint. */
     for (;;) {
-        if (v2_feed_avail(s) > 0u) {
-            if (s->cur_record >= s->view.record_count) break;   /* no more records */
-            if (s->win_len + rlog > s->win_cap) break;          /* window nearly full */
-        } else if (s->cur_record >= s->view.record_count) {
-            break;                                              /* nothing left to pull */
-        }
+        if (v2_feed_avail(s) > 0u) break;                 /* one complete block is enough */
+        if (s->cur_record >= s->view.record_count) break; /* nothing left to pull */
         {
             mcf_status_t st = v2_feed_pull_record(s);
             if (st != MCF_OK) return (int32_t)st;
@@ -330,14 +334,24 @@ mcf_status_t mcf_v2_resume_probe(mcf_v2_session_t *s)
         return MCF_E_NOT_FOUND;
     }
     if (j.session_id != s->session_id) return MCF_E_NOT_FOUND;
-    if (j.out_off == 0u || j.out_off >= s->view.new_size) return MCF_E_NOT_FOUND;
+    /* out_off == new_size is a legitimate checkpoint: the engine halts on the
+     * final block boundary with every output byte programmed and only the
+     * verify step left, and a power cut there is exactly the case resume
+     * exists for - accepting it skips the whole replay and runs verify. An
+     * earlier `>=` rejected it, turning that cut into a full re-transfer. */
+    if (j.out_off == 0u || j.out_off > s->view.new_size) return MCF_E_NOT_FOUND;
     if ((j.out_off & (s->flash_block - 1u)) != 0u) return MCF_E_NOT_FOUND;
     if (j.record_index >= s->view.record_count) return MCF_E_NOT_FOUND;
     if (j.phase > (uint32_t)MCF_EP_EXTRA) return MCF_E_NOT_FOUND;
     if (j.record_base_d > j.d_off) return MCF_E_NOT_FOUND;
-    /* The delta stream decodes to exactly new_size bytes (every output byte
-     * consumes one delta byte), so neither offset can exceed it. */
-    if (j.d_off > s->view.new_size) return MCF_E_NOT_FOUND;
+    /* No upper bound is checked on d_off. It counts decompressed DELTA-stream
+     * bytes, and that stream is longer than the image: every BSDIFF control
+     * triple adds 24 header bytes on top of the new_size output bytes, so on a
+     * patch with many triples a legitimate checkpoint's d_off exceeds
+     * new_size. An earlier version of this probe checked d_off <= new_size,
+     * which silently rejected every such checkpoint and made the run continue
+     * unresumable. A d_off that is wrong yet still passes the record CRC fails
+     * the resumed run at decode with MCF_E_TRUNCATED, which is fail-closed. */
 
     /* The prefix on flash must match what the journal claims. This is the
      * check that makes resume a feature rather than a hazard. */
@@ -372,16 +386,23 @@ static void v2_checkpoint(mcf_v2_session_t *s)
     if (mcf_session_snapshot(s->inner, &pt) == 0) return;
     if (pt.out_off != s->next_ckpt_out) return; /* still mid-block */
 
-    /* Name the record whose plaintext contains pt.d_off. The plaintext is not
-     * resident - the feed has moved past it - so the mapping comes from the
-     * ring of recently decrypted records. The engine only consumes bytes the
-     * feed has already produced and trails it by at most one window, so the
-     * containing record is always among the newest entries; if it is not, this
-     * is not a resumable point and the update simply continues unresumable. */
-    for (i = 0u; i < 4u; i++) {
-        if (s->ring[i].index != 0xFFFFFFFFu &&
-            pt.d_off >= s->ring[i].base_d &&
-            pt.d_off < s->ring[i].base_d + s->ring[i].dlen) {
+    /* Name a record to resume from: the newest ring entry whose plaintext
+     * starts strictly below pt.d_off. The plaintext is not resident - the feed
+     * has moved past it - so the mapping comes from the ring of recently
+     * decrypted records.
+     *
+     * Strictly below, not "contains": the engine's next byte can sit exactly on
+     * a record boundary, having consumed every decompressed byte the feed has
+     * produced. That boundary record has not been pulled yet, so it is not in
+     * the ring to name - and if it is the producer's terminal zero-length
+     * record, resuming from it yields no bytes at all and the engine would
+     * report truncation. Naming the record holding the last consumed byte is
+     * always correct instead: the resume drops (d_off - record_base_d)
+     * decompressed bytes before interpreting anything, and it does not care
+     * where record boundaries fall. Requiring containment made every frontier
+     * checkpoint silently unresumable. */
+    for (i = 4u; i-- > 0u; ) {
+        if (s->ring[i].index != 0xFFFFFFFFu && s->ring[i].base_d < pt.d_off) {
             rec_index = s->ring[i].index;
             rec_base  = s->ring[i].base_d;
             found = 1u;

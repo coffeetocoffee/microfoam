@@ -271,18 +271,38 @@ engine's complete position (`mcf_session_snapshot`: next unconsumed
 decompressed byte, output offset, base cursor, phase, the outstanding diff and
 literal counts, and the current triple's seek when it has not yet been applied
 - a mid-triple point included) and writes one `mcf_v2_journal_t`.
-`record_index` and `record_base_d` name the record whose
-plaintext contains that byte and the decoded offset where the record starts.
+`record_index` and `record_base_d` name the record whose plaintext holds the
+last consumed byte and the decoded offset where that record starts.
+
+Two properties of the checkpoint path are load-bearing and easy to break, and
+both were. First, the feed does **not** read ahead: it pulls records only until
+one complete block is resident, because the checkpoint names its record from a
+four-entry ring of recently decrypted records, and filling the whole window
+lets the feed run dozens of records ahead of the engine (a 516-byte window
+holds ~20 records when records are a few dozen bytes) so the engine's record is
+evicted and every checkpoint after the first is silently missed. Second, the
+record is chosen as the newest ring entry starting **strictly below** `d_off`;
+the engine's next byte can sit exactly on a record boundary, and demanding
+containment made every such checkpoint unresumable.
 
 A resume re-authenticates and re-feeds the codec from that record onward only.
 The already-programmed records below it are neither re-fed nor re-written:
 `mcf_session_restore` positions the engine at the recorded point, dropping the
-intra-record prefix before interpreting anything, and `out_off` - always a
+decompressed prefix before interpreting anything, and `out_off` - always a
 multiple of the erase-block size - means the block containing it is treated as
 disposable and re-erased on first use, discarding whatever the interrupted run
 left half-written there. Work repeated: at most one record's plaintext,
 bounded by `2^record_log2` bytes. Work saved: the flash erase and program of
 the entire prefix.
+
+The probe validates shape, not just integrity: `out_off` must be block-aligned
+and at most `new_size` (`out_off == new_size` is the final boundary - every
+output byte programmed, only verify left - and is accepted), and `d_off` is
+deliberately **not** bounded by `new_size`. `d_off` counts decompressed
+delta-stream bytes, and that stream is longer than the image: every BSDIFF
+control triple adds 24 bytes on top of the output it produces, so on a patch
+with many small triples a legitimate checkpoint's `d_off` exceeds `new_size`.
+An upper bound there rejected exactly those checkpoints silently.
 
 **Integrity.** `prefix_crc32` is compared against a fresh read of the
 reconstructed prefix, `session_id` binds the record to this exact patch
@@ -297,6 +317,17 @@ sections 4-6's job.
 update; the session stops checkpointing and sets
 `MCF_V2_SESSION_FLAG_RESUME_DEGRADED` so callers that require resumability can
 see the lost guarantee. A finished update clears the journal.
+
+**Evidence.** `mfp2_host_to_session` interrupts a run at many step counts and
+resumes from every captured checkpoint: the journal must advance across
+checkpoints and the run must not degrade; a checkpoint captured mid-DIFF
+(`diff_remaining > 0`) must resume byte-exact; and a many-triples fixture -
+whose delta stream is longer than the image, so its checkpoints carry
+`d_off > new_size` and its final checkpoint lands at `out_off == new_size` -
+must resume byte-exact from every checkpoint, with the two regimes asserted as
+actually reached. Each of the five defects listed in
+[bring-up-defects.md](bring-up-defects.md) fails at least one of those
+assertions when reintroduced.
 
 **Scope note.** This is record-granular resume for MFP2's structure, not a
 codec-vtable rewind. MFP1's replay-based resume is unchanged; its one real
