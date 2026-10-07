@@ -495,6 +495,58 @@ jobs:
           -max_total_time=90 -max_len=65536 -rss_limit_mb=2048
           -print_final_stats=1
 
+  fuzz-v1:
+    name: coverage-guided MFP1 parser fuzz
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Clang and cryptography
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+          python -m pip install cryptography
+
+      # MCF_BUILD_FUZZ_V1 builds the v1 parser source into the fuzz target with
+      # ASan/UBSan, so a fault inside mcf_v1_parse itself is caught, not merely
+      # one in the harness. Clang supplies the coverage-guided libFuzzer runtime.
+      - name: Configure with sanitizers and the v1 fuzz target
+        run: >
+          cmake -B build-fuzz-v1 -DCMAKE_BUILD_TYPE=Debug
+          -DMCF_BUILD_FUZZ_V1=ON -DCMAKE_C_COMPILER=clang
+
+      - name: Build
+        run: cmake --build build-fuzz-v1 --config Debug
+
+      # Real MFP1 patches seed the corpus, so the fuzzer starts from
+      # a valid container instead of rediscovering the format from bytes.
+      - name: Seed the corpus from host-produced MFP1 patches
+        run: |
+          set -e
+          mkdir -p corpus-v1
+          python host/microfoam.py keygen --private mfp1.key --public mfp1.pub
+          for codec in none lz4 lzma; do
+            python host/microfoam.py make \
+              --old tests/fixtures/old.bin --new tests/fixtures/new.bin \
+              --out "corpus-v1/valid-$codec.mfp" --product 0x1234 \
+              --version 0x00020000 --old-version 0x00010000 \
+              --key mfp1.key --codec "$codec"
+          done
+
+      - name: Smoke-test the v1 parser property oracle
+        run: ./build-fuzz-v1/v1_fuzz_smoke corpus-v1/*.mfp
+
+      - name: Fuzz
+        run: >
+          ./build-fuzz-v1/v1_parse_fuzzer corpus-v1
+          -max_total_time=90 -max_len=65536 -rss_limit_mb=2048
+          -print_final_stats=1
+
   sanitizers:
     name: host suite under ASan and UBSan
     runs-on: ubuntu-latest
