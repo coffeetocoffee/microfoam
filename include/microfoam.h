@@ -315,6 +315,12 @@ typedef struct mcf_codec_ops {
  * Custom descriptors are props-less: the v1 container carries a leading
  * parameter block only for the parameterised built-in ids, so a custom codec
  * always receives props_len == 0 (see the workspace_size() note above). */
+mcf_status_t mcf_codec_validate(const mcf_codec_ops_t *ops);
+
+/* Deprecated: use mcf_codec_validate() instead. The codec descriptor is not
+ * registered globally; validation is the only behaviour this function performs.
+ * Every session must provide its codec table through mcf_config_t.codecs. */
+MCF_DEPRECATED("use mcf_codec_validate() instead (codec validation is per-session via cfg.codecs)")
 mcf_status_t mcf_codec_register(const mcf_codec_ops_t *ops);
 
 /* ======================================================================== *

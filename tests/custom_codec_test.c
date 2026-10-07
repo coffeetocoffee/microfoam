@@ -292,45 +292,45 @@ static void test_descriptor_validation(void)
 {
     mcf_codec_ops_t ops = codec_ops("custom", CUSTOM_ID);
     mcf_codec_ops_t bad = ops;
-    CHECK(mcf_codec_register(&ops) == MCF_OK, "valid descriptor accepted");
+    CHECK(mcf_codec_validate(&ops) == MCF_OK, "valid descriptor accepted");
     bad.decode = NULL;
-    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "missing decode rejected");
+    CHECK(mcf_codec_validate(&bad) == MCF_E_PARAM, "missing decode rejected");
     bad = ops;
     bad.id = MCF_CODEC_AUTO;
-    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "reserved codec id rejected");
-    CHECK(mcf_codec_register(NULL) == MCF_E_PARAM, "null descriptor rejected");
+    CHECK(mcf_codec_validate(&bad) == MCF_E_PARAM, "reserved codec id rejected");
+    CHECK(mcf_codec_validate(NULL) == MCF_E_PARAM, "null descriptor rejected");
 
     /* Every required member is required; a descriptor is a contract, and a
-     * missing callback must be refused at registration rather than discovered
+     * missing callback must be refused at validation rather than discovered
      * as a null call in the middle of an update. */
     bad = ops;
     bad.name = NULL;
-    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "missing name rejected");
+    CHECK(mcf_codec_validate(&bad) == MCF_E_PARAM, "missing name rejected");
     bad = ops;
     bad.workspace_size = NULL;
-    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "missing workspace_size rejected");
+    CHECK(mcf_codec_validate(&bad) == MCF_E_PARAM, "missing workspace_size rejected");
     bad = ops;
     bad.init = NULL;
-    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "missing init rejected");
+    CHECK(mcf_codec_validate(&bad) == MCF_E_PARAM, "missing init rejected");
     bad = ops;
     bad.finish = NULL;
-    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "missing finish rejected");
+    CHECK(mcf_codec_validate(&bad) == MCF_E_PARAM, "missing finish rejected");
     bad = ops;
     bad.destroy = NULL;
-    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "missing destroy rejected");
+    CHECK(mcf_codec_validate(&bad) == MCF_E_PARAM, "missing destroy rejected");
 
     /* The reserved gap between the built-in range and the custom range. Both
      * edges are checked, because an off-by-one here would let a codec claim an
      * id that a future format revision assigns to a built-in. */
     bad = ops;
     bad.id = MCF_CODEC_MAX;
-    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "id at MCF_CODEC_MAX rejected");
+    CHECK(mcf_codec_validate(&bad) == MCF_E_PARAM, "id at MCF_CODEC_MAX rejected");
     bad = ops;
     bad.id = (mcf_codec_id_t)0x40u;
-    CHECK(mcf_codec_register(&bad) == MCF_E_PARAM, "id inside the reserved gap rejected");
+    CHECK(mcf_codec_validate(&bad) == MCF_E_PARAM, "id inside the reserved gap rejected");
     bad = ops;
     bad.id = MCF_CODEC_CUSTOM_MIN;
-    CHECK(mcf_codec_register(&bad) == MCF_OK, "id at MCF_CODEC_CUSTOM_MIN accepted");
+    CHECK(mcf_codec_validate(&bad) == MCF_OK, "id at MCF_CODEC_CUSTOM_MIN accepted");
 }
 
 static void test_failures(void)

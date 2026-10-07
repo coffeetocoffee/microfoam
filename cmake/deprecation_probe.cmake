@@ -52,6 +52,8 @@ set(_mcf_msg_register
     "set cfg.hal in mcf_config_t instead (the HAL is per session)")
 set(_mcf_msg_workspace
     "set cfg.workspace and cfg.workspace_size in mcf_config_t instead")
+set(_mcf_msg_codec_register
+    "use mcf_codec_validate() instead (codec validation is per-session via cfg.codecs)")
 
 # Compile the probe once. Returns the try_compile result and the combined
 # output (which carries the diagnostics) to the caller's scope.
@@ -93,15 +95,18 @@ mcf_deprecation_probe_compile(default "" probe_ok probe_log)
 mcf_deprecation_probe_normalize("${probe_log}" probe_norm)
 mcf_deprecation_probe_normalize("${_mcf_msg_register}" msg_register)
 mcf_deprecation_probe_normalize("${_mcf_msg_workspace}" msg_workspace)
+mcf_deprecation_probe_normalize("${_mcf_msg_codec_register}" msg_codec_register)
 
 string(FIND "${probe_norm}" "${msg_register}" _at_register)
 string(FIND "${probe_norm}" "${msg_workspace}" _at_workspace)
+string(FIND "${probe_norm}" "${msg_codec_register}" _at_codec_register)
 
-if(_at_register EQUAL -1 OR _at_workspace EQUAL -1)
+if(_at_register EQUAL -1 OR _at_workspace EQUAL -1 OR _at_codec_register EQUAL -1)
     message(FATAL_ERROR
         "deprecation messages do not reach the compiler output.\n"
         "Expected mcf_hal_register() to emit:\n  ${_mcf_msg_register}\n"
         "and mcf_hal_set_static_workspace() to emit:\n  ${_mcf_msg_workspace}\n"
+        "and mcf_codec_register() to emit:\n  ${_mcf_msg_codec_register}\n"
         "Compiling ${_mcf_probe_src} with the configured toolchain produced:\n"
         "${probe_log}\n"
         "If the message was reworded deliberately, update the expected strings "
@@ -113,13 +118,14 @@ mcf_deprecation_probe_normalize("${sup_log}" sup_norm)
 
 string(FIND "${sup_norm}" "${msg_register}" _sup_register)
 string(FIND "${sup_norm}" "${msg_workspace}" _sup_workspace)
+string(FIND "${sup_norm}" "${msg_codec_register}" _sup_codec_register)
 
 if(NOT sup_ok)
     message(FATAL_ERROR
         "MCF_NO_DEPRECATED build of ${_mcf_probe_src} failed; the suppression "
         "path must compile cleanly. Compiler output:\n${sup_log}")
 endif()
-if(NOT _sup_register EQUAL -1 OR NOT _sup_workspace EQUAL -1)
+if(NOT _sup_register EQUAL -1 OR NOT _sup_workspace EQUAL -1 OR NOT _sup_codec_register EQUAL -1)
     message(FATAL_ERROR
         "MCF_NO_DEPRECATED did not suppress the deprecation diagnostics; a "
         "downstream tree mid-migration would still see them. Compiler "
@@ -127,7 +133,7 @@ if(NOT _sup_register EQUAL -1 OR NOT _sup_workspace EQUAL -1)
 endif()
 
 message(STATUS
-    "deprecation probe: both MCF_DEPRECATED messages reach the compiler, "
+    "deprecation probe: three MCF_DEPRECATED messages reach the compiler, "
     "MCF_NO_DEPRECATED suppresses them")
 
 endif() # MCF_DEPRECATION_PROBE_INCLUDED

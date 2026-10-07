@@ -60,16 +60,25 @@ mcf_status_t mcf_hal_set_static_workspace(const mcf_hal_t *hal, void *bytes,
     return MCF_OK;
 }
 
+mcf_status_t mcf_codec_register(const mcf_codec_ops_t *ops)
+{
+    (void)ops;
+    return MCF_OK;
+}
+
 int main(void)
 {
     mcf_hal_t     hal = {0};
     unsigned char ws[16];
+    mcf_codec_ops_t codec = {0};
     mcf_status_t  a;
     mcf_status_t  b;
+    mcf_status_t  c;
 
     /* Each call is expected to draw one deprecation diagnostic carrying the
      * message declared in the header. */
     a = mcf_hal_register(&hal);
     b = mcf_hal_set_static_workspace(&hal, ws, (uint32_t)sizeof(ws));
-    return (a == MCF_OK && b == MCF_OK) ? 0 : 1;
+    c = mcf_codec_register(&codec);
+    return (a == MCF_OK && b == MCF_OK && c == MCF_OK) ? 0 : 1;
 }

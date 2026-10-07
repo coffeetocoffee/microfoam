@@ -32,9 +32,14 @@ static int mcf_codec_valid(const mcf_codec_ops_t *ops)
            ops->destroy != NULL;
 }
 
-mcf_status_t mcf_codec_register(const mcf_codec_ops_t *ops)
+mcf_status_t mcf_codec_validate(const mcf_codec_ops_t *ops)
 {
     return mcf_codec_valid(ops) ? MCF_OK : MCF_E_PARAM;
+}
+
+mcf_status_t mcf_codec_register(const mcf_codec_ops_t *ops)
+{
+    return mcf_codec_validate(ops);
 }
 
 const mcf_codec_ops_t *mcf_codec_lookup(const mcf_config_t *cfg, mcf_codec_id_t id)

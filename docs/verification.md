@@ -37,7 +37,7 @@ Also in the ctest matrix:
 
 One check is not a ctest because it does not need a built tree: `cmake/deprecation_probe.cmake`
 runs at **configure** time on every platform and toolchain, compiling
-`tests/deprecation_probe.c` twice — once asserting that both `MCF_DEPRECATED` messages reach the
+`tests/deprecation_probe.c` twice — once asserting that all three `MCF_DEPRECATED` messages reach the
 compiler's output verbatim, and once asserting `MCF_NO_DEPRECATED` removes them. The message is
 the only part of the deprecation contract nothing else can observe, so it is the part that is
 asserted rather than remembered.
