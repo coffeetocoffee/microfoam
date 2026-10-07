@@ -525,12 +525,15 @@ jobs:
 
       # Real MFP1 patches seed the corpus, so the fuzzer starts from
       # a valid container instead of rediscovering the format from bytes.
+      # Only codecs this build supports: the fuzz target compiles the core
+      # parser without the optional LZMA codec, so an LZMA patch would be
+      # rejected at the codec-lookup step before reaching any deeper check.
       - name: Seed the corpus from host-produced MFP1 patches
         run: |
           set -e
           mkdir -p corpus-v1
           python host/microfoam.py keygen --private mfp1.key --public mfp1.pub
-          for codec in none lz4 lzma; do
+          for codec in lz4 raw; do
             python host/microfoam.py make \
               --old tests/fixtures/old.bin --new tests/fixtures/new.bin \
               --out "corpus-v1/valid-$codec.mfp" --product 0x1234 \

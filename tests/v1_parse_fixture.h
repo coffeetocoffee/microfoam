@@ -25,9 +25,9 @@
 
 #include <string.h>
 
-/* The minimal valid MFP1 fixture is a 120-byte header (no codec properties
- * for LZ4, no payload needed for this oracle). */
-#define MCF_V1F_VALID_SIZE 120u
+/* The minimal valid MFP1 fixture is a 120-byte header plus a 5-byte payload:
+ * 4 bytes of LZ4 properties (the u32 LE content size) and one stream byte. */
+#define MCF_V1F_VALID_SIZE 125u
 
 static inline void mcf_v1f_wr16(uint8_t *p, uint16_t v)
 {
@@ -66,26 +66,26 @@ static inline void mcf_v1f_build_valid(uint8_t *patch, uint32_t patch_size)
     mcf_v1f_wr16(&patch[4], 120u);
     /* hdr_ver = 0x0100 (major=1, minor=0) */
     mcf_v1f_wr16(&patch[6], 0x0100u);
-    /* flags = 0 (no signature, LZ4 codec implied) */
-    mcf_v1f_wr32(&patch[8], 0u);
-    /* product_id = 0x12345678 (arbitrary, will match HAL) */
-    mcf_v1f_wr32(&patch[12], 0x12345678u);
-    /* fw_version = 2 (will be > current=1) */
-    mcf_v1f_wr32(&patch[16], 2u);
+    /* flags = LZ4 codec marker (must agree with codec_id == 1) */
+    mcf_v1f_wr32(&patch[8], 0x08u);
+    /* product_id = 0x1234 (matches the harness HAL and the CI corpus seeds) */
+    mcf_v1f_wr32(&patch[12], 0x1234u);
+    /* fw_version = 0x00020000 (strictly greater than the HAL's running 0x00010000) */
+    mcf_v1f_wr32(&patch[16], 0x00020000u);
     /* old_size = 64 */
     mcf_v1f_wr32(&patch[20], 64u);
     /* new_size = 64 */
     mcf_v1f_wr32(&patch[24], 64u);
-    /* payload_size = 1 (minimal; must be > 0) */
-    mcf_v1f_wr32(&patch[28], 1u);
+    /* payload_size = 5 (4 LZ4 properties + 1 stream byte; must be > 0) */
+    mcf_v1f_wr32(&patch[28], 5u);
     /* old_crc32, new_crc32, payload_crc32 = 0 (not validated by parser) */
     mcf_v1f_wr32(&patch[32], 0u);
     mcf_v1f_wr32(&patch[36], 0u);
     mcf_v1f_wr32(&patch[40], 0u);
     /* workspace_req = 100 (LZ4 at 256B block needs ~100B state) */
     mcf_v1f_wr32(&patch[44], 100u);
-    /* old_version = 1 (must == current fw_version) */
-    mcf_v1f_wr32(&patch[48], 1u);
+    /* old_version = 0x00010000 (must == the HAL's running version) */
+    mcf_v1f_wr32(&patch[48], 0x00010000u);
     /* codec_id = 1 (LZ4) */
     patch[52] = 1u;
     /* block_size_log2 = 8 (256-byte blocks) */
@@ -152,10 +152,31 @@ static inline int mcf_v1f_framing_ok(const uint8_t *p, uint32_t n,
 
     /* Flag-codec consistency: RAW flag iff codec_id == 3 */
     if (((flags & 0x02u) != 0u) != (codec_id == 3u)) return 0;
+    /* The compressed-codec flags imply their ids (one-way in the parser). */
+    if ((flags & 0x08u) != 0u && codec_id != 1u) return 0;
+    if ((flags & 0x04u) != 0u && codec_id != 2u) return 0;
 
-    /* Properties block size (0 for LZ4, RAW, custom; 13 for LZMA in v1) */
-    props_len = (codec_id == 2u) ? 13u : 0u;
-    if (props_len > payload_size) return 0;
+    /* Properties block size, mirroring mcf_codec_props_len(): LZ4 carries a
+     * u32 content size, LZMA a props byte plus dict and size, and RAW and
+     * custom ids carry none. The parser accepts only payload_size > props_len
+     * (a zero-length stream is rejected), so the oracle must not be laxer. */
+    if (codec_id == 1u) {
+        props_len = 4u;
+    } else if (codec_id == 2u) {
+        props_len = 9u;
+    } else {
+        props_len = 0u;
+    }
+    if (payload_size <= props_len) return 0;
+
+    /* The keystone budget check, with the budget the harness configures.
+     * A parser that skipped it could return MCF_OK on a patch no session
+     * could ever size; the oracle pins the arithmetic. */
+    {
+        uint32_t ws = mcf_v1f_rd32(&p[44]);
+        if (ws > 4096u) return 0;
+        if ((1u << block_log2) > (4096u - ws) / 2u) return 0;
+    }
 
     (void)out; /* unused in v1 oracle */
     return 1;

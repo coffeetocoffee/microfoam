@@ -364,6 +364,7 @@ target_link_libraries(my_app PRIVATE microfoam::microfoam)
 | `MCF_ENABLE_ED25519` | `OFF` | Build the built-in Ed25519/Ed25519ph verifier (vendored TweetNaCl; no external crypto, no heap) |
 | `MCF_BUILD_TESTS` | `ON` | Build the host test suite |
 | `MCF_BUILD_FUZZER` | `OFF` | Build `v2_parse_fuzzer` with ASan/UBSan (needs Clang) |
+| `MCF_BUILD_FUZZ_V1` | `OFF` | Build `v1_parse_fuzzer` with ASan/UBSan (needs Clang) |
 | `MCF_WERROR` | `ON` | Warnings are errors |
 | `MCF_STRICT` | `ON` | Add `-Wconversion -Wsign-conversion` |
 
@@ -376,11 +377,13 @@ Two more modes exist for checking the library rather than shipping it:
 cmake -S . -B build-san -DMCF_SANITIZE=ON -DCMAKE_C_COMPILER=clang
 cmake --build build-san && ctest --test-dir build-san --output-on-failure
 
-# Coverage-guided fuzzing of the MFP2 parser (Clang, libFuzzer). Run it directly
-# with a corpus directory rather than through ctest; the CI fuzz job seeds it from
-# real host-produced patches and runs it for a bounded time, and the scheduled
-# "Long fuzz" workflow runs it for ten minutes against a corpus cached across runs.
-cmake -S . -B build-fuzz -DMCF_BUILD_FUZZER=ON -DCMAKE_C_COMPILER=clang
+# Coverage-guided fuzzing of the parsers (Clang, libFuzzer). Run them directly
+# with a corpus directory rather than through ctest; the CI fuzz jobs seed them
+# from real host-produced patches and run them for a bounded time, and the
+# scheduled "Long fuzz" workflow runs the MFP2 target for ten minutes against a
+# corpus cached across runs.
+cmake -S . -B build-fuzz -DMCF_BUILD_FUZZER=ON -DMCF_BUILD_FUZZ_V1=ON \
+      -DCMAKE_C_COMPILER=clang
 ```
 
 The size gate, run exactly the way CI runs it:

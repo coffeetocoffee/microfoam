@@ -27,6 +27,7 @@ endif()
 # runtimes, so it is opt-in and self-contained: it compiles the parser source it
 # exercises with the sanitizers, leaving every other target untouched.
 option(MCF_BUILD_FUZZER "Build the coverage-guided MFP2 parser fuzz target (requires Clang)" OFF)
+option(MCF_BUILD_FUZZ_V1 "Build the coverage-guided MFP1 parser fuzz target (requires Clang)" OFF)
 
 # Sanitize the whole host suite, not just the parser. The fuzzer above covers
 # one function; this option covers every test target, which is where the
@@ -333,10 +334,19 @@ if(MCF_BUILD_TESTS)
     target_compile_options(v1_fuzz_smoke PRIVATE ${MCF_WARNINGS})
     add_test(NAME v1_fuzz_smoke COMMAND v1_fuzz_smoke)
 
-    if(MCF_BUILD_FUZZER)
-        # MFP1 header parser coverage-guided fuzz target (Clang + libFuzzer only)
+    if(MCF_BUILD_FUZZ_V1)
+        if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+            message(FATAL_ERROR "MCF_BUILD_FUZZ_V1 requires Clang for libFuzzer")
+        endif()
+        # MFP1 header parser coverage-guided fuzz target. The parser source is
+        # compiled into the target with the sanitizers, so a fault inside
+        # mcf_hdr_parse is caught, not merely one in the harness. The codec
+        # registry is included because mcf_hdr_parse resolves the declared codec
+        # through mcf_codec_lookup()/mcf_codec_props_len(); the built-in codec
+        # objects satisfy those references without pulling in a codec decoder.
         add_executable(v1_parse_fuzzer tests/fuzz_v1_parse.c
-            src/mcf_container.c src/mcf_hal.c src/mcf_util.c)
+            src/mcf_container.c src/mcf_hal.c src/mcf_util.c
+            src/mcf_codec.c src/mcf_codec_lz4.c src/mcf_codec_raw.c)
         target_include_directories(v1_parse_fuzzer PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
             ${CMAKE_CURRENT_SOURCE_DIR}/src)

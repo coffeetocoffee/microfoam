@@ -52,12 +52,17 @@ static uint32_t fake_hal_block_size(void *ctx)
 static uint32_t fake_hal_product(void *ctx)
 {
     (void)ctx;
-    return 0x12345678u; /* must match fixture */
+    /* Matches the project-wide fixture convention (cross_test, the CI corpus
+     * seeds), so host-produced patches reach the deep parser checks rather
+     * than being rejected at the product binding. */
+    return 0x1234u;
 }
 static uint32_t fake_hal_version(void *ctx)
 {
     (void)ctx;
-    return 1u; /* current fw_version; fixtures have fw_version=2 > this */
+    /* The running version the CI seeds pin as old_version; their fw_version is
+     * 0x00020000, which is strictly greater, so anti-rollback passes. */
+    return 0x00010000u;
 }
 
 static const mcf_hal_t fake_hal = {
