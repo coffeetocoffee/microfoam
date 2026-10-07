@@ -323,6 +323,29 @@ if(MCF_BUILD_TESTS)
             -fsanitize=fuzzer,address,undefined)
     endif()
 
+    # MFP1 header parser fuzz smoke test (always built; runs on every platform)
+    add_executable(v1_fuzz_smoke tests/fuzz_v1_parse.c)
+    target_include_directories(v1_fuzz_smoke PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(v1_fuzz_smoke PRIVATE microfoam)
+    target_compile_definitions(v1_fuzz_smoke PRIVATE MCF_FUZZ_STANDALONE=1)
+    target_compile_options(v1_fuzz_smoke PRIVATE ${MCF_WARNINGS})
+    add_test(NAME v1_fuzz_smoke COMMAND v1_fuzz_smoke)
+
+    if(MCF_BUILD_FUZZER)
+        # MFP1 header parser coverage-guided fuzz target (Clang + libFuzzer only)
+        add_executable(v1_parse_fuzzer tests/fuzz_v1_parse.c
+            src/mcf_container.c src/mcf_hal.c src/mcf_util.c)
+        target_include_directories(v1_parse_fuzzer PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/src)
+        target_compile_options(v1_parse_fuzzer PRIVATE
+            ${MCF_WARNINGS} -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer)
+        target_link_options(v1_parse_fuzzer PRIVATE
+            -fsanitize=fuzzer,address,undefined)
+    endif()
+
     add_executable(hal_concurrency_test tests/hal_concurrency_test.c)
     target_link_libraries(hal_concurrency_test PRIVATE microfoam)
     target_compile_options(hal_concurrency_test PRIVATE ${MCF_WARNINGS})
