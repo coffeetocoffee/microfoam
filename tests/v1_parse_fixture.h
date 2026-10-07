@@ -45,7 +45,7 @@ static inline void mcf_v1f_wr32(uint8_t *p, uint32_t v)
 
 static inline uint16_t mcf_v1f_rd16(const uint8_t *p)
 {
-    return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+    return (uint16_t)((uint16_t)p[0] | (uint16_t)((uint16_t)p[1] << 8));
 }
 
 static inline uint32_t mcf_v1f_rd32(const uint8_t *p)
