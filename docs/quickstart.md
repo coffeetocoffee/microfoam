@@ -211,6 +211,50 @@ the Ed25519ph verifier. The design is in
 [format-v2-design.md](format-v2-design.md) and
 [mfp2-streaming-decryption-design.md](mfp2-streaming-decryption-design.md).
 
+## Build options
+
+Everything optional is a CMake switch, off by default, so a device build pays only for what it
+uses.
+
+| Option | Default | Effect |
+|---|---|---|
+| `MCF_ENABLE_LZMA` | `OFF` | Build the LZMA codec (vendored LZMA SDK) |
+| `MCF_ENABLE_SODIUM` | `OFF` | Build libsodium adapters and the MFP2 host-to-session tests |
+| `MCF_ENABLE_ED25519` | `OFF` | Build the built-in Ed25519/Ed25519ph verifier (vendored TweetNaCl; no external crypto, no heap) |
+| `MCF_BUILD_TESTS` | `ON` | Build the host test suite |
+| `MCF_BUILD_FUZZER` | `OFF` | Build `v2_parse_fuzzer` with ASan/UBSan (needs Clang) |
+| `MCF_BUILD_FUZZ_V1` | `OFF` | Build `v1_parse_fuzzer` with ASan/UBSan (needs Clang) |
+| `MCF_WERROR` | `ON` | Warnings are errors |
+| `MCF_STRICT` | `ON` | Add `-Wconversion -Wsign-conversion` |
+
+## Verification builds
+
+Two more modes exist for checking the library rather than shipping it.
+
+```sh
+# Whole host suite under ASan and UBSan, unrecoverable - a finding aborts the run.
+# Needs a toolchain with the runtimes: Linux/macOS Clang or GCC. The configure step
+# fails with an explicit message where they are missing, rather than at link time.
+cmake -S . -B build-san -DMCF_SANITIZE=ON -DCMAKE_C_COMPILER=clang
+cmake --build build-san && ctest --test-dir build-san --output-on-failure
+
+# Coverage-guided fuzzing of the parsers (Clang, libFuzzer). Run them directly
+# with a corpus directory rather than through ctest; the CI fuzz jobs seed them
+# from real host-produced patches and run them for a bounded time, and the
+# scheduled "Long fuzz" workflow runs the MFP2 target for ten minutes against a
+# corpus cached across runs.
+cmake -S . -B build-fuzz -DMCF_BUILD_FUZZER=ON -DMCF_BUILD_FUZZ_V1=ON \
+      -DCMAKE_C_COMPILER=clang
+```
+
+The size gate, run exactly the way CI runs it:
+
+```sh
+cmake -DCORE=cortex-m0 -DCC="$(which arm-none-eabi-gcc)" -DSRC="$PWD" \
+      -DBASELINE="$PWD/cmake/size_baseline.txt" -DWORK="$PWD/build-size" \
+      -P cmake/size_gate.cmake
+```
+
 ## Where to go next
 
 - [README](../README.md) — overview, footprint, codecs, and where the evidence lives.
