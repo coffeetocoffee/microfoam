@@ -15,7 +15,7 @@ configurations passing in both Debug and Release.
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `microfoam_tests` | 110 checks | round trip, the `mcf_ctx_size()` cost query, resume, the BSDIFF43 seek ordering, small-image framing, fault injection |
+| `microfoam_tests` | 114 checks | round trip, the `mcf_ctx_size()` cost query, resume, the BSDIFF43 seek ordering, small-image framing, fault injection, and the magic-constant spellings |
 | `custom_codec_test` | 46 checks | caller-owned codec descriptors, per-session table isolation, failure propagation at init, decode and finish |
 | `hal_concurrency_test` | 27 checks | two sessions driven interleaved through a whole decode |
 | `v2_format_test` | 45 checks | MFP2 header/TLV/record-framing rules, plus a deterministic mutation/property loop |

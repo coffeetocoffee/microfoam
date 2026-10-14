@@ -528,7 +528,7 @@ typedef struct mcf_config {
  * itself writes; an attacker who can write that NVM has already won. The threat
  * this addresses is corruption and interruption, not forgery.
  */
-#define MCF_JOURNAL_MAGIC 0x4D434A52u /* 'RCJM', little-endian */
+#define MCF_JOURNAL_MAGIC 0x4D434A52u /* 'RJCM', little-endian */
 
 typedef struct mcf_journal {
     uint32_t magic;        /*!< MCF_JOURNAL_MAGIC, or 0 if never written. */

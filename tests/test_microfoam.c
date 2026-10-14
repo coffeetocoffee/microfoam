@@ -349,6 +349,42 @@ static void test_crc(void)
     CHECK_EQ(mcf_crc32_final(c), 0xCBF43926u, "streaming matches one-shot");
 }
 
+/* Every magic here is compared only against itself inside the library, so no
+ * test and no wire behaviour would notice a change to one of them - but a
+ * change would make every journal or patch already in the field
+ * unrecognisable, and the comment is how a maintainer recognises a hex dump.
+ * Pinning the ASCII each constant spells is therefore the only check that can
+ * catch the constant and its comment drifting apart: MCF_JOURNAL_MAGIC was
+ * documented as 'RCJM' while the value has always spelled 'RJCM'. The
+ * little-endian byte order is part of the assertion, not incidental - these
+ * are read as bytes out of flash, not as host integers. */
+static void test_magic_constants(void)
+{
+    static const struct {
+        const char *name;
+        uint32_t    value;
+        const char *spelling;
+    } cases[] = {
+        { "MCF_HDR_MAGIC",        MCF_HDR_MAGIC,        "MFP1" },
+        { "MCF_V2_MAGIC",         MCF_V2_MAGIC,         "MFP2" },
+        { "MCF_JOURNAL_MAGIC",    MCF_JOURNAL_MAGIC,    "RJCM" },
+        { "MCF_V2_JOURNAL_MAGIC", MCF_V2_JOURNAL_MAGIC, "RJP2" }
+    };
+    size_t i;
+
+    banner("magic constants spell what their comments claim");
+    for (i = 0u; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        uint32_t v = cases[i].value;
+        char spelled[5];
+        spelled[0] = (char)(v & 0xFFu);
+        spelled[1] = (char)((v >> 8) & 0xFFu);
+        spelled[2] = (char)((v >> 16) & 0xFFu);
+        spelled[3] = (char)((v >> 24) & 0xFFu);
+        spelled[4] = '\0';
+        CHECK_EQ(memcmp(spelled, cases[i].spelling, 4u), 0, cases[i].name);
+    }
+}
+
 static void test_hal(void)
 {
     mcf_hal_t bad;
@@ -1129,6 +1165,7 @@ int main(void)
     test_sizing();
     test_ctx_size();
     test_crc();
+    test_magic_constants();
     test_hal();
     test_roundtrip();
     test_fault_erase();
