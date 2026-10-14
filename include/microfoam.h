@@ -58,8 +58,8 @@ extern "C" {
  * ======================================================================== */
 
 #define MCF_VERSION_MAJOR 1u
-#define MCF_VERSION_MINOR 9u
-#define MCF_VERSION_PATCH 9u
+#define MCF_VERSION_MINOR 10u
+#define MCF_VERSION_PATCH 0u
 
 /* Packed as (major << 16) | (minor << 8) | patch. */
 uint32_t mcf_version(void);
@@ -615,13 +615,35 @@ mcf_status_t mcf_session_open(mcf_session_t *s, const mcf_config_t *cfg);
  * begin(), once the cause is corrected. */
 mcf_status_t mcf_session_begin(mcf_session_t *s);
 
-/* Advance by one block. Returns MCF_OK, or a negative status on failure or
- * completion. Bounded work: at most one block is read, decoded, applied, and
- * written per call. */
+/* Advance by one block. Bounded work: at most one block is read, decoded,
+ * applied, and written per call.
+ *
+ * Returns MCF_OK while there is still work to do - and also on the call that
+ * completes the image. Completion is a STATE, not a status: step() moves the
+ * session to MCF_ST_VERIFY and returns MCF_OK, so the loop must be driven by
+ * mcf_session_state():
+ *
+ *     while (mcf_session_state(s) == MCF_ST_DECODE) {
+ *         if ((st = mcf_session_step(s)) != MCF_OK) { return st; }
+ *         wdt_kick();
+ *     }
+ *     return mcf_session_finish(s);
+ *
+ * A negative return is always a genuine failure, and leaves the session in
+ * MCF_ST_FAILED. Calling step() once more after completion is harmless: it
+ * returns MCF_OK without doing any work. */
 mcf_status_t mcf_session_step(mcf_session_t *s);
 
-/* Verify the reconstructed image and invoke the commit hook. Only meaningful
- * once the session reports MCF_ST_DONE. */
+/* Verify the reconstructed image and invoke the commit hook, moving the session
+ * to MCF_ST_DONE.
+ *
+ * Call this once step() has reported MCF_ST_VERIFY - that is, as soon as
+ * mcf_session_state() is no longer MCF_ST_DECODE. MCF_ST_DONE is the state this
+ * function *produces*, so it cannot be the precondition.
+ *
+ * Not bounded: this reads the whole reconstructed image back for its CRC.
+ * Idempotent once MCF_ST_DONE - a repeated call returns MCF_OK without
+ * re-verifying or re-invoking the commit hook. */
 mcf_status_t mcf_session_finish(mcf_session_t *s);
 
 /* Run begin, step, and finish to completion. Equivalent to the three calls

@@ -273,6 +273,29 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s);
 mcf_status_t mcf_v2_session_step(mcf_v2_session_t *s);
 mcf_status_t mcf_v2_session_finish(mcf_v2_session_t *s);
 mcf_status_t mcf_v2_session_run(mcf_v2_session_t *s);
+
+/* The workspace an MFP2 session will occupy, in bytes - the counterpart to
+ * mcf_ctx_size() for MFP1, and the figure to size a static workspace from.
+ *
+ *     cfg.workspace     = ws;
+ *     cfg.workspace_size = mcf_v2_ctx_size(&cfg);
+ *
+ * where `ws` is however the platform prefers to provide it.
+ *
+ * Pure: it reads only the patch header, and touches no flash, no HAL, and no
+ * key material, so it is safe to call from an allocator or a build script.
+ *
+ * This is the figure begin() actually enforces, so it stays correct on both a
+ * 32-bit target and a 64-bit build. The patch's own workspace_req field is a
+ * separate, coarser declaration made by the packaging tool, and it is not
+ * necessarily equal to this: MFP2 reuses the field for the outer session's
+ * total while an MFP1 header uses it for the codec workspace alone. Size from
+ * this, not from the header.
+ *
+ * Returns 0 when the configuration cannot be sized: a NULL cfg or patch, a
+ * malformed or unsupported patch, or a record size out of range. A runnable
+ * session never needs zero bytes, so zero is unambiguous. */
+uint32_t mcf_v2_ctx_size(const mcf_v2_config_t *cfg);
 void mcf_v2_session_close(mcf_v2_session_t *s);
 mcf_state_t mcf_v2_session_state(const mcf_v2_session_t *s);
 mcf_status_t mcf_v2_session_status(const mcf_v2_session_t *s);

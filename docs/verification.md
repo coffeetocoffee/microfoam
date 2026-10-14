@@ -27,7 +27,7 @@ CI rather than only by whoever happens to build it locally.
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `microfoam_tests` | 114 checks | round trip, the `mcf_ctx_size()` cost query, resume, the BSDIFF43 seek ordering, small-image framing, fault injection, and the magic-constant spellings |
+| `microfoam_tests` | 137 checks | round trip, the `mcf_ctx_size()` cost query, resume, the BSDIFF43 seek ordering, small-image framing, fault injection, idempotent `finish()`/single commit, use-after-close refusal, and the magic-constant spellings |
 | `custom_codec_test` | 46 checks | caller-owned codec descriptors, per-session table isolation, failure propagation at init, decode and finish |
 | `hal_concurrency_test` | 27 checks | two sessions driven interleaved through a whole decode |
 | `v2_format_test` | 45 checks | MFP2 header/TLV/record-framing rules, plus a deterministic mutation/property loop |
@@ -166,3 +166,55 @@ comparison is gated there: a clang ceiling would baseline a compiler nobody ship
 armclang and IAR builds remain unverified.
 
 See [.github/workflows/ci.yml](../.github/workflows/ci.yml) for the matrix itself.
+
+## Building the sodium configuration from a path containing spaces
+
+The MSVC configurations build fine from any path, but a **gcc** tree configured under MSYS2
+will not configure if the source path contains a space. CMake's compiler check splits the
+argument list at the space and the compiler never sees its input:
+
+```
+-- The C compiler identification is unknown
+Check for working C compiler: C:/msys64/ucrt64/bin/gcc.exe - broken
+```
+
+This is a property of the MSYS2 toolchain's argument handling, not of this project: the same
+compiler, flags and sources configure cleanly from a space-free path, and the `deprecation
+probe` in `cmake/deprecation_probe.cmake` fails the same way. It is not specific to
+`build-sodium`, and it is not caused by anything in the tree.
+
+The workaround is to build the sodium tree from a path with no spaces. Copying the source is
+enough — the build directories do not need to come along:
+
+```powershell
+$dst = "$env:TEMP\microfoam-build"
+if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
+New-Item -ItemType Directory $dst | Out-Null
+foreach ($d in @('src','include','tests','cmake','third_party','host','docs','.github')) {
+    Copy-Item -Recurse -Force ".\$d" "$dst\$d"
+}
+foreach ($f in @('CMakeLists.txt','README.md','conanfile.py','pyproject.toml','LICENSE')) {
+    Copy-Item -Force ".\$f" "$dst\$f"
+}
+
+# MSYS2 needs its own bin on PATH, or gcc fails before it is ever invoked.
+$env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
+
+cmake -S $dst -B "$dst\b" -G Ninja -DCMAKE_BUILD_TYPE=Release -DMCF_ENABLE_SODIUM=ON `
+      -DCMAKE_C_COMPILER=C:/msys64/ucrt64/bin/gcc.exe `
+      -DCMAKE_MAKE_PROGRAM=C:/msys64/ucrt64/bin/ninja.exe `
+      -DSODIUM_INCLUDE_DIR=C:/msys64/ucrt64/include `
+      -DSODIUM_LIBRARY=C:/msys64/ucrt64/lib/libsodium.dll.a
+cmake --build "$dst\b"
+ctest --test-dir "$dst\b" --output-on-failure
+```
+
+That is the configuration behind the **15/15** local result: all nine suites, `gcc` under
+`-Wall -Wextra -Wconversion -Wsign-conversion -Werror`, including the MFP2 producer-to-session
+integration and the `size_gate`. Run `ctest --test-dir "$dst\b" -R documented_counts` after
+changing any check count in this document — the gate reads the counts back out of the built
+binaries and fails if the table above has drifted.
+
+Worth knowing when interpreting a failure: gcc catches `-Wconversion` and `-Wsign-conversion`
+violations that MSVC accepts silently. A tree that is clean under MSVC can still fail here, and
+that is the strict set doing its job, not a regression.

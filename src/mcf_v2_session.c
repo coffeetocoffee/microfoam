@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "microfoam_v2.h"
 #include "mcf_internal.h"
+#include "mcf_codec_lz4.h"
 #include <string.h>
 #include <stdint.h>
 
@@ -466,11 +467,47 @@ degrade:
     s->flags |= MCF_V2_SESSION_FLAG_RESUME_DEGRADED;
 }
 
+uint32_t mcf_v2_ctx_size(const mcf_v2_config_t *c)
+{
+    mcf_v2_view_t v;
+    uint32_t total = 0u, blk, codec_ws, part;
+
+    /* The workspace mcf_v2_session_begin() lays out, derived from the same
+     * primitives it uses, so the figure cannot drift from the session:
+     *
+     *   [0, 124)            synthetic MFP1 header
+     *   [124, 124+win)      record window (two records + terminal marker)
+     *   [124+win, +ad)      AAD scratch
+     *   [rest)              inner session: two blocks + LZ4 state
+     *
+     * Nothing here touches flash, the HAL, or the key material, so this is
+     * safe to call from an allocator or a build script - the same guarantee
+     * mcf_ctx_size() makes. */
+    if (c == NULL || c->patch == NULL || c->patch_size == 0u) {
+        return 0u;
+    }
+    if (mcf_v2_parse(c->patch, c->patch_size, &v) != MCF_OK) {
+        return 0u;
+    }
+    if (v.record_log2 < MCF_V2_RECORD_LOG2_MIN || v.record_log2 > MCF_V2_RECORD_LOG2_MAX) {
+        return 0u;
+    }
+    blk      = (uint32_t)1u << v.record_log2;
+    codec_ws = mcf_lz4_workspace(NULL, 0u);
+
+    /* 124 + win + ad + 2*blk + codec_ws, each step overflow-checked. */
+    if (!v2_add_u32(124u, (2u * blk) + 4u, &part)) { return 0u; }
+    if (!v2_add_u32(part, 16u + (uint32_t)v.header_len, &part)) { return 0u; }
+    if (!v2_add_u32(part, (2u * blk) + codec_ws, &total)) { return 0u; }
+    return total;
+}
+
 mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
 {
     const mcf_v2_config_t *c; mcf_v2_view_t v; uint8_t *buf; uint8_t *hdr;
     uint32_t pos=0u, i, start=0u, delta_size, need, win, ad, start_off=0u;
     uint32_t crc, framed_total, rec_dlen; int32_t r;
+    uint32_t codec_ws;
     mcf_resume_point_t pt;
     mcf_hdr_view_t hv;
     if (s==NULL || s->cfg==NULL) return MCF_E_PARAM;
@@ -584,24 +621,44 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
     v2_wr32(&buf[8],MCF_FLAG_CODEC_LZ4); memcpy(&buf[12],&c->patch[12],4u); memcpy(&buf[16],&c->patch[16],4u);
     memcpy(&buf[20],&c->patch[20],4u);memcpy(&buf[24],&c->patch[24],4u);v2_wr32(&buf[28],framed_total+4u);
     memcpy(&buf[32],&c->patch[32],4u);memcpy(&buf[36],&c->patch[36],4u);
-    /* The synthetic header must declare what the inner session will actually
-     * consume from ITS workspace slice: two decode/apply blocks plus the LZ4
-     * state. Declaring the caller's whole budget here makes the inner session's
-     * own budget check (block_size > (budget - workspace_req)/2) reject. */
+    /* Written before the codec is asked to size itself against these four
+     * bytes, so the sizing call never reads uninitialised workspace. */
+    v2_wr32(&buf[120],delta_size);
+    /* The synthetic header must declare the inner session's CODEC workspace -
+     * and only the codec's. In an MFP1 header workspace_req means the codec
+     * state alone; the two decode/apply blocks are taken from the budget
+     * separately. The inner session's keystone check is
+     *
+     *     workspace_req <= budget  AND  block_size <= (budget - workspace_req)/2
+     *
+     * so declaring the total (blocks + codec) here would leave the first term
+     * consuming the whole budget and the second evaluating to zero, and be
+     * rejected; declaring the codec slice makes an exact-fit budget satisfy
+     * both, with equality on the second.
+     *
+     * The figure comes from the codec rather than a repeated constant: LZ4's
+     * state is sizeof(mcf_lz4_t), which is 16 bytes on a 32-bit target and 24
+     * on 64. Hardcoding the 32-bit value made the declared requirement 8 bytes
+     * short on a 64-bit host, and the inner session then refused the very
+     * budget that had just been computed from it. */
     {
-        uint32_t log2, inner_ws;
+        uint32_t log2, blk, inner_min;
         log2 = v.record_log2;
-        inner_ws = 2u * ((uint32_t)1u << log2) + 16u; /* 2 blocks + LZ4 state */
-        v2_wr32(&buf[44], inner_ws);
+        blk  = (uint32_t)1u << log2;
+        /* The inner codec is always LZ4 and its properties sit at buf[120]; the
+         * codec ignores them for sizing, but passing the real pointer keeps the
+         * two answers derived the same way. */
+        codec_ws = mcf_lz4_workspace(&buf[120], 4u);
+        v2_wr32(&buf[44], codec_ws);
+        inner_min = (2u * blk) + codec_ws;   /* 2 blocks + codec state */
         if (need > c->workspace_size) return v2_fail(s, MCF_E_DICT_TOO_LARGE, MCF_SITE_V2_WORKSPACE);
         need = c->workspace_size - need;              /* remainder for the inner session */
-        if (need < inner_ws) return v2_fail(s, MCF_E_DICT_TOO_LARGE, MCF_SITE_V2_WORKSPACE);
+        if (need < inner_min) return v2_fail(s, MCF_E_DICT_TOO_LARGE, MCF_SITE_V2_WORKSPACE);
         buf[52] = (uint8_t)MCF_CODEC_LZ4;
         buf[53] = (uint8_t)log2;
         buf[54] = 0u; buf[55] = 0u;
         memset(&buf[56], 0, 64u);
     }
-    v2_wr32(&buf[120],delta_size);
     v2_wr32(&buf[40],0u); /* streaming: the inner CRC walk is suppressed */
 
     /* Hand the inner session a validated, authenticated view and a callback
@@ -612,7 +669,7 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
     hv.old_size = v.old_size; hv.new_size = v.new_size;
     hv.payload_size = framed_total + 4u; hv.old_crc32 = mcf_rd32(&c->patch[32]);
     hv.new_crc32 = mcf_rd32(&c->patch[36]); hv.payload_crc32 = 0u;
-    hv.workspace_req = 2u*((uint32_t)1u<<v.record_log2)+16u; hv.old_version = v.old_version;
+    hv.workspace_req = codec_ws; hv.old_version = v.old_version;
     hv.codec_id = (uint8_t)MCF_CODEC_LZ4; hv.block_log2 = v.record_log2;
     hv.props = &buf[120]; hv.props_len = 4u;
     /* The payload pointer is deliberately NULL: the stream is not resident and
@@ -691,7 +748,13 @@ mcf_status_t mcf_v2_session_finish(mcf_v2_session_t *s)
 mcf_status_t mcf_v2_session_run(mcf_v2_session_t *s)
 { mcf_status_t st; if(s==NULL)return MCF_E_PARAM; st=mcf_v2_session_begin(s);if(st!=MCF_OK)return st;for(;;){st=mcf_v2_session_step(s);if(st!=MCF_OK)return st;if(mcf_session_state(s->inner)==MCF_ST_VERIFY)break;}return mcf_v2_session_finish(s); }
 void mcf_v2_session_close(mcf_v2_session_t *s)
-{ if(s==NULL)return; if(s->inner!=NULL)mcf_session_close(s->inner);v2_wipe(s->key,(uint32_t)sizeof(s->key));if(s->scratch!=NULL)v2_wipe(s->scratch,s->scratch_len);s->scratch=NULL;s->scratch_len=0u;s->inner=NULL;s->state=MCF_ST_IDLE;s->status=MCF_OK;s->site=MCF_SITE_NONE; }
+{ if(s==NULL)return; if(s->inner!=NULL)mcf_session_close(s->inner);v2_wipe(s->key,(uint32_t)sizeof(s->key));if(s->scratch!=NULL)v2_wipe(s->scratch,s->scratch_len);s->scratch=NULL;s->scratch_len=0u;s->inner=NULL;s->state=MCF_ST_IDLE;s->status=MCF_OK;s->site=MCF_SITE_NONE;
+   /* Released last, for the same reason as mcf_session_close(): the caller's
+    * config is only guaranteed to outlive the *session*, and keeping the
+    * pointer past close() would make begin()'s s->cfg == NULL guard
+    * unreachable, turning a post-close begin() into a dangling dereference
+    * rather than MCF_E_PARAM. */
+   s->cfg=NULL; }
 mcf_state_t mcf_v2_session_state(const mcf_v2_session_t *s)
 { return s==NULL?MCF_ST_FAILED:(mcf_state_t)s->state; }
 mcf_status_t mcf_v2_session_status(const mcf_v2_session_t *s)

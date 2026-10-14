@@ -974,6 +974,13 @@ mcf_status_t mcf_session_finish(mcf_session_t *s)
     if (s->state == MCF_ST_FAILED) {
         return s->status;
     }
+    /* Idempotent, like step(). A completed session has already verified the
+     * image and invoked the commit hook; re-running either would mean a second
+     * flash verify and - worse - a second swap or reboot on a real device. A
+     * retry loop or a defensive re-call must not re-arm the commit point. */
+    if (s->state == MCF_ST_DONE) {
+        return MCF_OK;
+    }
     if (!s->engine_finished) {
         return mcf_fail(s, MCF_E_STATE, MCF_SITE_STATE);
     }
@@ -1070,6 +1077,15 @@ void mcf_session_close(mcf_session_t *s)
     s->engine_finished = 0;
     s->dst_written     = 0u;
     s->dst_erased_upto = 0u;
+    /* The borrowed config and HAL are released last, after the free above has
+     * used them. Leaving them set would keep a pointer to the caller's
+     * configuration alive past the caller's own lifetime - and the documented
+     * lifetime is "must outlive the session", so after close() it may not.
+     * Clearing them makes the s->cfg == NULL guard in begin() reachable again,
+     * so a begin() on a closed session reports MCF_E_PARAM instead of
+     * dereferencing a dangling pointer; likewise mcf_fail()'s MCF_LOG. */
+    s->cfg             = NULL;
+    s->hal             = NULL;
 }
 
 /* ---------------------------------------------------------------------- *

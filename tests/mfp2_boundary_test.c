@@ -253,7 +253,25 @@ static int streaming_workspace_case(const uint8_t *patch, uint32_t patch_len,
     if (mcf_v2_parse(patch, patch_len, &view) != MCF_OK) return 0;
     win      = (2u * (1u << view.record_log2)) + 4u;
     ad       = 8u + (uint32_t)view.header_len + 8u;
-    inner_ws = (2u * (1u << view.record_log2)) + 16u;
+    /* The inner session's real requirement, obtained from the published cost
+     * query rather than spelled out here. It depends on the LZ4 state's
+     * sizeof, so a literal in this file silently understated it on a 64-bit
+     * build - by exactly the 8 bytes that made the exact-fit case fail. Using
+     * mcf_v2_ctx_size() also means this test and an integrator size the
+     * workspace the same way. */
+    {
+        mcf_v2_config_t pcfg;
+        uint32_t total;
+        memset(&pcfg, 0, sizeof(pcfg));
+        pcfg.patch = patch; pcfg.patch_size = patch_len;
+        total = mcf_v2_ctx_size(&pcfg);
+        if (total < 124u + win + ad) {
+            fprintf(stderr, "mcf_v2_ctx_size %u below the outer scratch %u\n",
+                    (unsigned)total, (unsigned)(124u + win + ad));
+            return 0;
+        }
+        inner_ws = total - (124u + win + ad);
+    }
     need     = 124u + win + ad + inner_ws;
     old_need = 124u + view.payload_size + inner_ws;
     if (need >= old_need) {
@@ -1068,6 +1086,70 @@ int main(int argc, char **argv)
                 puts("  ok  journal cleared after a completed update");
             }
         }
+    }
+
+    /* Exact fit: a workspace sized to exactly mcf_v2_ctx_size() must run the
+     * update to a byte-exact image. This is the case a hardcoded LZ4 state
+     * constant broke - on a 64-bit build the declared requirement was 8 bytes
+     * short of what the inner session demanded, so the session refused the
+     * budget computed from its own header and an integrator sizing to the
+     * published figure got MCF_E_DICT_TOO_LARGE with no hint why.
+     *
+     * The regression is only visible at the boundary, so the search is a
+     * boundary search: the smallest accepted size must be the published one.
+     * Asserting only "ctx_size succeeds" would pass on a figure that was too
+     * generous, which is the opposite drift. */
+    {
+        mcf_v2_config_t cfg; mcf_v2_session_t s;
+        uint32_t need, mut_before;
+        int fit_ok = 0, under_ok = 0;
+
+        /* ctx_size is pure: sizing must not touch flash or the HAL. Compared
+         * against the counter as it stood, not against zero - earlier cases in
+         * this binary have legitimately programmed flash. */
+        v2_cfg(&cfg, patch, patch_len, old, old_len, &crypto, 0u);
+        mut_before = mutations;
+        need = mcf_v2_ctx_size(&cfg);
+        ok &= (mutations == mut_before);
+        ok &= (mcf_v2_ctx_size(NULL) == 0u);
+        ok &= (need != 0u);
+
+        /* One byte less must be refused, so the figure is tight and not
+         * merely sufficient. */
+        memset(flash, 0xFF, sizeof(flash));
+        v2_cfg(&cfg, patch, patch_len, old, old_len, &crypto, 0u);
+        cfg.workspace_size = need - 1u;
+        cfg.ram_budget    = need - 1u;
+        if (mcf_v2_session_open(&s, &cfg) == MCF_OK) {
+            if (mcf_v2_session_run(&s) == MCF_OK) { under_ok = 1; }
+            mcf_v2_session_close(&s);
+        }
+        ok &= !under_ok;
+        if (!under_ok) puts("  ok  one byte short is refused");
+
+        /* Exactly the published figure must succeed and be byte-exact. */
+        memset(flash, 0xFF, sizeof(flash));
+        v2_cfg(&cfg, patch, patch_len, old, old_len, &crypto, 0u);
+        cfg.workspace_size = need;
+        cfg.ram_budget    = need;
+        if (mcf_v2_session_open(&s, &cfg) == MCF_OK) {
+            if (mcf_v2_session_run(&s) == MCF_OK &&
+                memcmp(flash, expected, new_len) == 0) { fit_ok = 1; }
+            mcf_v2_session_close(&s);
+        }
+        if (!fit_ok) {
+            fprintf(stderr, "exact fit refused: mcf_v2_ctx_size=%u\n", (unsigned)need);
+        }
+        ok &= fit_ok;
+        if (fit_ok) puts("  ok  workspace sized to mcf_v2_ctx_size() runs exact");
+
+        /* The patch's declared workspace_req is NOT asserted equal to
+         * mcf_v2_ctx_size(). They answer different questions: the header field
+         * is the packaging tool's coarse declaration for a 32-bit target,
+         * while ctx_size() is what this build actually enforces. On a 64-bit
+         * build they differ by the LZ4 state's padding, and requiring them to
+         * agree would be asserting a relationship the format does not have.
+         * What must hold on every ABI is the exact fit above. */
     }
 
     /* Small image: the producer must cap its framing at the image, because the

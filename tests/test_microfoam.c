@@ -742,6 +742,108 @@ static void test_stepwise(void)
     CHECK_EQ(mcf_session_state(g_session), MCF_ST_IDLE, "close resets to IDLE");
 }
 
+/* The commit hook is the integrator's swap-and-reboot point. It must fire
+ * exactly once per update, however many times finish() is called afterwards:
+ * a retry loop, a duplicated error path, or a defensive re-call after a
+ * timeout is enough to reach it twice, and on a device the second call may
+ * never return. finish() is therefore idempotent once the session is DONE. */
+static void test_finish_is_idempotent(void)
+{
+    mcf_config_t cfg;
+    uint32_t len;
+    mcf_status_t st;
+
+    banner("finish() is idempotent and commits once");
+    device_reset();
+    len = build_patch(g_patch, g_old, OLD_LEN, g_new, NEW_LEN, PRODUCT, VER_NEW, VER_OLD,
+                      WS_LZ4, 0u, 9u);
+    cfg = make_cfg(len);
+
+    uint32_t mutations_at_done;
+
+    st = mcf_session_open(g_session, &cfg);
+    CHECK_EQ(st, MCF_OK, "open");
+    st = mcf_session_run(g_session);
+    CHECK_EQ(st, MCF_OK, "run");
+    CHECK_EQ(g_commit_called, 1, "commit invoked once");
+    mutations_at_done = (uint32_t)g_flash_mutations;
+
+    /* Repeated finish() must succeed and change nothing. The commit counter is
+     * the assertion; the flash-mutation counter catches a re-verify as well. */
+    st = mcf_session_finish(g_session);
+    CHECK_EQ(st, MCF_OK, "second finish is not an error");
+    CHECK_EQ(g_commit_called, 1, "second finish does not re-invoke commit");
+    CHECK_EQ(mcf_session_state(g_session), MCF_ST_DONE, "state stays DONE");
+
+    st = mcf_session_finish(g_session);
+    CHECK_EQ(st, MCF_OK, "third finish is not an error");
+    CHECK_EQ(g_commit_called, 1, "third finish does not re-invoke commit");
+
+    /* step() is idempotent in the same way, and doing work is the exception. */
+    st = mcf_session_step(g_session);
+    CHECK_EQ(st, MCF_OK, "step after DONE is not an error");
+    CHECK_EQ(g_commit_called, 1, "step after DONE does not touch commit");
+    CHECK_EQ((uint32_t)g_flash_mutations, mutations_at_done,
+             "no further flash activity after DONE, including no re-verify");
+
+    CHECK(memcmp(&g_flash[0], g_new, NEW_LEN) == 0, "image still matches");
+    mcf_session_close(g_session);
+}
+
+/* The caller's configuration is only required to outlive the *session*, so
+ * close() must release it. If close() left s->cfg set, the s->cfg == NULL
+ * guard in begin() could never fire, and any call on the closed session would
+ * dereference a pointer to a config that may already be dead - in this suite,
+ * a stack frame that has returned. That is a use-after-free, not a diagnostic.
+ *
+ * The test drives a config on the stack, closes the session, lets the frame go
+ * away, and then calls in. Before the fix this is an access violation. */
+static void test_use_after_close_is_refused(void)
+{
+    banner("a closed session refuses work instead of using a stale config");
+    device_reset();
+
+    {
+        mcf_config_t cfg;
+        uint32_t len = build_patch(g_patch, g_old, OLD_LEN, g_new, NEW_LEN, PRODUCT,
+                                   VER_NEW, VER_OLD, WS_LZ4, 0u, 9u);
+        cfg = make_cfg(len);
+        CHECK_EQ(mcf_session_open(g_session, &cfg), MCF_OK, "open");
+        mcf_session_close(g_session);
+        CHECK_EQ(mcf_session_state(g_session), MCF_ST_IDLE, "close resets to IDLE");
+    }   /* cfg is now out of scope - exactly what close() must not rely on */
+
+    /* begin()/run() reach the released config and report a parameter error. */
+    CHECK_EQ(mcf_session_begin(g_session), MCF_E_PARAM, "begin after close is a parameter error");
+    CHECK_EQ(mcf_session_run(g_session), MCF_E_PARAM, "run after close is a parameter error");
+
+    /* step()/finish() refuse on state first, without reaching the config. */
+    CHECK_EQ(mcf_session_step(g_session), MCF_E_STATE, "step after close is a state error");
+    CHECK_EQ(mcf_session_finish(g_session), MCF_E_STATE, "finish after close is a state error");
+    /* A refused step fails the session, as any step in a wrong state does. */
+    CHECK_EQ(mcf_session_state(g_session), MCF_ST_FAILED, "refused step leaves FAILED");
+
+    /* The queries stay answerable and harmless. */
+    (void)mcf_session_progress(g_session);
+    (void)mcf_session_total(g_session);
+    (void)mcf_session_status(g_session);
+
+    /* close() remains idempotent, and a session can be reopened afterwards. */
+    mcf_session_close(g_session);
+    mcf_session_close(g_session);
+    {
+        mcf_config_t cfg;
+        uint32_t len = build_patch(g_patch, g_old, OLD_LEN, g_new, NEW_LEN, PRODUCT,
+                                   VER_NEW, VER_OLD, WS_LZ4, 0u, 9u);
+        cfg = make_cfg(len);
+        CHECK_EQ(mcf_session_open(g_session, &cfg), MCF_OK, "reopen after close");
+        CHECK_EQ(mcf_session_run(g_session), MCF_OK, "update works after reopen");
+        CHECK_EQ(g_commit_called, 1, "commit invoked once after reopen");
+        CHECK(memcmp(&g_flash[0], g_new, NEW_LEN) == 0, "image correct after reopen");
+        mcf_session_close(g_session);
+    }
+}
+
 static void test_sizing(void)
 {
     banner("reported sizes");
@@ -1180,6 +1282,8 @@ int main(void)
     test_new_image_crc();
     test_abort();
     test_stepwise();
+    test_finish_is_idempotent();
+    test_use_after_close_is_refused();
     test_resume_interrupt_and_continue();
     test_resume_cleared_when_done();
     test_resume_rejects_bad_records();

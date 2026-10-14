@@ -40,7 +40,7 @@ from typing import Optional
 # MCF_VERSION_* by the release procedure; selftest.py asserts the format
 # constants that actually affect patch bytes, which is the part that can
 # corrupt something if it drifts.
-TOOL_VERSION = "1.9.9"
+TOOL_VERSION = "1.10.0"
 
 MAGIC = 0x3150464D          # 'MFP1'
 HDR_LEN = 120
@@ -81,7 +81,14 @@ CODEC_RAW = 3
 
 # LZ4 codec properties are 4 bytes: the uncompressed content size.
 LZ4_PROPS_LEN = 4
-# The device's LZ4 state block. Must be >= sizeof(mcf_lz4_t) in the C build.
+# The device's LZ4 state block. This is sizeof(mcf_lz4_t) *on the 32-bit target
+# these patches are built for*: a pointer (4) + content_size (4) + produced (4)
+# + done (1), rounded up to 4 for alignment. Unlike the raw and LZMA codecs,
+# which declare fixed constants, LZ4's figure is a sizeof - so it is also 24 on
+# a 64-bit build, and the device now asks mcf_lz4_workspace() rather than
+# repeating a literal, which is what kept this number and the C struct in step.
+# Declaring 16 here is correct for the 32-bit device; do not "fix" it to match
+# this tool's own ABI.
 WS_LZ4 = 16
 # The raw codec has no properties and a 16-byte state block; mirrors
 # MCF_RAW_WORKSPACE_BYTES in src/mcf_codec_raw.h.
@@ -675,13 +682,24 @@ def v2_workspace_req(record_log2: int, header_len: int) -> int:
     (124 bytes), a record window of two maximum-size records plus the terminal
     marker, the AAD scratch ("MCF2REC\\0" + the header + the per-record index
     and length), and then the inner MFP1 session's own workspace (two decode
-    blocks plus the LZ4 state). The header's `workspace_req` is that total. The
-    device only uses the field as a coarse budget gate and derives the real
-    figure itself, but a placeholder here misstates what the patch costs.
+    blocks plus the LZ4 state).
+
+    That total is what this MFP2 header's `workspace_req` declares. Note the
+    field means different things in the two formats, which is easy to trip
+    over: an MFP1 header's `workspace_req` is the codec workspace *alone*,
+    because the two blocks come out of the budget separately, whereas here it
+    is the outer session's whole scratch. The device uses the field only as a
+    coarse budget gate and derives the real figure itself, so the two do not
+    have to agree - but a placeholder or a stale total here would misstate what
+    the patch costs.
+
+    Integrators should size a workspace from mcf_v2_ctx_size() rather than from
+    this field: the device enforces the inner session's real requirement, which
+    depends on the codec state size and therefore on the target ABI.
     """
     win = 2 * (1 << record_log2) + 4          # record window + terminal marker
     ad = 8 + header_len + 8                   # prefix + header + index/length
-    inner_ws = 2 * (1 << record_log2) + 16    # inner engine blocks + LZ4 state
+    inner_ws = 2 * (1 << record_log2) + WS_LZ4  # inner blocks + LZ4 state
     return 124 + win + ad + inner_ws
 
 
