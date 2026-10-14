@@ -184,7 +184,7 @@ probe` in `cmake/deprecation_probe.cmake` fails the same way. It is not specific
 `build-sodium`, and it is not caused by anything in the tree.
 
 The workaround is to build the sodium tree from a path with no spaces. Copying the source is
-enough — the build directories do not need to come along:
+enough; the build directories do not need to come along:
 
 ```powershell
 $dst = "$env:TEMP\microfoam-build"
@@ -212,7 +212,7 @@ ctest --test-dir "$dst\b" --output-on-failure
 That is the configuration behind the **15/15** local result: all nine suites, `gcc` under
 `-Wall -Wextra -Wconversion -Wsign-conversion -Werror`, including the MFP2 producer-to-session
 integration and the `size_gate`. Run `ctest --test-dir "$dst\b" -R documented_counts` after
-changing any check count in this document — the gate reads the counts back out of the built
+changing any check count in this document: the gate reads the counts back out of the built
 binaries and fails if the table above has drifted.
 
 Worth knowing when interpreting a failure: gcc catches `-Wconversion` and `-Wsign-conversion`

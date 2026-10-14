@@ -23,7 +23,7 @@ tool (`host/microfoam.py`) assert their field offsets against this table indepen
 | 32 | 4 | `old_crc32` | CRC-32 of the base image. |
 | 36 | 4 | `new_crc32` | CRC-32 of the reconstructed image. |
 | 40 | 4 | `payload_crc32` | CRC-32 of the compressed stream, excluding codec properties. |
-| 44 | 4 | `workspace_req` | **Decoder RAM required, in bytes.** Coarse budget gate only — see below. |
+| 44 | 4 | `workspace_req` | **Decoder RAM required, in bytes.** A coarse budget gate only; see below. |
 | 48 | 4 | `old_version` | Version of the base image this patch requires. Must equal the running version. |
 | 52 | 1 | `codec_id` | 1 = LZ4, 2 = LZMA, 3 = raw. 0 is AUTO and is never valid on the wire; other values are unsupported. |
 | 53 | 1 | `block_size_log2` | log2 of the processing window. 8..20. |
@@ -120,7 +120,7 @@ Two consequences worth stating, because both have been got wrong:
 **The field means different things in MFP1 and MFP2.** In an MFP1 header
 (`docs/format.md`) `workspace_req` is the *codec's* workspace alone; the two
 decode/apply blocks are taken from the budget separately. In MFP2 the same
-offset holds the *outer* session's whole scratch — synthetic header, record
+offset holds the *outer* session's whole scratch: synthetic header, record
 window, AAD buffer, and the inner session's blocks plus codec state. A figure
 read off an MFP1 header is not a figure for MFP2.
 
@@ -131,7 +131,7 @@ workspace_req <= budget   AND   block_size <= (budget - workspace_req) / 2
 ```
 
 against a budget the device derives from `cfg.workspace_size`, and sizes its
-allocation from `mcf_lz4_workspace()` — a `sizeof(mcf_lz4_t)`, which is 16
+allocation from `mcf_lz4_workspace()`, a `sizeof(mcf_lz4_t)` that, which is 16
 bytes on a 32-bit target and 24 on 64. The packaging tool therefore cannot emit
 a declaration that is right on every ABI, and an MFP2 patch built on a 64-bit
 host declares 8 bytes less than a 64-bit device needs.
