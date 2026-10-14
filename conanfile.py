@@ -5,7 +5,7 @@ from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 
 class MicrofoamConan(ConanFile):
     name = "microfoam"
-    version = "1.9.5"
+    version = "1.9.8"
     package_type = "library"
     license = "MIT"
     url = "https://example.invalid/microfoam"
