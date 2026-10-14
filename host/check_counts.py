@@ -12,16 +12,46 @@ not hold is the same defect class the project already fixed twice in the code
 applies: make the number a thing that is checked, not a thing that is remembered.
 
 This script runs each suite it can find in a build tree, reads the count the
-suite reports for itself, and compares it against the document. A suite that is
-not built in this configuration, or that skipped work because an optional
-dependency is absent, is reported as skipped rather than failed - the documented
-counts assume every optional dependency is present.
+suite reports for itself, and compares it against the document.
+
+A suite that is not built in this configuration, or that skipped work because
+an optional dependency is absent, cannot have its documented count checked - the
+documented counts assume every optional dependency is present. Those are
+reported separately from a mismatch, and by default they do not fail the run:
+the default build tree legitimately omits four of the nine suites, and a local
+developer should not have to build every optional configuration to check the
+five that exist.
+
+The two are deliberately NOT collapsed into one "skipped" bucket, and skip
+detection is deliberately strict, because collapsing them is a vacuous green:
+
+  - "not built" means no binary was found. That is a property of the build
+    tree, and it is what the default configuration looks like.
+  - "skipped" means the binary ran and printed a skip marker. That is a
+    property of the suite, and it is what the ed25519 suite looks like when
+    libsodium is absent - it reports 29 checks instead of 354, which would be
+    a mismatch if the skip were not recognised.
+  - A skip marker is a line whose first token is "SKIP:" (leading whitespace
+    allowed). Matching a bare "SKIP" substring anywhere in the output would
+    also match a failure message that merely contains the word, so a suite
+    could report a genuine mismatch and be counted as skipped. The suites that
+    skip work print the marker in that form; tests/ed25519_test.c and
+    host/selftest.py are the two that do.
+
+In CI, --require-all turns both categories into failures. It is meant to run in
+a job that builds every suite with every optional dependency present, where a
+missing binary or an unexpected skip is a defect in that job - the way a
+sodium job silently losing -DMCF_ENABLE_SODIUM would otherwise pass while
+leaving 17 documented checks unverified everywhere.
 
 Usage:
     python host/check_counts.py --build build
+    python host/check_counts.py --build build-sodium --require-all
 
-Exit status is 0 when every suite that ran agrees with the document, and 1 on any
-mismatch.
+Exit status is 0 when every suite that ran agrees with the document, and 1 on
+any mismatch. With --require-all, a suite that is not built or that reported a
+skip is also a failure. A suite named in the document with no runner known here
+is always a failure: its count is verified nowhere.
 """
 
 from __future__ import annotations
@@ -52,9 +82,13 @@ SUITES = {
     "host_selftest":         ("selftest", r"(\d+) checks"),
 }
 
+# The skip marker: "SKIP:" as the first token on a line, leading whitespace
+# allowed. See the module docstring for why this is not a bare substring match.
+SKIP_MARKER = re.compile(r"^\s*SKIP:", re.MULTILINE)
+
 
 def documented_counts(doc: str) -> dict[str, int]:
-    """Counts the document states, e.g. "| `host_selftest` | 114 checks: ...".
+    """Counts the document states, e.g. "| `host_selftest` | 119 checks: ...".
 
     Only rows that name a count are collected; descriptive rows in the other
     tables do not match and are ignored.
@@ -101,6 +135,10 @@ def main() -> int:
     ap.add_argument("--doc", default=DEFAULT_DOC,
                     help="document stating the check counts "
                          "(default: docs/verification.md)")
+    ap.add_argument("--require-all", action="store_true",
+                    help="fail when a documented suite is not built or reports "
+                         "a skip; for a CI job that builds every suite with "
+                         "every optional dependency present")
     args = ap.parse_args()
 
     build = os.path.abspath(args.build)
@@ -122,13 +160,18 @@ def main() -> int:
     mismatches = 0
     checked = 0
     skipped = 0
+    not_built = 0
+    unknown = 0
 
     for suite in sorted(documented):
         want = documented[suite]
         kind, pattern = SUITES.get(suite, (None, None))
         if kind is None:
-            print(f"  ?  {suite}: documented but no runner is known")
-            skipped += 1
+            # A suite the document names and this script cannot run. Its
+            # documented count is verified nowhere, which is a defect in this
+            # script or the document, not a configuration to tolerate.
+            print(f"  !! {suite}: documented but no runner is known here")
+            unknown += 1
             continue
 
         if kind == "selftest":
@@ -137,23 +180,24 @@ def main() -> int:
             binary = find_binary(build, suite)
             if binary is None:
                 print(f"  -  {suite}: not built in this configuration")
-                skipped += 1
+                not_built += 1
                 continue
             cmd = [binary]
             if kind == "vectors":
                 vectors = os.path.join(build, "lzma_vectors.bin")
                 if not os.path.isfile(vectors):
-                    print(f"  -  {suite}: vectors not generated in this build")
-                    skipped += 1
+                    print(f"  -  {suite}: not built in this configuration "
+                          f"(vectors not generated)")
+                    not_built += 1
                     continue
                 cmd.append(vectors)
 
         output = run(cmd)
 
         # A suite that skipped work because an optional dependency is absent
-        # reports a lower count. The README's numbers assume the full set, so
+        # reports a lower count. The documented numbers assume the full set, so
         # that is a skip here, not a mismatch.
-        if "SKIP" in output:
+        if SKIP_MARKER.search(output):
             print(f"  -  {suite}: skipped (optional dependency absent)")
             skipped += 1
             continue
@@ -173,8 +217,25 @@ def main() -> int:
             mismatches += 1
 
     print(f"\n{checked} suite(s) checked, {skipped} skipped, "
+          f"{not_built} not built, {unknown} with no runner, "
           f"{mismatches} mismatch(es)")
-    return 0 if mismatches == 0 else 1
+
+    if args.require_all and (skipped or not_built):
+        print(f"--require-all: {skipped} suite(s) skipped and {not_built} not "
+              f"built; this job must build every documented suite",
+              file=sys.stderr)
+    elif not_built or skipped:
+        # Not a failure, but not silence either: a green run that checked five
+        # of nine suites should say so where the maintainer is looking.
+        print("note: the suites above were not verified in this tree; the "
+              "counts they hold are checked only where they are built "
+              "(see docs/verification.md, and --require-all for CI)")
+
+    if mismatches or unknown:
+        return 1
+    if args.require_all and (skipped or not_built):
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

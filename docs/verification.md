@@ -8,6 +8,16 @@ build tree, reads the count that suite reports for itself, and fails if it disag
 documented number cannot silently stop being true. It runs in CI as the `documented_counts`
 test.
 
+Which suites that actually covers depends on the tree, and the script says so rather than
+implying otherwise. The default configuration builds five of the nine: the four behind
+`MCF_ENABLE_SODIUM`, `MCF_ENABLE_ED25519` and `MCF_ENABLE_LZMA` are opt-in, and between them they
+hold 721 of the 1,072 documented checks. Those suites are reported as **not built** or **skipped**
+and named in the summary, not folded into a pass. The `sodium` CI job is the one tree that builds
+all nine at once, and it runs the script with `--require-all`, which turns a missing or skipped
+suite into a failure — so the counts are verified in one place in full, rather than the union of
+counts being verified nowhere. Locally, the same script with `--require-all` gives the same gate
+once the optional modules are configured on.
+
 ## The suites
 
 Warning-clean under `-Wall -Wextra -Wconversion -Wsign-conversion -Werror`, with the standard

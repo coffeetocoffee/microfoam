@@ -577,7 +577,7 @@ int main(void)
 #if defined(MCF_TEST_HAVE_SODIUM)
     test_differential();
 #else
-    printf("differential vs libsodium: SKIPPED (build without "
+    printf("SKIP: differential vs libsodium (build without "
            "MCF_ENABLE_SODIUM)\n");
 #endif
     printf("\n%d checks, %d failures\n", g_checks, g_fail);

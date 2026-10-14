@@ -333,7 +333,7 @@ def test_signing() -> None:
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
     except ImportError:
-        print("  SKIP  'cryptography' not installed")
+        print("  SKIP: 'cryptography' not installed")
         return
 
     priv = Ed25519PrivateKey.generate()
@@ -385,7 +385,7 @@ def test_lzma() -> None:
     try:
         import lzma  # noqa: F401
     except ImportError:
-        print("  SKIP  stdlib lzma not available")
+        print("  SKIP: stdlib lzma not available")
         return
 
     old, new = make_firmware(77)
@@ -448,7 +448,7 @@ def test_codec_ratio() -> None:
     try:
         import lzma  # noqa: F401
     except ImportError:
-        print("  SKIP  stdlib lzma not available")
+        print("  SKIP: stdlib lzma not available")
         return
 
     old, new = make_firmware(2024)
@@ -564,7 +564,7 @@ def test_small_image_framing() -> None:
     try:
         from nacl.signing import SigningKey
     except Exception as exc:
-        print(f"  SKIP  PyNaCl unavailable: {exc}")
+        print(f"  SKIP: PyNaCl unavailable: {exc}")
         return
     seed = bytes(range(32)); key = bytes(range(32, 64))
     pub = bytes(SigningKey(seed).verify_key)
@@ -612,7 +612,7 @@ def test_v2() -> None:
         seed = bytes(signing)  # 32-byte seed
         pub = bytes(signing.verify_key)
     except Exception as exc:
-        print(f"  SKIP  PyNaCl unavailable: {exc}")
+        print(f"  SKIP: PyNaCl unavailable: {exc}")
         return
     old, new = make_firmware(123)
     key = bytes(range(32)); key_id = bytes(range(16)); nonce = bytes(range(16, 32))
@@ -671,7 +671,7 @@ def test_v2_kat() -> None:
     try:
         from nacl.signing import SigningKey
     except Exception as exc:
-        print(f"  SKIP  PyNaCl unavailable: {exc}")
+        print(f"  SKIP: PyNaCl unavailable: {exc}")
         return
     seed = bytes(range(32))       # Ed25519 signing seed
     key = bytes(range(32, 64))    # XChaCha20-Poly1305 symmetric key
@@ -706,7 +706,7 @@ def test_v2_nonce_guard() -> None:
     try:
         from nacl.signing import SigningKey
     except Exception as exc:
-        print(f"  SKIP  PyNaCl unavailable: {exc}")
+        print(f"  SKIP: PyNaCl unavailable: {exc}")
         return
     old, new = make_firmware(64)
     with tempfile.TemporaryDirectory() as d:
@@ -788,7 +788,7 @@ def test_v2_host_hygiene() -> None:
     try:
         from nacl.signing import SigningKey
     except Exception as exc:
-        print(f"  SKIP  PyNaCl unavailable: {exc}")
+        print(f"  SKIP: PyNaCl unavailable: {exc}")
         return
     seed = bytes(range(32)); key = bytes(range(32, 64))
     key_id = bytes(range(16)); nonce = bytes(range(16, 32))
