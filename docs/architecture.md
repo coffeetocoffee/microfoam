@@ -1121,7 +1121,7 @@ stream, and reads it back after a reset.
 
 ```c
 typedef struct mcf_journal {
-    uint32_t magic;        /* 'RJCM', or 0 if never written */
+    uint32_t magic;        /* 'RCJM', or 0 if never written */
     uint32_t session_id;   /* CRC-32 of the patch header         */
     uint32_t newpos;       /* output bytes already programmed    */
     uint32_t prefix_crc32; /* CRC-32 of the reconstructed prefix */

@@ -247,7 +247,14 @@ cmake -S . -B build-fuzz -DMCF_BUILD_FUZZER=ON -DMCF_BUILD_FUZZ_V1=ON \
       -DCMAKE_C_COMPILER=clang
 ```
 
-The size gate, run exactly the way CI runs it:
+The size gate is a ctest, so the ordinary test run covers it where the toolchain exists — it
+skips by name otherwise:
+
+```sh
+ctest --test-dir build -R size_gate --output-on-failure
+```
+
+Run exactly the way CI runs it, one core at a time, if you want the raw figures:
 
 ```sh
 cmake -DCORE=cortex-m0 -DCC="$(which arm-none-eabi-gcc)" -DSRC="$PWD" \

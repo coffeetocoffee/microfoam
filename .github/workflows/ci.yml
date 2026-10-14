@@ -20,12 +20,22 @@ permissions:
 
 jobs:
   host:
-    name: host build and tests (${{ matrix.os }})
+    name: host build and tests (${{ matrix.os }}, ${{ matrix.build_type }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
+        # Debug everywhere, plus one Release leg. docs/verification.md states
+        # that the standard configurations pass in Debug and Release, and
+        # nothing checked the Release half: every job in this workflow
+        # configured Debug. One leg is enough to keep the claim true - the
+        # point is that a configuration the documentation names is exercised
+        # at all, not that every OS runs both.
+        build_type: [Debug]
+        include:
+          - os: ubuntu-latest
+            build_type: Release
 
     steps:
       - uses: actions/checkout@v4
@@ -46,13 +56,13 @@ jobs:
         run: python -m pip install --quiet cryptography
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
+        run: cmake -B build -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
 
       - name: Build
-        run: cmake --build build --config Debug
+        run: cmake --build build --config ${{ matrix.build_type }}
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure -C Debug
+        run: ctest --test-dir build --output-on-failure -C ${{ matrix.build_type }}
 
       - name: Report sizes
         if: always()
@@ -64,6 +74,8 @@ jobs:
             ./build/microfoam_tests >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
           elif [ -f build/Debug/microfoam_tests.exe ]; then
             ./build/Debug/microfoam_tests.exe >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          elif [ -f build/Release/microfoam_tests.exe ]; then
+            ./build/Release/microfoam_tests.exe >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
           fi
 
   cross:
@@ -371,7 +383,7 @@ jobs:
           cmp out-v1.bin "$FIX/new.bin"
 
   sodium:
-    name: libsodium RFC, built-in Ed25519, and MFP2 parser-boundary tests
+    name: libsodium RFC, built-in Ed25519, MFP2 boundary, and the full count gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -388,12 +400,32 @@ jobs:
       # asserted to return the same verdict for every case, including
       # signatures libsodium generated over messages neither implementation
       # chose.
-      - name: Configure with sodium and the built-in Ed25519 enabled
-        run: cmake -B build-sodium -DCMAKE_BUILD_TYPE=Debug -DMCF_ENABLE_SODIUM=ON -DMCF_ENABLE_ED25519=ON
+      #
+      # LZMA is enabled here too, deliberately, and this is the only job that
+      # builds every optional module at once. That is what makes the
+      # --require-all step below meaningful: it is the one tree in CI where all
+      # nine documented suites exist, so all nine documented counts are checked
+      # simultaneously rather than the union of counts across jobs being
+      # checked nowhere. Before this, each job ran check_counts leniently, and
+      # no job would have failed if an optional suite stopped being built.
+      - name: Configure with sodium, the built-in Ed25519, and LZMA enabled
+        run: >
+          cmake -B build-sodium -DCMAKE_BUILD_TYPE=Debug
+          -DMCF_ENABLE_SODIUM=ON -DMCF_ENABLE_ED25519=ON -DMCF_ENABLE_LZMA=ON
       - name: Build
         run: cmake --build build-sodium --config Debug
       - name: Test registered sodium targets
         run: ctest --test-dir build-sodium --output-on-failure -C Debug
+      # Every documented suite must exist here and must not skip. A suite that
+      # silently stopped being built - a dropped -DMCF_ENABLE_* above, an
+      # option renamed, a target losing its add_executable - would otherwise
+      # leave this job green while its documented count went unverified
+      # everywhere. The ctest run above generated the LZMA conformance vectors
+      # as the lzma_vectors test, so all nine suites are runnable in this tree;
+      # were LZMA dropped from the configure line, the vectors would not exist
+      # and this step would fail rather than quietly check eight suites.
+      - name: Every documented suite must be present and must not skip
+        run: python host/check_counts.py --build build-sodium --require-all
 
   ed25519:
     name: built-in Ed25519 with no external crypto

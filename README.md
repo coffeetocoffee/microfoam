@@ -206,11 +206,13 @@ formulas: [format-v2.md](docs/format-v2.md).
 ## Proof, not promises
 
 Warning-clean under `-Wall -Wextra -Wconversion -Wsign-conversion -Werror`, the standard
-configurations passing in Debug and Release, and a CI size gate that fails the build if `.text`
-grows past its committed ceiling or any static RAM appears at all.
+configurations passing in Debug and Release, and a size gate — `ctest -R size_gate`, and a CI job
+per core — that fails if `.text` grows past its committed ceiling or any static RAM appears at all.
 
 - **Nine suites, every count machine-checked.** `host/check_counts.py` runs each suite, reads the
-  count it reports for itself, and fails if the documented number disagrees.
+  count it reports for itself, and fails if the documented number disagrees. One CI job builds all
+  nine with every optional module enabled and requires each to be present, so a suite that stopped
+  being built fails the build rather than quietly dropping out of the check.
 - **Fault injection at every stage** — erase failure, program failure, *program succeeding but
   storing the wrong bytes*, truncation, flipped bits, wrong product, downgrade attempts,
   over-budget workspace, unknown codec, wrong CRC, abort, signed-without-verifier — each
@@ -252,6 +254,15 @@ ctest --test-dir build --output-on-failure -C Release
 The signing tests need a host Ed25519 module (`pip install cryptography`); the signing seed is
 generated into the build tree at configure time, so no key needs checking out by hand, and
 `cross_test` fails rather than skips if the module is missing.
+
+That recipe runs the core suites, the cross tests, and the size gate when
+`arm-none-eabi-gcc` is present — without it ctest reports `size_gate` as **skipped**, not passed.
+It does **not** build the optional suites (`MCF_ENABLE_SODIUM`, `MCF_ENABLE_ED25519`,
+`MCF_ENABLE_LZMA` are off by default), so the four suites behind them are not run, and the
+fuzzers and sanitizer builds are separate opt-in modes. In CI every one of those runs, and one
+job builds all nine suites at once and requires each to be present. Which job covers what is in
+[verification.md](docs/verification.md); the switches themselves are in
+[quickstart.md](docs/quickstart.md#build-options).
 
 Or drop the sources into an existing project — no generated code, only what the build selects:
 

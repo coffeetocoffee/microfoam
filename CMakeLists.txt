@@ -465,8 +465,22 @@ if(MCF_BUILD_TESTS)
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/host/check_counts.py
                          --build ${CMAKE_CURRENT_BINARY_DIR})
+        # The dependency list includes lzma_vectors: the conformance suite reads
+        # the generated vectors, and check_counts reports a suite it cannot run
+        # as "not built". Without this, `ctest -j` could race the vector
+        # generation and quietly verify one fewer suite than it appears to.
         set_tests_properties(documented_counts PROPERTIES
-            DEPENDS "microfoam_tests;custom_codec_test;hal_concurrency_test;v2_format_test;host_selftest")
+            DEPENDS "microfoam_tests;custom_codec_test;hal_concurrency_test;v2_format_test;host_selftest;lzma_vectors")
+
+        # The size gate, reachable from ctest rather than only from CI and a
+        # shell snippet in the docs. It needs arm-none-eabi-gcc, which most
+        # machines do not have; host/size_gate.py exits 127 in that case, so
+        # ctest reports a named skip instead of the gate being absent - the
+        # absence of a test and a passing test must not look the same.
+        add_test(NAME size_gate
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/host/size_gate.py)
+        set_tests_properties(size_gate PROPERTIES SKIP_RETURN_CODE 127)
 
         add_test(NAME cross_test
                  COMMAND ${CMAKE_COMMAND}

@@ -21,7 +21,9 @@ once the optional modules are configured on.
 ## The suites
 
 Warning-clean under `-Wall -Wextra -Wconversion -Wsign-conversion -Werror`, with the standard
-configurations passing in both Debug and Release.
+configurations passing in both Debug and Release. The `host` job runs Debug on all three
+platforms and adds one Release leg, so a configuration the documentation names is exercised by
+CI rather than only by whoever happens to build it locally.
 
 | Suite | Checks | What it proves |
 |---|---|---|
@@ -45,6 +47,7 @@ Also in the ctest matrix:
 | `mfp2_host_to_session` | a PyNaCl signed+encrypted patch rejecting 14 tamper variants with zero flash mutations, each pinned to its exact status; resume interrupted at many step counts, resuming byte-exact from every checkpoint (journal advances, no degrade; mid-DIFF captures included; a many-triples patch whose `d_off > new_size` and whose final checkpoint is at `out_off == new_size`) |
 | `documented_counts` | this table against what the suites report |
 | `quickstart_config` | the README's quick-start pair is runnable, not just plausible |
+| `size_gate` | `.text` within the committed ceiling and 0 B static RAM, per core; skips by name without `arm-none-eabi-gcc` |
 
 One check is not a ctest because it does not need a built tree: `cmake/deprecation_probe.cmake`
 runs at **configure** time on every platform and toolchain, compiling
@@ -78,8 +81,14 @@ Design and rationale: [architecture §18](architecture.md#18-test-strategy-and-c
 ## Measured footprint
 
 Measured with `arm-none-eabi-gcc` at `-Os`, every source compiled with the full strict warning
-set and zero warnings. CI gates `.text` against committed ceilings
-(`cmake/size_gate.cmake`) and fails if any static RAM appears at all.
+set and zero warnings. `.text` is gated against committed ceilings (`cmake/size_gate.cmake`,
+driven by `host/size_gate.py`), and the gate fails if any static RAM appears at all.
+
+The gate is a ctest — `ctest -R size_gate` — so it is part of the recipe the README gives, not
+only a CI step. It needs the bare-metal ARM toolchain, which most machines do not have; where it
+is absent the test **skips by name** (`SKIP_RETURN_CODE`) rather than being unregistered, so the
+output distinguishes "the footprint was not checked here" from "the footprint was checked and
+passed". CI runs it per core with the toolchain installed, where a skip cannot occur.
 
 | Target | Code (`.text`) | Static RAM |
 |---|---|---|
