@@ -64,6 +64,14 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure -C ${{ matrix.build_type }}
 
+      # The version_check CTest compares the seven release sites against each
+      # other. This adds the half it deliberately cannot run: when HEAD carries
+      # an exact version tag, the tree must agree with it. A release that bumps
+      # the files but never tags (or tags the wrong number) fails here.
+      - name: Version tag agrees with the tree
+        shell: bash
+        run: python host/check_version.py --tag-check
+
       - name: Report sizes
         if: always()
         shell: bash
@@ -352,6 +360,20 @@ jobs:
           # not to the working tree.
           cd "$RUNNER_TEMP"
           microfoam --version
+
+          # Printing a version proves the entry point resolves; it does not
+          # prove the version it prints is the one the rest of the release
+          # claims. compare that against the tree and the firmware header, so
+          # a bumped pyproject that missed CMakeLists or the MCF_VERSION_*
+          # macros fails here instead of shipping.
+          tree_version=$(python -c "import re,pathlib; \
+            print(re.search(r'^\s*VERSION\s+(\d+\.\d+\.\d+)', pathlib.Path('$GITHUB_WORKSPACE/CMakeLists.txt').read_text(), re.M).group(1))")
+          installed_version=$(microfoam --version | awk '{print $NF}')
+          if [ "$installed_version" != "$tree_version" ]; then
+            echo "installed microfoam reports $installed_version but the tree says $tree_version" >&2
+            exit 1
+          fi
+          echo "installed version $installed_version matches the tree"
 
           # MFP2 (exercises the pynacl extra): sign, encrypt, verify, apply.
           python -c "from nacl.signing import SigningKey; s=bytes(range(32)); open('signing.key','wb').write(s); open('public.key','wb').write(bytes(SigningKey(s).verify_key)); open('symmetric.key','wb').write(bytes(range(32,64)))"

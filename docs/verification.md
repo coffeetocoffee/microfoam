@@ -44,8 +44,9 @@ Also in the ctest matrix:
 | `v1_fuzz_smoke` | the MFP1 parser property oracle, portable build |
 | `v2_fuzz_smoke` | the MFP2 parser property oracle, portable build |
 | `cross_test`, `cross_test_raw`, `cross_test_lzma` | host-tool patches applied by the C library, byte-exact |
-| `mfp2_host_to_session` | a PyNaCl signed+encrypted patch rejecting 14 tamper variants with zero flash mutations, each pinned to its exact status; resume interrupted at many step counts, resuming byte-exact from every checkpoint (journal advances, no degrade; mid-DIFF captures included; a many-triples patch whose `d_off > new_size` and whose final checkpoint is at `out_off == new_size`) |
+| `mfp2_host_to_session` | a PyNaCl signed+encrypted patch rejecting 14 tamper variants with zero flash mutations, each pinned to its exact status **and its exact failure site**; the MFP2 queries (`mcf_v2_session_total`, `mcf_v2_session_error_site`); an inner-engine failure keeping its site through the v2 wrapper; resume interrupted at many step counts, resuming byte-exact from every checkpoint (journal advances, no degrade; mid-DIFF captures included; a many-triples patch whose `d_off > new_size` and whose final checkpoint is at `out_off == new_size`) |
 | `documented_counts` | this table against what the suites report |
+| `version_check` | the seven hand-written release sites against each other, so a bumped `pyproject.toml` cannot ship beside a stale firmware header |
 | `quickstart_config` | the README's quick-start pair is runnable, not just plausible |
 | `size_gate` | `.text` within the committed ceiling and 0 B static RAM, per core; skips by name without `arm-none-eabi-gcc` |
 
@@ -77,6 +78,51 @@ abort, and signed-without-verifier — each asserting a *specific* status code, 
 return `MCF_OK`. The zero-flash-mutation claim is itself falsifiable.
 
 Design and rationale: [architecture §18](architecture.md#18-test-strategy-and-ci).
+
+## Which gate rejected the patch
+
+A status code says *whether* a patch was refused. It does not say *which check* refused it, which
+is the difference between a one-line diagnosis and an afternoon. MFP1 has always answered this with
+`mcf_error_site()`; MFP2 did not, and its `mcf_v2_session_t.site` field was never written at all — so
+every MFP2 failure reported site 0, "no site", regardless of cause. `mcf_v2_session_error_site()`
+now returns it, and `mcf_v2_session_total()` joins it so progress can be read the same way MFP1's
+`mcf_session_total()` works.
+
+The tamper suite pins all 14 variants to their exact site, so the matrix documents itself:
+
+| Tamper | Status | Site |
+|---|---|---|
+| inconsistent payload size, truncated payload | `MCF_E_FORMAT`, `MCF_E_TRUNCATED` | 35 `V2_PARSE` |
+| corrupted AEAD tag, flipped ciphertext byte | `MCF_E_CORRUPT` | 39 `V2_PAYLOAD_CRC` |
+| tampered key id, header field, signature byte | `MCF_E_SIGNATURE` | 40 `V2_SIGNATURE` |
+| unknown key id | `MCF_E_AUTH` | 41 `V2_KEY` |
+| wrong symmetric key, reordered records, wrong nonce, tampered AEAD tag or ciphertext, duplicated record | `MCF_E_AUTH` | 46 `V2_AEAD` |
+
+Note that six different attacks on AEAD bind to the same site. That is the point: they fail for six
+distinct reasons, but the site names the *stage*, and the stage is what an integrator needs.
+
+> [!NOTE]
+> **The ordering here is load-bearing.** `v2_fail()` closes the inner MFP1 session, and
+> `mcf_session_close()` resets the inner site to `MCF_SITE_NONE`. A site read after that close
+> would therefore report 0 for exactly the failures it exists to describe. `v2_fail_inner()`
+> captures the inner site *before* closing and falls back to 48 `V2_INNER` only when the inner
+> engine recorded none. `inner_site_case` in `mfp2_boundary_test` injects a flash program failure —
+> an inner-engine fault with site 27 — and asserts 27 survives the wrapper. Moving that capture
+> below the close fails the suite with `site 48, expected 27`.
+
+## The version the build claims
+
+The release version is written by hand into seven places: `CMakeLists.txt`, `pyproject.toml`,
+`conanfile.py`, `host/microfoam.py`, the `MCF_VERSION_*` macros, the README spec table, and the
+reconciliation note in `docs/architecture.md`. Nothing compared them. Bumping five and forgetting
+two builds cleanly, passes every test, and ships a firmware header that contradicts the PyPI
+metadata — a failure that is invisible until a user compares them.
+
+`version_check` compares all seven and names the offenders. It fails on drift, on a site that has
+stopped declaring a version, and on a file that disagrees with itself. CI adds the half a tarball
+cannot run: with `--tag-check`, an exact git tag on HEAD must match the tree. The packaging job
+separately asserts that the *installed* `microfoam --version` equals the tree version, which closes
+the loop on the artifact rather than the source.
 
 ## Measured footprint
 

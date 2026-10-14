@@ -67,7 +67,7 @@ is a **forward-looking specification**, not a description of existing code.
 > **Reading this against the shipped library.** The architecture was written as a design
 > ahead of the implementation, so parts of it are aspirational. Where a statement is
 > present-tense about the code — a named symbol, a struct layout, a CI gate, a guarantee —
-> it has been reconciled with the `1.9.8` tree and now matches it. Where a statement is a
+> it has been reconciled with the `1.9.9` tree and now matches it. Where a statement is a
 > plan (the §21 roadmap, and the HIL and static-analysis tiers marked as such in §16.4 and
 > §18.1), it is not yet implemented and says so. Treat any unmarked future-tense item as a
 > target, not a claim.
@@ -640,6 +640,22 @@ ambiguous**: it means "success, zero bytes", and only that. (**B-03**, **B-04**)
 `mcf_session_error_site()` records a coarse stage identifier (which layer and which step
 failed) so a field failure is diagnosable from a log line without a debugger (**P1**,
 stakeholder: Operations).
+
+**MFP2 carries the same two queries.** `mcf_v2_session_error_site()` and
+`mcf_v2_session_total()` mirror the MFP1 pair, because a field diagnosis that works for MFP1 and
+silently degrades to "no site" for MFP2 is worse than not having it. MFP2's internal stages occupy
+sites 34–48 (`MCF_SITE_V2_PARSE` through `MCF_SITE_V2_INNER`) and never collide with MFP1's 0–33.
+
+Two rules make the v2 site trustworthy:
+
+1. **Every `v2_fail()` names a site.** A failure with no stage name is a failure the operator cannot
+   act on, so each of the 28 failure sites is spelled out at its call site rather than defaulted.
+2. **The inner site is captured before the inner session closes.** MFP2 delegates decode and apply
+   to an inner MFP1 session, and `mcf_session_close()` resets that session's site to
+   `MCF_SITE_NONE`. Reading it after the close — the obvious way to write this — yields 0 for every
+   inner failure. `v2_fail_inner()` reads first and falls back to `MCF_SITE_V2_INNER` only when the
+   inner engine genuinely recorded nothing, so an inner flash fault reports 27, not 0 and not a
+   generic v2 stage.
 
 ### 9.3 Context ownership (**P3**)
 
@@ -1401,6 +1417,12 @@ Two headline claims are held to a form that can fail:
   format. `cross_test` applies a patch produced by the independently written Python host tool
   with the C library and requires byte-exact output; two independent implementations agreeing
   on a real 35 KB firmware pair is evidence.
+- **The MFP2 failure site.** The tamper matrix pins each variant to an exact site, so removing
+  the site argument from `v2_fail()` turns `site 46` into `site 0` and fails the suite rather
+  than leaving a diagnostic that always says "no site".
+- **The release version.** `version_check` fails if the seven hand-written version sites
+  disagree. A check that merely passed on a consistent tree would prove nothing, so it is
+  verified by bumping each site in isolation and requiring a failure every time.
 
 ---
 
@@ -1411,6 +1433,19 @@ Two headline claims are held to a form that can fail:
 Semantic versioning. The **public API is `mcf_*` only**; the container format version
 (`hdr_ver`) is tracked separately, because a patch format revision must be able to change
 without a library major bump.
+
+One version number is written by hand into seven files — `CMakeLists.txt`, `pyproject.toml`,
+`conanfile.py`, `host/microfoam.py`, the `MCF_VERSION_*` macros, the README spec table, and the
+reconciliation note at the top of this document. That is seven chances to bump five and forget
+two, and the failure mode is silent: the build succeeds, every test passes, and the shipped
+firmware header contradicts the PyPI metadata until a user notices.
+
+`host/check_version.py` is the missing comparison, registered as the `version_check` ctest so no
+build can skip it. It fails on three conditions: the sites disagree, a site no longer declares a
+version, or one file disagrees with itself. CI adds `--tag-check`, which additionally requires an
+exact git tag on HEAD to match the tree, and the packaging job asserts the *installed*
+`microfoam --version` equals the tree version — testing the shipped artifact rather than the
+source it was built from.
 
 ### 19.2 Format compatibility
 

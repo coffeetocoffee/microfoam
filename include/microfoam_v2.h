@@ -286,6 +286,24 @@ uint32_t mcf_v2_session_flags(const mcf_v2_session_t *s);
  * session starts at the resume point's out_off, not at zero). */
 uint32_t mcf_v2_session_progress(const mcf_v2_session_t *s);
 
+/* Total output bytes this patch will program - the container's new_size, so
+ * progress() can be read against it. Populated by open() from the parsed
+ * container; 0 when the patch did not parse, which is the same value an
+ * empty image would report, so a failed session should be diagnosed from
+ * status() rather than from this. Mirrors mcf_session_total() for MFP1. */
+uint32_t mcf_v2_session_total(const mcf_v2_session_t *s);
+
+/* Stable identifier for the failing stage, for field diagnostics - the MFP2
+ * counterpart of mcf_session_error_site(). Values are the MCF_SITE_* set:
+ * the container's own stages for failures raised here (parse, signature, key
+ * provider, framing, AEAD, workspace), and the inner engine's site unchanged
+ * when the failure came from the engine, so one code space covers both
+ * layers. MCF_SITE_NONE (0) means the session has not failed.
+ *
+ * The site is captured before the inner session is torn down on failure;
+ * reading it after the failure is the intended use. */
+uint32_t mcf_v2_session_error_site(const mcf_v2_session_t *s);
+
 /* Structural parser only; never decrypts, decodes, verifies signatures, or
  * writes flash, and is not a session path. A successful parse means only that
  * the container shape is valid, not that the patch is authentic or acceptable.

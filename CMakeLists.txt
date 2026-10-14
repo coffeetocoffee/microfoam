@@ -6,7 +6,7 @@
 cmake_minimum_required(VERSION 3.15)
 
 project(microfoam
-    VERSION 1.9.8
+    VERSION 1.9.9
     DESCRIPTION "Firmware delta update library for resource-constrained microcontrollers"
     LANGUAGES C)
 
@@ -471,6 +471,19 @@ if(MCF_BUILD_TESTS)
         # generation and quietly verify one fewer suite than it appears to.
         set_tests_properties(documented_counts PROPERTIES
             DEPENDS "microfoam_tests;custom_codec_test;hal_concurrency_test;v2_format_test;host_selftest;lzma_vectors")
+
+        # The release version is written by hand into seven files. Nothing else
+        # compares them, so bumping five and forgetting two builds fine, passes
+        # every test, and ships a firmware header that contradicts the PyPI
+        # metadata. This gate compares all seven against each other.
+        #
+        # Only the tree comparison runs here. The git tag half (--tag-check)
+        # needs a repository, which a release tarball is not, so it stays in CI
+        # where the checkout exists.
+        add_test(NAME version_check
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/host/check_version.py
+                         --root ${CMAKE_CURRENT_SOURCE_DIR})
 
         # The size gate, reachable from ctest rather than only from CI and a
         # shell snippet in the docs. It needs arm-none-eabi-gcc, which most

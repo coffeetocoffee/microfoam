@@ -59,7 +59,7 @@ extern "C" {
 
 #define MCF_VERSION_MAJOR 1u
 #define MCF_VERSION_MINOR 9u
-#define MCF_VERSION_PATCH 8u
+#define MCF_VERSION_PATCH 9u
 
 /* Packed as (major << 16) | (minor << 8) | patch. */
 uint32_t mcf_version(void);

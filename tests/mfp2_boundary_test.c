@@ -12,9 +12,38 @@
 #define FLASH_BASE 0x08010000u
 #define BLOCK_SIZE 1024u
 
+/* Sites, mirrored from src/mcf_internal.h. The test asserts the *stage*, so a
+ * renumbering in the header without updating this test is a build-visible
+ * change. The v1 values are pinned here too, because a v2 failure that comes
+ * from the inner engine must report the inner site unchanged. */
+#define SITE_NONE        0u
+#define SITE_CODEC_INIT  16u
+#define SITE_FLASH_ERASE 26u
+#define SITE_FLASH_WRITE 27u
+#define SITE_V2_STATE        34u
+#define SITE_V2_PARSE        35u
+#define SITE_V2_PRODUCT      36u
+#define SITE_V2_ROLLBACK     37u
+#define SITE_V2_MISMATCH     38u
+#define SITE_V2_PAYLOAD_CRC  39u
+#define SITE_V2_SIGNATURE    40u
+#define SITE_V2_KEY          41u
+#define SITE_V2_WORKSPACE    42u
+#define SITE_V2_CONFIG       43u
+#define SITE_V2_RESUME       44u
+#define SITE_V2_FRAMING      45u
+#define SITE_V2_AEAD         46u
+#define SITE_V2_RECORD       47u
+#define SITE_V2_INNER        48u
+
 static uint8_t flash[FLASH_SIZE];
 static uint8_t workspace[FLASH_SIZE];
 static unsigned mutations;
+
+/* Failure injection for the inner-site propagation case: with
+ * fail_write_after > 0, flash_write() succeeds that many more times and then
+ * fails. Zero disables it, which is the state every other case runs in. */
+static unsigned fail_write_after;
 
 typedef struct crypto_ctx {
     uint8_t public_key[crypto_sign_PUBLICKEYBYTES];
@@ -38,6 +67,10 @@ static int32_t flash_erase(void *ctx, uint32_t addr, uint32_t len)
 static int32_t flash_write(void *ctx, uint32_t addr, const uint8_t *p, uint32_t len)
 {
     uint32_t off; (void)ctx;
+    if (fail_write_after != 0u) {
+        fail_write_after--;
+        if (fail_write_after == 0u) return MCF_E_FLASH;
+    }
     if (p == NULL || !flash_range(addr, len, &off)) return MCF_E_FLASH;
     memcpy(&flash[off], p, len); mutations++; return MCF_OK;
 }
@@ -118,6 +151,91 @@ static int run_patch(const uint8_t *patch, uint32_t patch_len, const uint8_t *ol
     return st;
 }
 
+/* run_patch(), but reporting the failure site. The site must be read BEFORE
+ * close(): close() resets it, exactly as the inner session's close does. */
+static mcf_status_t run_patch_site(const uint8_t *patch, uint32_t patch_len,
+                                   const uint8_t *old, uint32_t old_len,
+                                   crypto_ctx_t *crypto, uint32_t *site)
+{
+    mcf_v2_config_t cfg; mcf_v2_session_t s; mcf_status_t st;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.hal = &hal; cfg.patch = patch; cfg.patch_size = patch_len;
+    cfg.old = old; cfg.old_size = old_len; cfg.dst_addr = FLASH_BASE;
+    cfg.block_size = BLOCK_SIZE; cfg.ram_budget = sizeof(workspace);
+    cfg.workspace = workspace; cfg.workspace_size = sizeof(workspace);
+    cfg.key_provider = provide_key; cfg.key_ctx = crypto;
+    cfg.verify = verify_ed25519ph; cfg.verify_ctx = crypto;
+    cfg.aead = decrypt_aead; cfg.aead_ctx = crypto;
+    st = mcf_v2_session_open(&s, &cfg);
+    if (st == MCF_OK) st = mcf_v2_session_run(&s);
+    if (site != NULL) *site = mcf_v2_session_error_site(&s);
+    mcf_v2_session_close(&s);
+    return st;
+}
+
+/* The two MFP2 queries the review found missing, exercised on the positive
+ * path: progress must be readable against a total, and a completed run must
+ * report no failure site. Both read the session before close(). */
+static int total_progress_case(const uint8_t *patch, uint32_t patch_len,
+                               const uint8_t *old, uint32_t old_len,
+                               const uint8_t *expected, uint32_t new_len,
+                               crypto_ctx_t *crypto)
+{
+    mcf_v2_config_t cfg; mcf_v2_session_t s; mcf_status_t st;
+    uint32_t total;
+
+    memset(flash, 0xFF, sizeof(flash));
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.hal = &hal; cfg.patch = patch; cfg.patch_size = patch_len;
+    cfg.old = old; cfg.old_size = old_len; cfg.dst_addr = FLASH_BASE;
+    cfg.block_size = BLOCK_SIZE; cfg.ram_budget = sizeof(workspace);
+    cfg.workspace = workspace; cfg.workspace_size = sizeof(workspace);
+    cfg.key_provider = provide_key; cfg.key_ctx = crypto;
+    cfg.verify = verify_ed25519ph; cfg.verify_ctx = crypto;
+    cfg.aead = decrypt_aead; cfg.aead_ctx = crypto;
+
+    st = mcf_v2_session_open(&s, &cfg);
+    if (st != MCF_OK) { fprintf(stderr, "total: open failed %d\n", (int)st); return 0; }
+    /* total() is the container's new_size and is available before begin(). */
+    total = mcf_v2_session_total(&s);
+    if (total != new_len) {
+        fprintf(stderr, "total: %u, expected new_size %u\n",
+                (unsigned)total, (unsigned)new_len);
+        mcf_v2_session_close(&s);
+        return 0;
+    }
+    st = mcf_v2_session_run(&s);
+    if (st != MCF_OK) {
+        fprintf(stderr, "total: run failed %d at site %u\n", (int)st,
+                (unsigned)mcf_v2_session_error_site(&s));
+        mcf_v2_session_close(&s);
+        return 0;
+    }
+    /* Progress and total are the same quantity in the same coordinates, so a
+     * completed run reports progress == total == new_size. A total() that
+     * returned 0, or progress in different units, fails here. */
+    if (mcf_v2_session_progress(&s) != total || total != new_len) {
+        fprintf(stderr, "total: progress %u != total %u\n",
+                (unsigned)mcf_v2_session_progress(&s), (unsigned)total);
+        mcf_v2_session_close(&s);
+        return 0;
+    }
+    if (mcf_v2_session_error_site(&s) != 0u) {
+        fprintf(stderr, "total: a successful run reports site %u\n",
+                (unsigned)mcf_v2_session_error_site(&s));
+        mcf_v2_session_close(&s);
+        return 0;
+    }
+    mcf_v2_session_close(&s);
+    if (memcmp(flash, expected, new_len) != 0) {
+        fprintf(stderr, "total: image is not byte-exact\n");
+        return 0;
+    }
+    printf("  ok  total() == new_size and progress reaches it (%u bytes)\n",
+           (unsigned)total);
+    return 1;
+}
+
 /* Differential proof of the streaming design: the same patch must apply
  * byte-exact in a workspace far smaller than the whole decrypted payload,
  * which the pre-streaming "decrypt every record into scratch" design
@@ -182,15 +300,23 @@ static int streaming_workspace_case(const uint8_t *patch, uint32_t patch_len,
     return 1;
 }
 
+/* Reject a patch and assert BOTH the status and the failure site.
+ *
+ * The site is pinned for the same reason the status is: a case that dies for
+ * the wrong reason must fail the suite rather than quietly report ok. Every
+ * rejection below names the stage it must die at, so no case accepts
+ * SITE_NONE. */
 static int expect_case(const char *name, const uint8_t *patch, uint32_t patch_len,
-                       const uint8_t *flash_fill, mcf_status_t want, crypto_ctx_t *crypto,
+                       const uint8_t *flash_fill, mcf_status_t want,
+                       uint32_t want_site, crypto_ctx_t *crypto,
                        const uint8_t *old, uint32_t old_len)
 {
     mcf_status_t st;
+    uint32_t site = SITE_NONE;
     memset(flash, 0xFF, sizeof(flash));
     if (flash_fill) memcpy(flash, flash_fill, sizeof(flash));
     mutations = 0;
-    st = run_patch(patch, patch_len, old, old_len, crypto);
+    st = run_patch_site(patch, patch_len, old, old_len, crypto, &site);
     if (st == MCF_OK) {
         fprintf(stderr, "%s: expected rejection, session succeeded\n", name);
         return 0;
@@ -202,12 +328,17 @@ static int expect_case(const char *name, const uint8_t *patch, uint32_t patch_le
         fprintf(stderr, "%s: status %d, expected %d\n", name, (int)st, (int)want);
         return 0;
     }
+    if (site != want_site) {
+        fprintf(stderr, "%s: site %u, expected %u\n", name,
+                (unsigned)site, (unsigned)want_site);
+        return 0;
+    }
     if (mutations != 0u) {
         fprintf(stderr, "%s: %u flash mutations on a pre-application failure\n",
                 name, mutations);
         return 0;
     }
-    printf("  ok  %-24s (status %d)\n", name, (int)st);
+    printf("  ok  %-24s (status %d, site %u)\n", name, (int)st, (unsigned)site);
     return 1;
 }
 
@@ -339,6 +470,42 @@ static int run_resume(const uint8_t *patch, uint32_t patch_len,
         fprintf(stderr, "resumed image is not byte-exact\n");
         return 0;
     }
+    return 1;
+}
+
+/* The inner engine's site must survive v2_fail().
+ *
+ * v2_fail() closes the inner session, and mcf_session_close() resets the
+ * inner site to MCF_SITE_NONE - so a site read after the close, or an
+ * accessor that wrapped the inner session instead of the v2 session, would
+ * always report 0 for exactly the failures it exists to describe. A flash
+ * write failure is the cleanest inner failure to inject: it is raised by the
+ * inner engine's emit path with site 27, and the v2 accessor must report 27,
+ * not 0. Falsifiable: deleting the site capture in v2_fail_inner() turns this
+ * into "site 0, expected 27". */
+static int inner_site_case(const uint8_t *patch, uint32_t patch_len,
+                           const uint8_t *old, uint32_t old_len,
+                           crypto_ctx_t *crypto)
+{
+    mcf_status_t st;
+    uint32_t site = SITE_NONE;
+    memset(flash, 0xFF, sizeof(flash));
+    mutations = 0;
+    fail_write_after = 1u;   /* erase succeeds, the first program fails */
+    st = run_patch_site(patch, patch_len, old, old_len, crypto, &site);
+    fail_write_after = 0u;
+    if ((int32_t)st != (int32_t)MCF_E_FLASH) {
+        fprintf(stderr, "inner-site: status %d, expected %d\n",
+                (int)st, (int)MCF_E_FLASH);
+        return 0;
+    }
+    if (site != SITE_FLASH_WRITE) {
+        fprintf(stderr, "inner-site: site %u, expected %u\n",
+                (unsigned)site, (unsigned)SITE_FLASH_WRITE);
+        return 0;
+    }
+    printf("  ok  inner-engine failure keeps its site (%u) through the v2 wrapper\n",
+           (unsigned)site);
     return 1;
 }
 
@@ -521,13 +688,24 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    /* The two MFP2 queries the MFP1 surface always had: a total to read
+     * progress against, and a failure site for field diagnosis. */
+    if (!total_progress_case(patch, patch_len, old, old_len, expected, new_len, &crypto)) {
+        return 1;
+    }
+
+    /* The inner engine's site must survive the v2 failure path. */
+    if (!inner_site_case(patch, patch_len, old, old_len, &crypto)) {
+        return 1;
+    }
+
     /* Wrong symmetric key: signature passes, key provider matches the id,
      * every record AEAD must fail authentication. */
     { uint8_t saved[MCF_V2_KEY_SIZE];
       memcpy(saved, crypto.symmetric_key, sizeof(saved));
       crypto.symmetric_key[0] ^= 1u;
       ok &= expect_case("wrong symmetric key", patch, patch_len, NULL,
-                        MCF_E_AUTH, &crypto, old, old_len);
+                        MCF_E_AUTH, SITE_V2_AEAD, &crypto, old, old_len);
       memcpy(crypto.symmetric_key, saved, sizeof(saved)); }
 
     /* ---- Tampering that is NOT re-signed: each must die at a cheap gate.
@@ -542,7 +720,7 @@ int main(int argc, char **argv)
           memcpy(tampered, patch, patch_len);
           tampered[MCF_V2_OFF_KEY_ID] ^= 1u;
           ok &= expect_case("tampered key id", tampered, patch_len, NULL,
-                            MCF_E_SIGNATURE, &crypto, old, old_len);
+                            MCF_E_SIGNATURE, SITE_V2_SIGNATURE, &crypto, old, old_len);
           free(tampered);
       } else ok = 0; }
 
@@ -554,7 +732,7 @@ int main(int argc, char **argv)
           memcpy(tampered, patch, patch_len);
           tampered[MCF_V2_OFF_NEW_CRC] ^= 1u;
           ok &= expect_case("tampered header field", tampered, patch_len, NULL,
-                            MCF_E_SIGNATURE, &crypto, old, old_len);
+                            MCF_E_SIGNATURE, SITE_V2_SIGNATURE, &crypto, old, old_len);
           free(tampered);
       } else ok = 0; }
 
@@ -562,7 +740,7 @@ int main(int argc, char **argv)
       if (tampered) {
           memcpy(tampered, patch, patch_len); tampered[MCF_V2_OFF_SIGNATURE] ^= 1u;
           ok &= expect_case("flipped signature byte", tampered, patch_len, NULL,
-                            MCF_E_SIGNATURE, &crypto, old, old_len);
+                            MCF_E_SIGNATURE, SITE_V2_SIGNATURE, &crypto, old, old_len);
           free(tampered);
       } else ok = 0; }
 
@@ -573,7 +751,7 @@ int main(int argc, char **argv)
           memcpy(tampered, patch, patch_len);
           tampered[MCF_V2_OFF_PAYLOAD_SIZE] ^= 0x10u;
           ok &= expect_case("inconsistent payload size", tampered, patch_len, NULL,
-                            MCF_E_FORMAT, &crypto, old, old_len);
+                            MCF_E_FORMAT, SITE_V2_PARSE, &crypto, old, old_len);
           free(tampered);
       } else ok = 0; }
 
@@ -581,7 +759,7 @@ int main(int argc, char **argv)
     { uint32_t cut = patch_len - 8u;
       if (cut > (mcf_v2_parse(patch, patch_len, &view), view.header_len)) {
           ok &= expect_case("truncated payload", patch, cut, NULL,
-                            MCF_E_TRUNCATED, &crypto, old, old_len);
+                            MCF_E_TRUNCATED, SITE_V2_PARSE, &crypto, old, old_len);
       } else ok = 0; }
 
     /* In-place corruption of the record area is caught by the payload CRC,
@@ -595,12 +773,12 @@ int main(int argc, char **argv)
           memcpy(tampered, patch, patch_len);
           tampered[patch_len - 1u] ^= 1u;           /* last byte is the final tag */
           ok &= expect_case("corrupted AEAD tag", tampered, patch_len, NULL,
-                            MCF_E_CORRUPT, &crypto, old, old_len);
+                            MCF_E_CORRUPT, SITE_V2_PAYLOAD_CRC, &crypto, old, old_len);
           memcpy(tampered, patch, patch_len);
           off = view.header_len + 4u;               /* first ciphertext byte */
           if (off < patch_len) tampered[off] ^= 1u;
           ok &= expect_case("flipped ciphertext byte", tampered, patch_len, NULL,
-                            MCF_E_CORRUPT, &crypto, old, old_len);
+                            MCF_E_CORRUPT, SITE_V2_PAYLOAD_CRC, &crypto, old, old_len);
           free(tampered);
       } else ok = 0; }
 
@@ -613,29 +791,29 @@ int main(int argc, char **argv)
     /* Units swapped verbatim: only the AAD record index ties a ciphertext to
      * its position. */
     if (reord) ok &= expect_case("reordered records", reord, reord_len, NULL,
-                                 MCF_E_AUTH, &crypto, old, old_len);
+                                 MCF_E_AUTH, SITE_V2_AEAD, &crypto, old, old_len);
     else ok = 0;
 
     /* The header declares a nonce prefix the ciphertexts were not sealed
      * under, so the device derives a different per-record nonce. */
     if (wrong_nonce) ok &= expect_case("wrong nonce prefix", wrong_nonce, wrong_nonce_len,
-                                       NULL, MCF_E_AUTH, &crypto, old, old_len);
+                                       NULL, MCF_E_AUTH, SITE_V2_AEAD, &crypto, old, old_len);
     else ok = 0;
 
     /* One bit of a record's AEAD tag, payload CRC recomputed. */
     if (tag_tamper) ok &= expect_case("tampered AEAD tag", tag_tamper, tag_tamper_len,
-                                      NULL, MCF_E_AUTH, &crypto, old, old_len);
+                                      NULL, MCF_E_AUTH, SITE_V2_AEAD, &crypto, old, old_len);
     else ok = 0;
 
     /* One bit of record 0's ciphertext, payload CRC recomputed. */
     if (ct_tamper) ok &= expect_case("tampered ciphertext", ct_tamper, ct_tamper_len,
-                                     NULL, MCF_E_AUTH, &crypto, old, old_len);
+                                     NULL, MCF_E_AUTH, SITE_V2_AEAD, &crypto, old, old_len);
     else ok = 0;
 
     /* Validly signed, but the key id names a key the provider does not hold:
      * the provider rejects before a single record is decrypted. */
     if (bad_key_id) ok &= expect_case("unknown key id", bad_key_id, bad_key_id_len,
-                                      NULL, MCF_E_AUTH, &crypto, old, old_len);
+                                      NULL, MCF_E_AUTH, SITE_V2_KEY, &crypto, old, old_len);
     else ok = 0;
 
     /* One record's unit replayed in another's slot. Distinct from reordering,
@@ -644,7 +822,7 @@ int main(int argc, char **argv)
      * to accept the same authenticated record a second time. The AAD index is
      * the only thing that can catch it. */
     if (dupe) ok &= expect_case("duplicated record", dupe, dupe_len,
-                                NULL, MCF_E_AUTH, &crypto, old, old_len);
+                                NULL, MCF_E_AUTH, SITE_V2_AEAD, &crypto, old, old_len);
     else ok = 0;
 
     /* ---------------- Resume scenarios ---------------- */

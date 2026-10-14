@@ -30,9 +30,16 @@ static void v2_wr32(uint8_t *p, uint32_t x)
 {
     p[0]=(uint8_t)x; p[1]=(uint8_t)(x>>8); p[2]=(uint8_t)(x>>16); p[3]=(uint8_t)(x>>24);
 }
-static mcf_status_t v2_fail(mcf_v2_session_t *s, mcf_status_t st)
+/* Fail the session, recording the stage. `site` is a MCF_SITE_* value.
+ *
+ * An inner-engine failure must pass mcf_session_error_site(s->inner) as the
+ * argument, or use v2_fail_inner() below: this function closes the inner
+ * session, and mcf_session_close() resets the inner site to MCF_SITE_NONE. A
+ * wrapper that read the inner site after this call would therefore always
+ * report "no site" - the exact diagnostic it exists to carry. */
+static mcf_status_t v2_fail(mcf_v2_session_t *s, mcf_status_t st, uint32_t site)
 {
-    s->status = st; s->state = MCF_ST_FAILED;
+    s->status = st; s->state = MCF_ST_FAILED; s->site = site;
     if (s->inner != NULL) mcf_session_close(s->inner);
     v2_wipe(s->key, (uint32_t)sizeof(s->key));
     if (s->scratch != NULL) v2_wipe(s->scratch, s->scratch_len);
@@ -40,6 +47,17 @@ static mcf_status_t v2_fail(mcf_v2_session_t *s, mcf_status_t st)
     if (s->win != NULL) v2_wipe(s->win, s->win_cap);
     s->win = NULL; s->win_len = 0u;
     return st;
+}
+
+/* Report a failure raised by the inner engine, carrying its site across the
+ * close in v2_fail(). MCF_SITE_V2_INNER is the fallback for the one inner
+ * failure that records no site: mcf_session_open() rejecting its config
+ * returns MCF_E_PARAM before a site can be set. */
+static mcf_status_t v2_fail_inner(mcf_v2_session_t *s, mcf_status_t st)
+{
+    uint32_t site = (s->inner != NULL) ? mcf_session_error_site(s->inner)
+                                       : MCF_SITE_NONE;
+    return v2_fail(s, st, (site != MCF_SITE_NONE) ? site : MCF_SITE_V2_INNER);
 }
 
 /* ---------------------------------------------------------------------- *
@@ -456,15 +474,15 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
     mcf_resume_point_t pt;
     mcf_hdr_view_t hv;
     if (s==NULL || s->cfg==NULL) return MCF_E_PARAM;
-    if (s->state!=MCF_ST_IDLE) return v2_fail(s,MCF_E_STATE);
+    if (s->state!=MCF_ST_IDLE) return v2_fail(s,MCF_E_STATE,MCF_SITE_V2_STATE);
     c=s->cfg;
-    r=(int32_t)mcf_v2_parse(c->patch,c->patch_size,&v); if (r!=MCF_OK) return v2_fail(s,(mcf_status_t)r);
+    r=(int32_t)mcf_v2_parse(c->patch,c->patch_size,&v); if (r!=MCF_OK) return v2_fail(s,(mcf_status_t)r,MCF_SITE_V2_PARSE);
     if (c->hal->get_product_id==NULL || c->hal->get_fw_version==NULL ||
-        v.product_id!=c->hal->get_product_id(c->hal->ctx)) return v2_fail(s,MCF_E_PRODUCT);
-    if (v.fw_version<=c->hal->get_fw_version(c->hal->ctx)) return v2_fail(s,MCF_E_ROLLBACK);
-    if (v.old_version!=c->hal->get_fw_version(c->hal->ctx) || v.old_size!=c->old_size) return v2_fail(s,MCF_E_MISMATCH);
+        v.product_id!=c->hal->get_product_id(c->hal->ctx)) return v2_fail(s,MCF_E_PRODUCT,MCF_SITE_V2_PRODUCT);
+    if (v.fw_version<=c->hal->get_fw_version(c->hal->ctx)) return v2_fail(s,MCF_E_ROLLBACK,MCF_SITE_V2_ROLLBACK);
+    if (v.old_version!=c->hal->get_fw_version(c->hal->ctx) || v.old_size!=c->old_size) return v2_fail(s,MCF_E_MISMATCH,MCF_SITE_V2_MISMATCH);
     crc=mcf_crc32(&c->patch[v.header_len],v.payload_size);
-    if (crc!=mcf_rd32(&c->patch[MCF_V2_OFF_PAYLOAD_CRC])) return v2_fail(s,MCF_E_CORRUPT);
+    if (crc!=mcf_rd32(&c->patch[MCF_V2_OFF_PAYLOAD_CRC])) return v2_fail(s,MCF_E_CORRUPT,MCF_SITE_V2_PAYLOAD_CRC);
 
     /* Streaming workspace:
      *   [0, 124)                        synthetic MFP1 header
@@ -476,14 +494,14 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
     ad  = 8u + (uint32_t)v.header_len + 8u;
     win = (2u * ((uint32_t)1u << v.record_log2)) + 4u;
     if (!v2_add_u32(124u, win, &need) || !v2_add_u32(need, ad, &need) ||
-        need > c->workspace_size || need > c->ram_budget) return v2_fail(s,MCF_E_DICT_TOO_LARGE);
-    if (v.workspace_req == 0u || v.workspace_req > c->ram_budget) return v2_fail(s,MCF_E_DICT_TOO_LARGE);
+        need > c->workspace_size || need > c->ram_budget) return v2_fail(s,MCF_E_DICT_TOO_LARGE,MCF_SITE_V2_WORKSPACE);
+    if (v.workspace_req == 0u || v.workspace_req > c->ram_budget) return v2_fail(s,MCF_E_DICT_TOO_LARGE,MCF_SITE_V2_WORKSPACE);
     buf=(uint8_t *)c->workspace;
     s->scratch = buf; s->scratch_len = need;
     s->win = &buf[124u]; s->win_cap = win;
     s->ad  = &buf[124u + win]; s->ad_len = ad;
     if (v2_ranges_overlap(c->patch, c->patch_size, buf, need) ||
-        (c->old != NULL && v2_ranges_overlap(c->old, c->old_size, buf, need))) return v2_fail(s,MCF_E_PARAM);
+        (c->old != NULL && v2_ranges_overlap(c->old, c->old_size, buf, need))) return v2_fail(s,MCF_E_PARAM,MCF_SITE_V2_CONFIG);
     hdr=buf; memcpy(hdr,c->patch,v.header_len); memset(&hdr[MCF_V2_OFF_SIGNATURE],0,MCF_SIG_SIZE);
     /* The signature covers the ciphertext record area, which is always
      * resident in the patch, so it is verified here in full before any
@@ -491,14 +509,14 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
     r=c->verify(c->verify_ctx,&c->patch[MCF_V2_OFF_SIGNATURE],MCF_SIG_SIZE,
                 (const uint8_t *)MCF_V2_SIGNATURE_DOMAIN,8u,hdr,v.header_len,
                 &c->patch[v.header_len],v.payload_size);
-    if (r!=MCF_OK) return v2_fail(s,(r<0 && r!=MCF_E_SIGNATURE)?(mcf_status_t)r:MCF_E_SIGNATURE);
+    if (r!=MCF_OK) return v2_fail(s,(r<0 && r!=MCF_E_SIGNATURE)?(mcf_status_t)r:MCF_E_SIGNATURE,MCF_SITE_V2_SIGNATURE);
     r=(int32_t)c->key_provider(c->key_ctx,&c->patch[MCF_V2_OFF_KEY_ID],s->key);
-    if (r!=MCF_OK) return v2_fail(s,(r<0)?(mcf_status_t)r:MCF_E_IO);
+    if (r!=MCF_OK) return v2_fail(s,(r<0)?(mcf_status_t)r:MCF_E_IO,MCF_SITE_V2_KEY);
 
     /* A resume feeds the codec from the record the journal names; earlier
      * records were already authenticated and their output programmed. */
     if (s->resume_positioned) {
-        if (s->resume_record >= v.record_count) return v2_fail(s, MCF_E_PARAM);
+        if (s->resume_record >= v.record_count) return v2_fail(s, MCF_E_PARAM, MCF_SITE_V2_RESUME);
         start = s->resume_record;
     }
 
@@ -510,9 +528,9 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
     s->hdr_len = v.header_len;
     for (i=0u;i<start;i++) {
         uint32_t len;
-        if(v.payload_size-pos<4u) return v2_fail(s,MCF_E_FORMAT);
+        if(v.payload_size-pos<4u) return v2_fail(s,MCF_E_FORMAT,MCF_SITE_V2_FRAMING);
         len=mcf_rd32(&c->patch[v.header_len+pos]); pos+=4u;
-        if(len==0u || len>(1u<<v.record_log2) || len>v.payload_size-pos || v.payload_size-pos-len<16u) return v2_fail(s,MCF_E_FORMAT);
+        if(len==0u || len>(1u<<v.record_log2) || len>v.payload_size-pos || v.payload_size-pos-len<16u) return v2_fail(s,MCF_E_FORMAT,MCF_SITE_V2_FRAMING);
         pos+=len+16u;
     }
     start_off = pos;   /* framing offset of record `start`'s length field */
@@ -528,27 +546,27 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
         uint32_t rlog = 1u << v.record_log2;
         for (i=start;i<v.record_count;i++) {
             uint32_t len, off;
-            if(v.payload_size-pos<4u) return v2_fail(s,MCF_E_FORMAT);
+            if(v.payload_size-pos<4u) return v2_fail(s,MCF_E_FORMAT,MCF_SITE_V2_FRAMING);
             len=mcf_rd32(&c->patch[v.header_len+pos]); pos+=4u;
-            if(len==0u || len>rlog || len>v.payload_size-pos || v.payload_size-pos-len<16u) return v2_fail(s,MCF_E_FORMAT);
+            if(len==0u || len>rlog || len>v.payload_size-pos || v.payload_size-pos-len<16u) return v2_fail(s,MCF_E_FORMAT,MCF_SITE_V2_FRAMING);
             off = pos;
             { uint32_t k; for(k=0u;k<4u;k++) s->nonce_pre[16u+k]=(uint8_t)(i>>(8u*k)); }
             s->nonce_pre[20u]=0u; s->nonce_pre[21u]=0u; s->nonce_pre[22u]=0u; s->nonce_pre[23u]=0u;
             v2_wr32(&s->ad[8u+v.header_len],i); v2_wr32(&s->ad[12u+v.header_len],len);
             r=c->aead(c->aead_ctx,s->key,s->nonce_pre,&c->patch[v.header_len+off],len,
                       &c->patch[v.header_len+off+len],16u,s->ad,s->ad_len,s->win);
-            if(r!=MCF_OK) return v2_fail(s,(r<0 && r!=MCF_E_AUTH)?(mcf_status_t)r:MCF_E_AUTH);
+            if(r!=MCF_OK) return v2_fail(s,(r<0 && r!=MCF_E_AUTH)?(mcf_status_t)r:MCF_E_AUTH,MCF_SITE_V2_AEAD);
             r=(int32_t)v2_record_dlen(s->win,len,&rec_dlen);
-            if(r!=MCF_OK) return v2_fail(s,MCF_E_CORRUPT);
-            if (delta_size > UINT32_MAX-rec_dlen) return v2_fail(s,MCF_E_CORRUPT);
+            if(r!=MCF_OK) return v2_fail(s,MCF_E_CORRUPT,MCF_SITE_V2_RECORD);
+            if (delta_size > UINT32_MAX-rec_dlen) return v2_fail(s,MCF_E_CORRUPT,MCF_SITE_V2_RECORD);
             delta_size += rec_dlen;
-            if (framed_total > UINT32_MAX-len) return v2_fail(s,MCF_E_CORRUPT);
+            if (framed_total > UINT32_MAX-len) return v2_fail(s,MCF_E_CORRUPT,MCF_SITE_V2_RECORD);
             framed_total += len;
             pos+=len+16u;
         }
     }
-    if(pos!=v.payload_size) return v2_fail(s,MCF_E_FORMAT);
-    if(delta_size==0u) return v2_fail(s,MCF_E_CORRUPT);
+    if(pos!=v.payload_size) return v2_fail(s,MCF_E_FORMAT,MCF_SITE_V2_FRAMING);
+    if(delta_size==0u) return v2_fail(s,MCF_E_CORRUPT,MCF_SITE_V2_RECORD);
     /* The walk used win[] as scratch; the feed starts clean at the stream
      * head and re-decrypts as the engine asks. */
     v2_wipe(s->win, win);
@@ -575,9 +593,9 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
         log2 = v.record_log2;
         inner_ws = 2u * ((uint32_t)1u << log2) + 16u; /* 2 blocks + LZ4 state */
         v2_wr32(&buf[44], inner_ws);
-        if (need > c->workspace_size) return v2_fail(s, MCF_E_DICT_TOO_LARGE);
+        if (need > c->workspace_size) return v2_fail(s, MCF_E_DICT_TOO_LARGE, MCF_SITE_V2_WORKSPACE);
         need = c->workspace_size - need;              /* remainder for the inner session */
-        if (need < inner_ws) return v2_fail(s, MCF_E_DICT_TOO_LARGE);
+        if (need < inner_ws) return v2_fail(s, MCF_E_DICT_TOO_LARGE, MCF_SITE_V2_WORKSPACE);
         buf[52] = (uint8_t)MCF_CODEC_LZ4;
         buf[53] = (uint8_t)log2;
         buf[54] = 0u; buf[55] = 0u;
@@ -605,7 +623,7 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
     s->inner_cfg.old=c->old;s->inner_cfg.old_read=c->old_read;s->inner_cfg.old_ctx=c->old_ctx;s->inner_cfg.old_size=c->old_size;s->inner_cfg.dst_addr=c->dst_addr;
     s->inner_cfg.codec=MCF_CODEC_LZ4;s->inner_cfg.block_size=(uint32_t)1u<<v.record_log2;s->inner_cfg.ram_budget=need;
     s->inner_cfg.workspace=&buf[124u+ad+win];s->inner_cfg.workspace_size=need;s->inner_cfg.progress=c->progress;s->inner_cfg.progress_ctx=c->progress_ctx;s->inner_cfg.commit=c->commit;s->inner_cfg.commit_ctx=c->commit_ctx;
-    s->inner=(mcf_session_t *)(void *)&s->inner_storage; r=mcf_session_open(s->inner,&s->inner_cfg); if(r!=MCF_OK) return v2_fail(s,(mcf_status_t)r);
+    s->inner=(mcf_session_t *)(void *)&s->inner_storage; r=mcf_session_open(s->inner,&s->inner_cfg); if(r!=MCF_OK) return v2_fail_inner(s,(mcf_status_t)r);
     mcf_session_set_streamed(s->inner, &hv, v2_feed_run, (void *)s);
     if (s->resume_positioned) {
         memset(&pt, 0, sizeof(pt));
@@ -619,7 +637,7 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
         pt.seek            = s->resume_seek;
         mcf_session_restore(s->inner, &pt);
     }
-    r=mcf_session_begin(s->inner); if(r!=MCF_OK) return v2_fail(s,(mcf_status_t)r);
+    r=mcf_session_begin(s->inner); if(r!=MCF_OK) return v2_fail_inner(s,(mcf_status_t)r);
 
     /* Checkpoint cursor and the first armed boundary. The record ring starts
      * empty and is filled as the feed decrypts. */
@@ -647,7 +665,7 @@ mcf_status_t mcf_v2_session_step(mcf_v2_session_t *s)
     if(s->state==MCF_ST_DONE)return MCF_OK;
     if(s->inner==NULL)return MCF_E_STATE;
     st=mcf_session_step(s->inner);
-    if(st!=MCF_OK)return v2_fail(s,st);
+    if(st!=MCF_OK)return v2_fail_inner(s,st);
     if(mcf_session_state(s->inner)!=MCF_ST_VERIFY) v2_checkpoint(s);
     return MCF_OK;
 }
@@ -659,7 +677,7 @@ mcf_status_t mcf_v2_session_finish(mcf_v2_session_t *s)
     if(s->state==MCF_ST_FAILED)return s->status;
     if(s->inner==NULL)return MCF_E_STATE;
     st=mcf_session_finish(s->inner);
-    if(st!=MCF_OK)return v2_fail(s,st);
+    if(st!=MCF_OK)return v2_fail_inner(s,st);
     /* The key was needed for every record the feed decrypted, so it is wiped
      * only here, at the end of the last step, and on close(). */
     v2_wipe(s->key,(uint32_t)sizeof(s->key));
@@ -673,7 +691,7 @@ mcf_status_t mcf_v2_session_finish(mcf_v2_session_t *s)
 mcf_status_t mcf_v2_session_run(mcf_v2_session_t *s)
 { mcf_status_t st; if(s==NULL)return MCF_E_PARAM; st=mcf_v2_session_begin(s);if(st!=MCF_OK)return st;for(;;){st=mcf_v2_session_step(s);if(st!=MCF_OK)return st;if(mcf_session_state(s->inner)==MCF_ST_VERIFY)break;}return mcf_v2_session_finish(s); }
 void mcf_v2_session_close(mcf_v2_session_t *s)
-{ if(s==NULL)return; if(s->inner!=NULL)mcf_session_close(s->inner);v2_wipe(s->key,(uint32_t)sizeof(s->key));if(s->scratch!=NULL)v2_wipe(s->scratch,s->scratch_len);s->scratch=NULL;s->scratch_len=0u;s->inner=NULL;s->state=MCF_ST_IDLE;s->status=MCF_OK; }
+{ if(s==NULL)return; if(s->inner!=NULL)mcf_session_close(s->inner);v2_wipe(s->key,(uint32_t)sizeof(s->key));if(s->scratch!=NULL)v2_wipe(s->scratch,s->scratch_len);s->scratch=NULL;s->scratch_len=0u;s->inner=NULL;s->state=MCF_ST_IDLE;s->status=MCF_OK;s->site=MCF_SITE_NONE; }
 mcf_state_t mcf_v2_session_state(const mcf_v2_session_t *s)
 { return s==NULL?MCF_ST_FAILED:(mcf_state_t)s->state; }
 mcf_status_t mcf_v2_session_status(const mcf_v2_session_t *s)
@@ -682,3 +700,7 @@ uint32_t mcf_v2_session_flags(const mcf_v2_session_t *s)
 { return s==NULL?0u:s->flags; }
 uint32_t mcf_v2_session_progress(const mcf_v2_session_t *s)
 { return (s==NULL || s->inner==NULL)?0u:mcf_session_progress(s->inner); }
+uint32_t mcf_v2_session_total(const mcf_v2_session_t *s)
+{ return (s==NULL)?0u:s->view.new_size; }
+uint32_t mcf_v2_session_error_site(const mcf_v2_session_t *s)
+{ return (s!=NULL)?s->site:MCF_SITE_NONE; }

@@ -50,6 +50,29 @@
 #define MCF_SITE_STATE           32u
 #define MCF_SITE_HDR_LZMA_PROPS  33u
 
+/* MFP2 session stages. The v2 container has its own failure surface ahead of
+ * the inner MFP1 engine (parse, signature, key provider, record framing, AEAD,
+ * workspace), and each of those needs a site of its own or a field failure is
+ * diagnosed from the status code alone. Values continue the sequence above:
+ * they are one namespace, because one call site can report either - a v2
+ * failure that is really the inner engine's is reported with the inner site
+ * unchanged. */
+#define MCF_SITE_V2_STATE        34u /*!< call invalid in the current state    */
+#define MCF_SITE_V2_PARSE        35u /*!< MFP2 container parse/validation      */
+#define MCF_SITE_V2_PRODUCT      36u /*!< patch not for this product           */
+#define MCF_SITE_V2_ROLLBACK     37u /*!< fw_version not newer                 */
+#define MCF_SITE_V2_MISMATCH     38u /*!< base version or size mismatch        */
+#define MCF_SITE_V2_PAYLOAD_CRC  39u /*!< ciphertext payload CRC               */
+#define MCF_SITE_V2_SIGNATURE    40u /*!< container signature                  */
+#define MCF_SITE_V2_KEY          41u /*!< key provider rejected                */
+#define MCF_SITE_V2_WORKSPACE    42u /*!< workspace sizing or budget           */
+#define MCF_SITE_V2_CONFIG       43u /*!< configuration cannot form a session  */
+#define MCF_SITE_V2_RESUME       44u /*!< resume positioning rejected          */
+#define MCF_SITE_V2_FRAMING      45u /*!< record framing walk                  */
+#define MCF_SITE_V2_AEAD         46u /*!< record authentication/decryption     */
+#define MCF_SITE_V2_RECORD       47u /*!< decoded record content               */
+#define MCF_SITE_V2_INNER        48u /*!< inner engine failed, no site recorded*/
+
 /* ------------------------------------------------------------------------ *
  * Little-endian scalar reads. The parser never depends on host byte order.
  * ------------------------------------------------------------------------ */
