@@ -133,7 +133,7 @@ above:
 
 The C's value is neither the correct root nor its negation, so this is a faulty square root
 rather than a root-selection mistake. `fe_sqrt_ratio` computes
-`x = u·v³ · (u·v7)^((p-5)/8)` and then tests `v·x² == u`. The exponent constant and the
+`x = uÂ·vÂ³ Â· (uÂ·v7)^((p-5)/8)` and then tests `vÂ·xÂ² == u`. The exponent constant and the
 identity have both been checked against the specification, so the next step is to test
 `fe_sqrt_ratio` directly against a reference for a known quadratic residue, in the same way
 `ed_reduce_test.c` does for `sc_reduce` - feed `(u, v)` pairs with known square roots and

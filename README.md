@@ -8,37 +8,37 @@
 [![RAM: 868 B, no heap](https://img.shields.io/badge/RAM-868%20B%20%C2%B7%20no%20heap-success.svg)](#verified-footprint)
 
 You never need to send a whole firmware image to update a device. You send the **difference**,
-and the device rebuilds the image in **868 bytes of RAM** â€” no heap, no RTOS, no scheduler.
+and the device rebuilds the image in **868 bytes of RAM** — no heap, no RTOS, no scheduler.
 
 ```text
-   35 KB old image   +   2 KB patch   â”€â”€â–¶   35 KB new image, rebuilt in 868 B of RAM
+   35 KB old image   +   2 KB patch   ──▶   35 KB new image, rebuilt in 868 B of RAM
         running              5.8%              verified in staging flash, then activated
 ```
 
 | RAM | ROM (Cortex-M0) | Patch size | Build | Formats | Version |
 |---|---|---|---|---|---|
-| **868 B**, no heap | **12,358 B** | **1â€“15%** of the image | C99 Â· MIT Â· 3 libc headers | MFP1 Â· MFP2 | `1.10.0` |
+| **868 B**, no heap | **12,358 B** | **1–15%** of the image | C99 · MIT · 3 libc headers | MFP1 · MFP2 | `1.10.0` |
 
 > [!NOTE]
-> **Sweet spot:** small embedded devices and slow links â€” BLE, LoRa, infrared, a 9600-baud
+> **Sweet spot:** small embedded devices and slow links — BLE, LoRa, infrared, a 9600-baud
 > serial line. That line carries a 35 KB image in about 37 seconds; the same update as a patch
 > arrives in under one.
 > **Not** a transport, an encryption product, or a bootloader. Microfoam reconstructs and
 > verifies an image. Getting the patch there, and deciding when to activate it, is yours.
 
-**Jump in:** [quick start](#quick-start) Â· [profiles](#choose-your-profile) Â·
-[footprint](#verified-footprint) Â· [proof](#proof-not-promises) Â· [docs/](docs/quickstart.md)
+**Jump in:** [quick start](#quick-start) · [profiles](#choose-your-profile) ·
+[footprint](#verified-footprint) · [proof](#proof-not-promises) · [docs/](docs/quickstart.md)
 
 ---
 
 ## Why it fits
 
-- **Send the difference.** A patch is usually 1â€“15% of the firmware. The suite's own 35 KB
-  fixture turns into a **2,052-byte** patch â€” **5.8%**.
-- **It fits where the alternatives won't.** Comparable libraries want 10â€“20 KB of heap for a
+- **Send the difference.** A patch is usually 1–15% of the firmware. The suite's own 35 KB
+  fixture turns into a **2,052-byte** patch — **5.8%**.
+- **It fits where the alternatives won't.** Comparable libraries want 10–20 KB of heap for a
   decompressor whose probability tables alone floor it at ~15.6 KB. Microfoam makes the codec
   pluggable and ships a small one by default, which moves the target from *"Cortex-M3 with a
-  20 KB heap"* down to **a Cortex-M0 with 4 KB** â€” the whole library fits an 8 KB part.
+  20 KB heap"* down to **a Cortex-M0 with 4 KB** — the whole library fits an 8 KB part.
 - **Two formats, one engine.** **MFP1** is a compact patch, unsigned or signed. **MFP2** adds
   Ed25519ph authentication and XChaCha20-Poly1305 encryption record by record, streaming, so the
   decrypted payload is never resident. Both hand the delta to the same engine.
@@ -49,7 +49,7 @@ and the device rebuilds the image in **868 bytes of RAM** â€” no heap, no R
 
 ### 1. On the device
 
-Fill in the HAL â€” everything platform-specific lives there â€” then run a session. The two values
+Fill in the HAL — everything platform-specific lives there — then run a session. The two values
 to get right are `block_size` and `ram_budget`, and both have to agree with the patch.
 
 ```c
@@ -75,8 +75,8 @@ if (mcf_session_run(session) != MCF_OK) {
 mcf_session_close(session);
 ```
 
-A complete, commented HAL for a generic Cortex-M part â€” flash callbacks, workspace, and how to
-pick the codec â€” is in **[docs/quickstart.md](docs/quickstart.md)**.
+A complete, commented HAL for a generic Cortex-M part — flash callbacks, workspace, and how to
+pick the codec — is in **[docs/quickstart.md](docs/quickstart.md)**.
 
 ### 2. On the build host
 
@@ -91,7 +91,7 @@ python host/microfoam.py apply   --old old.bin --patch patch.bin --out out.bin
 ```
 
 `--block-log2 10` frames each LZ4 block to 1024 bytes, which is what `cfg.block_size` is waiting
-for. **The two are a pair** â€” a patch framed larger than the device window is rejected as
+for. **The two are a pair** — a patch framed larger than the device window is rejected as
 corrupt. `make` is deterministic: same inputs, byte-identical patch, no timestamps, no randomness.
 
 ### 3. Or install the tool
@@ -113,9 +113,9 @@ nothing beyond the standard library.
 
 | | Host command | Device needs |
 |---|---|---|
-| **Unsigned MFP1** (default) | `make â€¦` | nothing extra |
-| **Signed MFP1** | `make â€¦ --key mfkey.priv` | a verifier: `-DMCF_ENABLE_ED25519=ON` and `cfg.verify` |
-| **Signed + encrypted MFP2** | `make â€¦ --v2 --key mfkey.priv` | `-DMCF_ENABLE_ED25519=ON` and an XChaCha20-Poly1305 provider |
+| **Unsigned MFP1** (default) | `make …` | nothing extra |
+| **Signed MFP1** | `make … --key mfkey.priv` | a verifier: `-DMCF_ENABLE_ED25519=ON` and `cfg.verify` |
+| **Signed + encrypted MFP2** | `make … --v2 --key mfkey.priv` | `-DMCF_ENABLE_ED25519=ON` and an XChaCha20-Poly1305 provider |
 
 Other dials when you need them: **codec** is LZ4 (default), raw or opt-in LZMA; **memory** is
 heapless (a static workspace) or allocator-backed; **resume** is off by default, with an opt-in
@@ -133,7 +133,7 @@ python host/microfoam.py make --old old.bin --new new.bin --out patch.bin \
 python host/microfoam.py verify patch.bin --pub mfkey.pub
 ```
 
-A signed patch is **rejected unless the device supplies a verifier** â€” that is the fail-closed
+A signed patch is **rejected unless the device supplies a verifier** — that is the fail-closed
 property, not an oversight. The HAL sketch above configures none, so it applies unsigned patches
 only. See [Signature verification](#signature-verification).
 
@@ -148,17 +148,17 @@ every one is in [architecture.md](docs/architecture.md).
 
 | | Promise | Where |
 |---|---|---|
-| **Errors** | 18 status codes; zero means success and means *only* success. A failed flash program is `MCF_E_FLASH`, never a full-length, silently corrupt image. | [Â§9.2](docs/architecture.md#92-error-model-p1) |
-| **Memory** | `mcf_ctx_size()` returns the exact workspace a configuration will allocate, and the suite asserts it against the allocator's real request. Over `ram_budget` is refused *before anything is allocated*. | [Â§10](docs/architecture.md#10-memory-model-and-budget) |
-| **Ownership** | The caller owns all state. No mutable globals, so the library is reentrant and runs from a static buffer with no heap. | [Â§9.3](docs/architecture.md#93-context-ownership-p3) |
-| **Steppability** | `mcf_session_step()` does at most one block of work and returns, so a watchdog gets serviced between steps; aborting is a clean `MCF_E_ABORTED`. | [Â§9.6](docs/architecture.md#96-step-wise-state-machine-p7) |
-| **Flash** | No unaligned or block-crossing erase or program is ever issued, and every programmed region is read back and compared. | [Â§12](docs/architecture.md#12-flash-write-contract) |
-| **Auth** | Product binding and anti-rollback are always on; signature verification fails closed. | [Â§14](docs/architecture.md#14-security-model) |
+| **Errors** | 18 status codes; zero means success and means *only* success. A failed flash program is `MCF_E_FLASH`, never a full-length, silently corrupt image. | [§9.2](docs/architecture.md#92-error-model-p1) |
+| **Memory** | `mcf_ctx_size()` returns the exact workspace a configuration will allocate, and the suite asserts it against the allocator's real request. Over `ram_budget` is refused *before anything is allocated*. | [§10](docs/architecture.md#10-memory-model-and-budget) |
+| **Ownership** | The caller owns all state. No mutable globals, so the library is reentrant and runs from a static buffer with no heap. | [§9.3](docs/architecture.md#93-context-ownership-p3) |
+| **Steppability** | `mcf_session_step()` does at most one block of work and returns, so a watchdog gets serviced between steps; aborting is a clean `MCF_E_ABORTED`. | [§9.6](docs/architecture.md#96-step-wise-state-machine-p7) |
+| **Flash** | No unaligned or block-crossing erase or program is ever issued, and every programmed region is read back and compared. | [§12](docs/architecture.md#12-flash-write-contract) |
+| **Auth** | Product binding and anti-rollback are always on; signature verification fails closed. | [§14](docs/architecture.md#14-security-model) |
 
 ### The HAL contract
 
-Everything platform-specific lives in the HAL: **six required callbacks** â€” `flash_erase`,
-`flash_write`, `flash_read`, `flash_block_size`, `get_product_id`, `get_fw_version` â€” plus
+Everything platform-specific lives in the HAL: **six required callbacks** — `flash_erase`,
+`flash_write`, `flash_read`, `flash_block_size`, `get_product_id`, `get_fw_version` — plus
 `alloc`/`free` unless you supply a static workspace. `verify`, `log` and `flash_is_readonly` are
 optional. That is the entire platform dependency. The rules are short but not negotiable: erase
 addresses and lengths are whole erase blocks, a write never crosses a block, a read returns
@@ -169,25 +169,25 @@ plausible-looking image. Callback table and a complete HAL: [quickstart.md](docs
 
 Two providers ship; neither is in a default build. The **built-in** one
 (`-DMCF_ENABLE_ED25519=ON`) pulls in no external crypto, needs no heap, and streams the signed
-message â€” **â‰ˆ 6.3 KB of flash** on Cortex-M4, **0 B of static RAM**. The alternative is a
+message — **≈ 6.3 KB of flash** on Cortex-M4, **0 B of static RAM**. The alternative is a
 libsodium adapter (`-DMCF_ENABLE_SODIUM=ON`). The arithmetic is
 [vendored, not written here](third_party/tweetnacl/README.md); a from-scratch verifier was
 written, **rejected** after twelve defects, and stays in
 [`contrib/ed25519-wip/`](contrib/ed25519-wip/README.md) as a record. With libsodium also built,
-the suite demands **the same verdict for every case** â€” on signatures libsodium generated over
+the suite demands **the same verdict for every case** — on signatures libsodium generated over
 messages neither implementation chose.
-[architecture Â§14.3](docs/architecture.md#143-signature-algorithm-selection).
+[architecture §14.3](docs/architecture.md#143-signature-algorithm-selection).
 
 ### Codecs
 
 | Codec | Decoder state | Payload vs LZMA | Default |
 |---|---|---|---|
-| **LZ4** | ~16 B | ~1.7Ã— at the default 1 KB block | **yes** |
+| **LZ4** | ~16 B | ~1.7× at the default 1 KB block | **yes** |
 | LZMA | probability table + dictionary | baseline | no (`-DMCF_ENABLE_LZMA=ON`) |
 | Raw | 16 B | delta verbatim | no (`--codec raw`) |
 
 **LZ4 is the default because it buys RAM, not bytes.** ~16 B of decoder state instead of an LZMA
-probability table â€” but on the same delta it emits a *larger* payload: **1.67Ã— LZMA's** on the
+probability table — but on the same delta it emits a *larger* payload: **1.67× LZMA's** on the
 suite's 35 KB fixture at the default 1 KB block (1,934 B vs 1,160 B). `host_selftest` measures
 and pins that figure, so it cannot quietly drift. **Raw** is the delta stream untouched, for when
 headers cost more than they save. LZMA is opt-in because its probability table is an
@@ -206,16 +206,16 @@ formulas: [format-v2.md](docs/format-v2.md).
 ## Proof, not promises
 
 Warning-clean under `-Wall -Wextra -Wconversion -Wsign-conversion -Werror`, the standard
-configurations passing in Debug and Release, and a size gate â€” `ctest -R size_gate`, and a CI job
-per core â€” that fails if `.text` grows past its committed ceiling or any static RAM appears at all.
+configurations passing in Debug and Release, and a size gate — `ctest -R size_gate`, and a CI job
+per core — that fails if `.text` grows past its committed ceiling or any static RAM appears at all.
 
 - **Nine suites, every count machine-checked.** `host/check_counts.py` runs each suite, reads the
   count it reports for itself, and fails if the documented number disagrees. One CI job builds all
   nine with every optional module enabled and requires each to be present, so a suite that stopped
   being built fails the build rather than quietly dropping out of the check.
-- **Fault injection at every stage** â€” erase failure, program failure, *program succeeding but
+- **Fault injection at every stage** — erase failure, program failure, *program succeeding but
   storing the wrong bytes*, truncation, flipped bits, wrong product, downgrade attempts,
-  over-budget workspace, unknown codec, wrong CRC, abort, signed-without-verifier â€” each
+  over-budget workspace, unknown codec, wrong CRC, abort, signed-without-verifier — each
   asserting a specific status, none allowed to return `MCF_OK`.
 - **Both parsers held to a property contract,** not a list of cases, because they are the
   surfaces that eat attacker-controlled bytes.
@@ -235,7 +235,7 @@ set with zero warnings.
 | Cortex-M7 | 11,422 B | 0 B |
 
 RAM, on Cortex-M0: **340 B** session + **528 B** workspace at a 256 B block = **868 B total**,
-no heap â€” the figures `mcf_ctx_size()` returns, asserted by the self-test against the
+no heap — the figures `mcf_ctx_size()` returns, asserted by the self-test against the
 allocator's actual request. The same sources also compile clean with upstream clang
 `--target=arm-none-eabi` on all four cores: a free armclang frontend and diagnostic proxy,
 **not** a licensed-toolchain result. Full profile tables, the fault catalogue and the portability
@@ -256,7 +256,7 @@ generated into the build tree at configure time, so no key needs checking out by
 `cross_test` fails rather than skips if the module is missing.
 
 That recipe runs the core suites, the cross tests, and the size gate when
-`arm-none-eabi-gcc` is present â€” without it ctest reports `size_gate` as **skipped**, not passed.
+`arm-none-eabi-gcc` is present — without it ctest reports `size_gate` as **skipped**, not passed.
 It does **not** build the optional suites (`MCF_ENABLE_SODIUM`, `MCF_ENABLE_ED25519`,
 `MCF_ENABLE_LZMA` are off by default), so the four suites behind them are not run, and the
 fuzzers and sanitizer builds are separate opt-in modes. In CI every one of those runs, and one
@@ -264,7 +264,7 @@ job builds all nine suites at once and requires each to be present. Which job co
 [verification.md](docs/verification.md); the switches themselves are in
 [quickstart.md](docs/quickstart.md#build-options).
 
-Or drop the sources into an existing project â€” no generated code, only what the build selects:
+Or drop the sources into an existing project — no generated code, only what the build selects:
 
 ```cmake
 add_subdirectory(microfoam)
@@ -274,11 +274,11 @@ target_link_libraries(my_app PRIVATE microfoam::microfoam)
 <details>
 <summary><b>Why "microfoam"?</b></summary>
 
-The thin layer of bubbles on a latte â€” roughly one percent of the volume and all of the texture.
+The thin layer of bubbles on a latte — roughly one percent of the volume and all of the texture.
 That is the design target: the smallest possible resident cost, carrying the whole capability.
 It is also the right expectation to set for anyone told this replaces a library that wanted
-10â€“20 KB of heap. The footprint is the point. See
-[architecture Â§On the name](docs/architecture.md).
+10–20 KB of heap. The footprint is the point. See
+[architecture §On the name](docs/architecture.md).
 
 </details>
 

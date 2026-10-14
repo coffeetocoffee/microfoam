@@ -1,4 +1,4 @@
-# Microfoam â€” Software Architecture
+# Microfoam — Software Architecture
 
 > **Tiny bubbles. Tiny footprint. Full-strength upgrade.**
 
@@ -13,18 +13,18 @@
 | **Document type** | Software Architecture Description |
 | **Version** | 1.0 |
 | **Status** | Draft for review |
-| **License** | MIT (see Â§20) |
+| **License** | MIT (see §20) |
 | **Target audience** | Library maintainers, firmware integrators, security reviewers |
 
 ### On the name
 
-Microfoam is the thin layer of bubbles in a latte â€” roughly one percent of the volume and
+Microfoam is the thin layer of bubbles in a latte — roughly one percent of the volume and
 all of the texture. That is the design target of this library: the smallest possible resident
 cost, carrying the whole capability. The name also sets the correct expectation for a reader
-who has just been told this replaces a library that needed 10â€“20 KB of heap: the footprint
-is the point, and it is stated in the tagline so nobody has to read Â§10 to learn it.
+who has just been told this replaces a library that needed 10–20 KB of heap: the footprint
+is the point, and it is stated in the tagline so nobody has to read §10 to learn it.
 
-The prefix `mcf_` is chosen for the same reason â€” four characters, no collision with `bs_`
+The prefix `mcf_` is chosen for the same reason — four characters, no collision with `bs_`
 in an integrator's existing tree, and consistent with the word's own length.
 
 ---
@@ -60,16 +60,16 @@ in an integrator's existing tree, and consistent with the word's own length.
 
 ## 1. Executive Summary
 
-This document specifies the target software architecture for **Microfoam** â€” a
+This document specifies the target software architecture for **Microfoam** — a
 production-grade firmware delta update library for resource-constrained microcontrollers. It
 is a **forward-looking specification**, not a description of existing code.
 
 > **Reading this against the shipped library.** The architecture was written as a design
 > ahead of the implementation, so parts of it are aspirational. Where a statement is
-> present-tense about the code â€” a named symbol, a struct layout, a CI gate, a guarantee â€”
+> present-tense about the code — a named symbol, a struct layout, a CI gate, a guarantee —
 > it has been reconciled with the `1.10.0` tree and now matches it. Where a statement is a
-> plan (the Â§21 roadmap, and the HIL and static-analysis tiers marked as such in Â§16.4 and
-> Â§18.1), it is not yet implemented and says so. Treat any unmarked future-tense item as a
+> plan (the §21 roadmap, and the HIL and static-analysis tiers marked as such in §16.4 and
+> §18.1), it is not yet implemented and says so. Treat any unmarked future-tense item as a
 > target, not a claim.
 
 All public symbols use the `mcf_` prefix; the host tool is invoked as `microfoam`. Section
@@ -77,7 +77,7 @@ All public symbols use the `mcf_` prefix; the host tool is invoked as `microfoam
 
 The architecture is derived from a structured assessment of a widely-deployed reference
 implementation of the same problem domain (binary delta patching with LZMA compression for
-MCU OTA). That assessment is recorded in **Â§3** and serves as the evidence base: every
+MCU OTA). That assessment is recorded in **§3** and serves as the evidence base: every
 significant design decision in this document exists to correct a specific, identified defect
 class from the reference work. The reference implementation is not named here, and no
 reference source code is reproduced.
@@ -85,43 +85,43 @@ reference source code is reproduced.
 **The core problem.** A device in the field holds firmware version *N*. The manufacturer
 releases version *N+1*. Transmitting the full image over a constrained link (BLE, LoRa,
 infrared, serial at 9600 baud) is slow, power-hungry, and expensive. A delta patch
-transmitting only the *difference* is typically 5â€“15% of the original size. The device must
+transmitting only the *difference* is typically 5–15% of the original size. The device must
 reconstruct the full image locally and atomically swap to it. This library performs the
 device-side reconstruction.
 
-**The central architectural finding** from the assessment is not any individual bug â€” it is
+**The central architectural finding** from the assessment is not any individual bug — it is
 that **the memory cost of the library is an implicit, undocumented, unenforced contract
 encoded in a single byte inside a binary produced by a closed-source tool.** Everything else
-in Â§3 is a consequence of the library having no formal, declared, self-describing interface:
+in §3 is a consequence of the library having no formal, declared, self-describing interface:
 no error model, no state ownership, no resource contract, no integrity model.
 
 **The four architectural commitments** of this design are:
 
 1. **Total error transparency.** Every failure is detected, propagated, and reported with a
-   specific code. A function never reports success on failure. (Â§9.2)
+   specific code. A function never reports success on failure. (§9.2)
 2. **An explicit, self-describing memory contract.** RAM cost is computable at build time,
-   and the library refuses â€” rather than crashes â€” when a patch demands more memory than the
-   device has. (Â§10)
+   and the library refuses — rather than crashes — when a patch demands more memory than the
+   device has. (§10)
 3. **Declared resource ownership.** No mutable global state. All session state lives in a
-   caller-owned context object, making the library reentrant and unit-testable. (Â§11)
+   caller-owned context object, making the library reentrant and unit-testable. (§11)
 4. **Authenticity as a first-class feature.** Patches are signed and versioned. An
-   unauthenticated firmware update is an arbitrary code execution primitive. (Â§14)
+   unauthenticated firmware update is an arbitrary code execution primitive. (§14)
 
-**Projected footprint** (see Â§10 for derivation):
+**Projected footprint** (see §10 for derivation):
 
 | Target profile | RAM | ROM | Notes |
 |---|---|---|---|
-| Constrained (Cortex-M0, LZ4 codec) | **â‰¤ 4 KB** | ~12.4 KB | Primary design target |
-| Standard (Cortex-M3/M4, LZ4 codec) | â‰¤ 6 KB | ~11.5 KB | Recommended default |
-| Max ratio (Cortex-M3/M4, LZMA codec) | â‰¤ 34 KB | ~18 KB | Opt-in, higher download savings |
+| Constrained (Cortex-M0, LZ4 codec) | **≤ 4 KB** | ~12.4 KB | Primary design target |
+| Standard (Cortex-M3/M4, LZ4 codec) | ≤ 6 KB | ~11.5 KB | Recommended default |
+| Max ratio (Cortex-M3/M4, LZMA codec) | ≤ 34 KB | ~18 KB | Opt-in, higher download savings |
 
-(ROM figures are the measured whole-library sizes from Â§10.4; the original design estimated
-~3â€“4 KB before the MFP2 authenticated path was added.)
+(ROM figures are the measured whole-library sizes from §10.4; the original design estimated
+~3–4 KB before the MFP2 authenticated path was added.)
 
-The reference implementation documents a requirement of "â‰¥ 10 KB RAM" and an unverified
+The reference implementation documents a requirement of "≥ 10 KB RAM" and an unverified
 "~5 KB ROM". This design targets an order of magnitude less RAM in its primary
 configuration by making the compression codec pluggable and shipping a low-footprint codec
-as the default (Â§7.3).
+as the default (§7.3).
 
 ---
 
@@ -129,22 +129,22 @@ as the default (Â§7.3).
 
 ### 2.1 Domain
 
-Firmware delta update â€” also called incremental or differential upgrade â€” for
+Firmware delta update — also called incremental or differential upgrade — for
 resource-constrained microcontrollers. The scope is the **device-side patch application**
-only. Patch *generation* is a host-side concern (Â§17).
+only. Patch *generation* is a host-side concern (§17).
 
 ### 2.2 The two halves of the problem
 
 ```
   HOST (build server)                          DEVICE (field unit)
-  â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€                          â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  old.bin  â”€â”€â”                                  old image (in flash)
-             â”œâ”€â–º bsdiff â”€â”€â–º LZMA â”€â”€â–º patch.bin    â”‚
-  new.bin  â”€â”€â”˜        + container header         â”œâ”€â–º apply patch
-                                                â”‚     â”‚
-                                                â”œâ”€â–º verify CRC
-                                                â”œâ”€â–º atomically swap
-                                                â””â”€â–º reboot into new image
+  ───────────────────                          ──────────────────
+  old.bin  ──┐                                  old image (in flash)
+             ├─► bsdiff ──► LZMA ──► patch.bin    │
+  new.bin  ──┘        + container header         ├─► apply patch
+                                                │     │
+                                                ├─► verify CRC
+                                                ├─► atomically swap
+                                                └─► reboot into new image
 ```
 
 The left half is understood, stable, and solved by well-known open-source tools. The right
@@ -154,14 +154,14 @@ half is where embedded projects consistently get it wrong, and is what this libr
 
 | Constraint | Consequence for the design |
 |---|---|
-| **Tight RAM (8â€“64 KB typical)** | No whole-file buffering. Streaming, fixed-window processing. Pluggable codecs (Â§7.3). Computable budget (Â§10). |
+| **Tight RAM (8–64 KB typical)** | No whole-file buffering. Streaming, fixed-window processing. Pluggable codecs (§7.3). Computable budget (§10). |
 | **No filesystem** | Source image and patch live at absolute addresses in memory-mapped or SPI-attached flash. The "file" abstraction is an address + length. |
-| **NOR flash semantics** | Program can only clear bits (1â†’0). Erase is block-granular. Erase+program+buffering must be modelled explicitly (Â§12). This is a frequent source of silent corruption when abstracted away. |
-| **RTOS present, watchdog armed** | Long blocking calls are unacceptable. Cooperative stepping and progress callbacks (Â§9.5, Â§9.6). No internal OS dependency. |
-| **Unreliable power** | Any interruption mid-restore must be recoverable or safely discardable (Â§15). |
+| **NOR flash semantics** | Program can only clear bits (1→0). Erase is block-granular. Erase+program+buffering must be modelled explicitly (§12). This is a frequent source of silent corruption when abstracted away. |
+| **RTOS present, watchdog armed** | Long blocking calls are unacceptable. Cooperative stepping and progress callbacks (§9.5, §9.6). No internal OS dependency. |
+| **Unreliable power** | Any interruption mid-restore must be recoverable or safely discardable (§15). |
 | **Slow, power-hungry link** | Download volume is the primary cost driver. Compresses the value of a slightly larger decoder. |
 | **Long field lifetimes** | The deployed fleet cannot be recalled. A latent defect is a permanent liability. Errors must be diagnosable *in the field*, not only in the lab. |
-| **Security exposure** | The update channel is a remote code execution surface. Requires signature verification and anti-rollback (Â§14). |
+| **Security exposure** | The update channel is a remote code execution surface. Requires signature verification and anti-rollback (§14). |
 
 ### 2.4 Stakeholders
 
@@ -209,7 +209,7 @@ Defects that produce incorrect behaviour, crashes, or resource corruption. Sever
 
 ### 3.2 Design gaps
 
-Absent capabilities â€” things the architecture does not have at all.
+Absent capabilities — things the architecture does not have at all.
 
 | # | Gap | Consequence |
 |---|---|---|
@@ -218,7 +218,7 @@ Absent capabilities â€” things the architecture does not have at all.
 | G-03 | **No product binding.** Header fields for target architecture, OS, image type, and product name are defined but never validated. | A patch built for one product can be applied to another. |
 | G-04 | **No format versioning.** No magic-number check, no version field, no header-length field. | No way to evolve the format. Any change is a breaking change. |
 | G-05 | **Inconsistent endianness encoding.** Some header fields are big-endian, adjacent fields are little-endian, and no marker distinguishes them. | Cross-tool and cross-version interoperability is fragile and undocumented. |
-| G-06 | **The flash contract conflates erase and program.** The callback is documented as requiring self-erasure, but no erase primitive, alignment contract, or cross-block buffering is provided. | The obvious integration â€” wiring the callback to a flash page-program primitive â€” produces silent corruption. |
+| G-06 | **The flash contract conflates erase and program.** The callback is documented as requiring self-erasure, but no erase primitive, alignment contract, or cross-block buffering is provided. | The obvious integration — wiring the callback to a flash page-program primitive — produces silent corruption. |
 | G-07 | **No progress, abort, or timeout mechanism.** The restore is one uninterruptible call. | The documented integration must disable the task watchdog for the duration. Abort is impossible. Low-power designs cannot yield. |
 | G-08 | **The old image must be directly addressable** as a raw pointer. | Excludes external flash, filesystem resources, and decrypted-at-runtime images. This limitation is raised in the reference project's issue tracker and remains unanswered. |
 | G-09 | **No resumability or power-fail model.** | A power loss during restore leaves the device in an undefined state. |
@@ -233,7 +233,7 @@ Structural qualities that are not bugs but degrade the result.
 | # | Weakness | Detail |
 |---|---|---|
 | W-01 | **The memory contract is implicit and unenforced** | The decoder's working dictionary size is dictated by a field inside the patch. The device never reads it, never validates it, and never reports it. Combined with B-01, a patch compressed with any non-matching tool setting causes a hard fault rather than an error. **This single coupling explains essentially all reported integration failures.** |
-| W-02 | **The documented memory figure is not reproducible from the code** | The stated requirement ("â‰¥ 10 KB RAM") is inconsistent with the decoder's own probability table, which occupies ~15.6 KB under default algorithm parameters. The stated figure is only achievable under a specific, unpublished encoder configuration. |
+| W-02 | **The documented memory figure is not reproducible from the code** | The stated requirement ("≥ 10 KB RAM") is inconsistent with the decoder's own probability table, which occupies ~15.6 KB under default algorithm parameters. The stated figure is only achievable under a specific, unpublished encoder configuration. |
 | W-03 | **No global-state discipline** | Session state lives in file-scope static variables. The library is not reentrant. Concurrency safety is an undocumented obligation pushed entirely onto every integrator. |
 | W-04 | **The default codec is oversized for the target** | The default choice imposes a hard ~15.6 KB RAM floor for probability tables, independent of buffer tuning. This single decision sets the library's minimum viable target at a 32 KB-RAM Cortex-M3. |
 | W-05 | **Byte-at-a-time hot loop** | The read path branches per byte, in the most frequently executed code in the library. |
@@ -253,7 +253,7 @@ architecture **preserves**:
   a full in-memory image. This is the correct fundamental design for a bounded-memory target.
 - **The small fixed work window.** Processing in 1 KB blocks keeps the working set
   independent of image size.
-- **A minimal porting surface.** Three callbacks â€” allocate, free, flash-write â€” is a
+- **A minimal porting surface.** Three callbacks — allocate, free, flash-write — is a
   genuinely good abstraction, and the refactor from macros to a registration interface was a
   real improvement.
 - **A clean stream adapter.** Separating the delta engine from its I/O via a struct of
@@ -268,15 +268,15 @@ rebuilds the contract surface around it.
 
 | Class | Count | Characteristic |
 |---|---|---|
-| Real bugs â€” Critical | 3 | Silent corruption or hard fault, not detectable by the caller |
-| Real bugs â€” High | 3 | Failure indistinguishable from success |
-| Real bugs â€” Medium | 6 | Resource corruption, out-of-bounds access |
-| Real bugs â€” Low | 3 | Build and hygiene |
+| Real bugs — Critical | 3 | Silent corruption or hard fault, not detectable by the caller |
+| Real bugs — High | 3 | Failure indistinguishable from success |
+| Real bugs — Medium | 6 | Resource corruption, out-of-bounds access |
+| Real bugs — Low | 3 | Build and hygiene |
 | Design gaps | 12 | Absent capability |
 | Weaknesses | 11 | Structural quality |
 
-The distribution â€” three silent-corruption defects and four failure-reporting defects
-(B-01, B-02, B-03, B-05) â€” is itself the finding. **The reference implementation fails in the
+The distribution — three silent-corruption defects and four failure-reporting defects
+(B-01, B-02, B-03, B-05) — is itself the finding. **The reference implementation fails in the
 direction of appearing to succeed.** Every one of these is a field failure that no lab test
 would catch without deliberately injecting a fault.
 
@@ -293,7 +293,7 @@ would catch without deliberately injecting a fault.
 | **G3** | Minimal porting surface | Five callbacks. No macros, no source edits, no header modification. |
 | **G4** | Reentrancy | No mutable global state. Two independent sessions with distinct contexts operate concurrently without interference. Verified by test: `hal_concurrency_test` drives both through the whole decode **interleaved**, one step each in turn, and asserts each reconstructed its own image into its own device. |
 | **G5** | Authenticated updates | A patch without a valid signature over a header with an acceptable version counter is rejected. |
-| **G6** | Constrained-target support | Primary configuration fits in â‰¤ 4 KB RAM on a Cortex-M0. |
+| **G6** | Constrained-target support | Primary configuration fits in ≤ 4 KB RAM on a Cortex-M0. |
 | **G7** | Interruptibility | The restore is a resumable state machine. The caller may abort, yield, or power down between steps. |
 | **G8** | Correct flash semantics | Erase/program/buffering are handled by the library against an explicit, documented device contract. |
 | **G9** | Auditability | Open format specification, published host tool, deterministic reproducible patches. |
@@ -304,17 +304,17 @@ would catch without deliberately injecting a fault.
 | # | Non-goal | Rationale |
 |---|---|---|
 | N1 | **Patch generation on device** | Never required; belongs on the build host. |
-| N2 | **Bootloader / A-B slot management** | Firmware-layout and swap policy is product-specific. The library exposes a completion hook and leaves swap policy to the integrator (Â§15.3). |
+| N2 | **Bootloader / A-B slot management** | Firmware-layout and swap policy is product-specific. The library exposes a completion hook and leaves swap policy to the integrator (§15.3). |
 | N3 | **Transport** | The library consumes a patch already resident in memory. BLE/LoRa/UART/USB transport is out of scope. |
 | N4 | **Encrypted patches in v1** | v1 remains unencrypted. Authenticated encryption is specified as a separate v2 design in `docs/format-v2-design.md`; it is not implemented in the shipped format. |
 | N5 | **Optimal patch ratio** | Ratio is bounded by the host tool's search effort. The library prioritises device cost. The host tool may try multiple codecs and select the smaller result. |
-| N6 | **RTOS integration** | No scheduler dependency. Cooperative stepping (Â§9.6) is sufficient and portable. |
+| N6 | **RTOS integration** | No scheduler dependency. Cooperative stepping (§9.6) is sufficient and portable. |
 
 ---
 
 ## 5. Design Principles
 
-Each principle is a direct response to a finding in Â§3.
+Each principle is a direct response to a finding in §3.
 
 | # | Principle | Responds to |
 |---|---|---|
@@ -336,31 +336,31 @@ Each principle is a direct response to a finding in Â§3.
 ### 6.1 Deployment
 
 ```
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ Device â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚                                                                       â”‚
-â”‚   Transport          Update        Application      Bootloader         â”‚
-â”‚   (BLE/LoRa/UART) â”€â”€â–º Manager â”€â”€â–º  (RTOS task)     (A/B select)     â”‚
-â”‚      out of scope         â”‚            â”‚                  â–²            â”‚
-â”‚                           â”‚            â”‚                  â”‚            â”‚
-â”‚                           â–¼            â–¼                  â”‚            â”‚
-â”‚                    â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”   â”‚            â”‚
-â”‚                    â”‚      DELTA UPDATE LIBRARY       â”‚   â”‚            â”‚
-â”‚                    â”‚                                  â”‚   â”‚            â”‚
-â”‚                    â”‚  session â†’ engine â†’ codec        â”‚   â”‚            â”‚
-â”‚                    â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¬â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜   â”‚            â”‚
-â”‚                                     â”‚ callback interface     â”‚            â”‚
-â”‚                                     â–¼                        â”‚            â”‚
-â”‚                              HAL: flash / ram               â”‚            â”‚
-â”‚                                                                       â”‚
-â”‚   [Slot A: running]      [Slot B: under construction]  [Patch staging] â”‚
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
+┌─────────────────────────────── Device ────────────────────────────────┐
+│                                                                       │
+│   Transport          Update        Application      Bootloader         │
+│   (BLE/LoRa/UART) ──► Manager ──►  (RTOS task)     (A/B select)     │
+│      out of scope         │            │                  ▲            │
+│                           │            │                  │            │
+│                           ▼            ▼                  │            │
+│                    ┌──────────────────────────────────┐   │            │
+│                    │      DELTA UPDATE LIBRARY       │   │            │
+│                    │                                  │   │            │
+│                    │  session → engine → codec        │   │            │
+│                    └────────────────┬─────────────────┘   │            │
+│                                     │ callback interface     │            │
+│                                     ▼                        │            │
+│                              HAL: flash / ram               │            │
+│                                                                       │
+│   [Slot A: running]      [Slot B: under construction]  [Patch staging] │
+└───────────────────────────────────────────────────────────────────────┘
 ```
 
 ### 6.2 Integration contract
 
-The integrator provides an implementation of the **Hardware Abstraction Layer** (Â§12) and a
+The integrator provides an implementation of the **Hardware Abstraction Layer** (§12) and a
 session context allocated from a pool or static storage. The library provides everything
-else. **No source modification is required to integrate** â€” this is preserved from the
+else. **No source modification is required to integrate** — this is preserved from the
 reference implementation and is a genuinely good property.
 
 ---
@@ -368,38 +368,38 @@ reference implementation and is a genuinely good property.
 ## 7. Layered Architecture
 
 ```
-â”Œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”
-â”‚  L5   PUBLIC API          mcf_session_*                         â”‚  Application-facing
-â”‚       error model, lifecycle, query, step                      â”‚
-â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
-â”‚  L4   SESSION             state machine, progress, abort,      â”‚  Orchestration
-â”‚                           resume, policy                       â”‚
-â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
-â”‚  L3   DELTA ENGINE        bsdiff43 control-loop, block apply   â”‚  Algorithm
-â”‚                           (algorithm-neutral, codec-agnostic)  â”‚
-â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
-â”‚  L2   CONTAINER           header parse/validate, integrity,    â”‚  Format
-â”‚                           signature, anti-rollback              â”‚
-â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
-â”‚  L1   CODEC (pluggable)   LZ4 (default) â”‚ LZMA (opt-in) â”‚ â€¦   â”‚  Compression
-â”œâ”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”¤
-â”‚  L0   HAL                 flash erase/write/read, alloc, log   â”‚  Platform
-â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”˜
-                          â–² mcf_session_t owns all mutable state â”€â”˜
+┌─────────────────────────────────────────────────────────────────┐
+│  L5   PUBLIC API          mcf_session_*                         │  Application-facing
+│       error model, lifecycle, query, step                      │
+├─────────────────────────────────────────────────────────────────┤
+│  L4   SESSION             state machine, progress, abort,      │  Orchestration
+│                           resume, policy                       │
+├─────────────────────────────────────────────────────────────────┤
+│  L3   DELTA ENGINE        bsdiff43 control-loop, block apply   │  Algorithm
+│                           (algorithm-neutral, codec-agnostic)  │
+├─────────────────────────────────────────────────────────────────┤
+│  L2   CONTAINER           header parse/validate, integrity,    │  Format
+│                           signature, anti-rollback              │
+├─────────────────────────────────────────────────────────────────┤
+│  L1   CODEC (pluggable)   LZ4 (default) │ LZMA (opt-in) │ …   │  Compression
+├─────────────────────────────────────────────────────────────────┤
+│  L0   HAL                 flash erase/write/read, alloc, log   │  Platform
+└─────────────────────────────────────────────────────────────────┘
+                          ▲ mcf_session_t owns all mutable state ─┘
 ```
 
 Dependency rule: **strictly downward.** A layer may call only layers below it. The codec
 layer knows nothing about the delta format; the delta engine knows nothing about compression;
 the session layer owns all policy.
 
-### 7.1 L0 â€” Hardware Abstraction Layer
+### 7.1 L0 — Hardware Abstraction Layer
 
-The only platform-dependent surface. Six callbacks are required on every path (Â§12).
+The only platform-dependent surface. Six callbacks are required on every path (§12).
 Everything above is portable C99
 with no standard-library dependency beyond `<string.h>`, `<stdint.h>` and `<stddef.h>` (plus the
 opt-in libsodium adapter).
 
-### 7.2 L3 â€” Delta Engine
+### 7.2 L3 — Delta Engine
 
 Retains the BSDIFF43 control-triple algorithm, which is proven and appropriate. The engine is
 **codec-agnostic**: it consumes a byte source and a byte sink and knows nothing about how
@@ -433,7 +433,7 @@ retained as a zero-cost special case, resolved at session configuration.
 - Every 64-bit intermediate is eliminated; the control fields are bounded to 32 bits by
   construction, so the engine is 32-bit-clean. (**P9**, addressing **W-06**)
 
-### 7.3 L1 â€” Pluggable Codec
+### 7.3 L1 — Pluggable Codec
 
 Codec descriptors are caller-owned and session-scoped through `mcf_config_t.codecs` and
 `codec_count`; there is no mutable process-global registration table. Built-in LZ4 is always
@@ -463,18 +463,18 @@ Three codecs ship:
 
 | Codec | Decoder state | Workspace | RAM | Payload vs LZMA | Role |
 |---|---|---|---|---|---|
-| **LZ4** | 16 B | `2Â·block_size + 16 B`, configurable | **2,064 B @ 1 KB block** | ~1.7Ã— at the default 1 KB block | **Default** |
+| **LZ4** | 16 B | `2·block_size + 16 B`, configurable | **2,064 B @ 1 KB block** | ~1.7× at the default 1 KB block | **Default** |
 | **Raw** | 16 B | none | **16 B** | delta verbatim | `--codec raw`, for sub-threshold deltas |
-| **LZMA** | vendored SDK, 16 KB probs at `lc=3` | dictionary, configurable | ~20â€“33 KB | baseline | Opt-in, max ratio saving |
+| **LZMA** | vendored SDK, 16 KB probs at `lc=3` | dictionary, configurable | ~20–33 KB | baseline | Opt-in, max ratio saving |
 
 LZ4's advantage is decoder state, not payload size: on the suite's 35 KB fixture it costs
-1.67Ã— LZMA's payload at the default 1 KB block (1,934 B vs 1,160 B), narrowing to 1.09Ã— at a
+1.67× LZMA's payload at the default 1 KB block (1,934 B vs 1,160 B), narrowing to 1.09× at a
 32 KB block. A larger block therefore buys ratio at the price of workspace, since the LZ4
-workspace is `2 Ã— block_size`. `host_selftest` pins the default-block figure.
+workspace is `2 × block_size`. `host_selftest` pins the default-block figure.
 
 The raw codec exists because framing overhead is not free at the bottom of the size range: a
 delta smaller than a codec's headers is better sent verbatim. It carries no properties block
-and no per-block framing, and it removes no integrity check â€” the payload CRC, the engine's
+and no per-block framing, and it removes no integrity check — the payload CRC, the engine's
 control-triple bounds checks and the whole-image CRC all still apply.
 
 LZMA's parameters are additionally policy-checked at header-validation time when
@@ -482,7 +482,7 @@ LZMA's parameters are additionally policy-checked at header-validation time when
 decoder's resident cost by policy and not only by the reported workspace figure.
 
 **The architectural consequence.** The reference implementation's ~15.6 KB probability
-table is an unconditional RAM floor imposed by its default codec â€” no amount of buffer
+table is an unconditional RAM floor imposed by its default codec — no amount of buffer
 tuning removes it, and it is why the library cannot target a Cortex-M0. Making the codec
 pluggable and defaulting to a low-footprint codec removes that floor and moves the primary
 target from "Cortex-M3 with a 20 KB heap" to "Cortex-M0 with 4 KB", which is most of the
@@ -493,17 +493,17 @@ smaller, so the device pays for whichever it was built for while the *manufactur
 gets the best available result. A device that can afford LZMA and a device that cannot both
 benefit from the same release.
 
-### 7.4 L2 â€” Container
+### 7.4 L2 — Container
 
 Parses, validates, and integrity-checks the patch header, then exposes a validated view to
 the layers above. It performs **no** patch application. Its contract is: *after
 `mcf_hdr_parse` returns `MCF_OK`, every field in the view is in range and consistent.*
 
-This is principle **P5** â€” one validation boundary, so no downstream layer re-validates.
+This is principle **P5** — one validation boundary, so no downstream layer re-validates.
 
-### 7.5 L4 â€” Session
+### 7.5 L4 — Session
 
-The state machine (Â§9.6), policy, progress reporting, resume, and resource ownership. This
+The state machine (§9.6), policy, progress reporting, resume, and resource ownership. This
 layer exists because the reference implementation has no equivalent, which is why its error
 handling is per-function ad hoc rather than systematic.
 
@@ -511,13 +511,13 @@ handling is per-function ad hoc rather than systematic.
 
 ## 8. Data Flow
 
-### 8.1 Host-side (informational â€” the library is device-side)
+### 8.1 Host-side (informational — the library is device-side)
 
 ```
-old.bin â”€â”
-         â”œâ”€â–º bsdiff (BSDIFF43) â”€â–º raw delta stream â”€â–º codec compress â”€â”
-new.bin â”€â”˜                                                              â”‚
-                                                                       â–¼
+old.bin ─┐
+         ├─► bsdiff (BSDIFF43) ─► raw delta stream ─► codec compress ─┐
+new.bin ─┘                                                              │
+                                                                       ▼
                                                           container: v2 header +
                                                           codec props + payload +
                                                           signature
@@ -529,28 +529,28 @@ The signature covers the header and payload but excludes the signature field its
 
 ```
   mcf_session_open()
-      â”‚  L2: parse header (magic, version, lengths, product, codec, dict)
-      â”‚  L2: verify header MAC / signature
-      â”‚  L2: check version > current        â”€â”€ reject â”€â”€â–º MCF_E_ROLLBACK
-      â–¼
+      │  L2: parse header (magic, version, lengths, product, codec, dict)
+      │  L2: verify header MAC / signature
+      │  L2: check version > current        ── reject ──► MCF_E_ROLLBACK
+      ▼
   mcf_session_begin()
-      â”‚  L2: verify base image CRC          â”€â”€ reject â”€â”€â–º MCF_E_MISMATCH
-      â”‚  L1: codec->init(props)
-      â”‚  L1: check dict_size <= budget      â”€â”€ reject â”€â”€â–º MCF_E_DICT_TOO_LARGE
-      â”‚  L1: allocate workspace
-      â–¼
+      │  L2: verify base image CRC          ── reject ──► MCF_E_MISMATCH
+      │  L1: codec->init(props)
+      │  L1: check dict_size <= budget      ── reject ──► MCF_E_DICT_TOO_LARGE
+      │  L1: allocate workspace
+      ▼
   while (state != DONE):
     mcf_session_step()
-        â”‚  L1: decode â†’ fill block from patch flash
-        â”‚  L3: apply delta block (diff against base, then literal bytes)
-        â”‚  L0: erase + program + verify the sink block
-        â”‚  L4: invoke progress callback â†’ may abort
-        â”‚  L4: periodically checkpoint for resume (Â§15)
-        â–¼
+        │  L1: decode → fill block from patch flash
+        │  L3: apply delta block (diff against base, then literal bytes)
+        │  L0: erase + program + verify the sink block
+        │  L4: invoke progress callback → may abort
+        │  L4: periodically checkpoint for resume (§15)
+        ▼
   mcf_session_finish()
-      â”‚  L2: verify reconstructed image CRC â”€â”€ reject â”€â”€â–º MCF_E_CORRUPT
-      â”‚  L4: invoke the commit hook â€” swap policy belongs to the integrator
-      â–¼
+      │  L2: verify reconstructed image CRC ── reject ──► MCF_E_CORRUPT
+      │  L4: invoke the commit hook — swap policy belongs to the integrator
+      ▼
   DONE
 ```
 
@@ -558,9 +558,9 @@ The signature covers the header and payload but excludes the signature field its
 
 ```
   any layer detects failure
-        â”‚
-        â–¼
-  return negative mcf_status_t â”€â”€â–º session state := FAILED
+        │
+        ▼
+  return negative mcf_status_t ──► session state := FAILED
                                      resource released (P1: B-07, B-08)
                                      error code preserved verbatim
                                      status queryable via mcf_session_status()
@@ -576,7 +576,7 @@ other state may be reported as success. This directly closes **B-03** and **B-05
 ### 9.1 Surface
 
 The lifecycle, the resume pair, and the queries below. This is the contract an integrator
-implements and calls â€” deliberately close to the reference implementation's successful
+implements and calls — deliberately close to the reference implementation's successful
 refactor, so prior porting effort transfers.
 
 ```c
@@ -604,7 +604,7 @@ uint32_t     mcf_ctx_size(const mcf_config_t *cfg);   /* exact dynamic workspace
 ```
 
 Plus a single-call convenience wrapper `mcf_session_run()` for simple integrations that do not
-need stepping â€” implemented entirely in terms of the above, adding no new behaviour.
+need stepping — implemented entirely in terms of the above, adding no new behaviour.
 
 ### 9.2 Error model (**P1**)
 
@@ -644,7 +644,7 @@ stakeholder: Operations).
 **MFP2 carries the same two queries.** `mcf_v2_session_error_site()` and
 `mcf_v2_session_total()` mirror the MFP1 pair, because a field diagnosis that works for MFP1 and
 silently degrades to "no site" for MFP2 is worse than not having it. MFP2's internal stages occupy
-sites 34â€“48 (`MCF_SITE_V2_PARSE` through `MCF_SITE_V2_INNER`) and never collide with MFP1's 0â€“33.
+sites 34–48 (`MCF_SITE_V2_PARSE` through `MCF_SITE_V2_INNER`) and never collide with MFP1's 0–33.
 
 Two rules make the v2 site trustworthy:
 
@@ -652,7 +652,7 @@ Two rules make the v2 site trustworthy:
    act on, so each of the 28 failure sites is spelled out at its call site rather than defaulted.
 2. **The inner site is captured before the inner session closes.** MFP2 delegates decode and apply
    to an inner MFP1 session, and `mcf_session_close()` resets that session's site to
-   `MCF_SITE_NONE`. Reading it after the close â€” the obvious way to write this â€” yields 0 for every
+   `MCF_SITE_NONE`. Reading it after the close — the obvious way to write this — yields 0 for every
    inner failure. `v2_fail_inner()` reads first and falls back to `MCF_SITE_V2_INNER` only when the
    inner engine genuinely recorded nothing, so an inner flash fault reports 27, not 0 and not a
    generic v2 stage.
@@ -663,7 +663,7 @@ Two rules make the v2 site trustworthy:
 typedef struct mcf_session mcf_session_t;   /* opaque, caller-allocated */
 ```
 
-The caller provides the storage â€” from a static object, a pool allocator, or the heap. The
+The caller provides the storage — from a static object, a pool allocator, or the heap. The
 library never allocates the session itself and never holds a static session pointer. This
 eliminates **B-12** and makes the library reentrant by construction.
 
@@ -679,17 +679,17 @@ typedef struct mcf_config {
     uint32_t         patch_size;
 
     /* Base image: direct memory (fast path) or callback (general) */
-    const uint8_t   *old;           /* NULL â‡’ use old_read callback        */
+    const uint8_t   *old;           /* NULL ⇒ use old_read callback        */
     uint32_t         old_size;
     mcf_read_fn      old_read;
     void            *old_ctx;
 
     uint32_t         dst_addr;      /* via HAL                             */
 
-    mcf_codec_id_t   codec;         /* MCF_CODEC_AUTO â‡’ smallest that fits */
-    uint32_t         block_size;    /* 0 â‡’ MCF_DEFAULT_BLOCK_SIZE (1024)   */
+    mcf_codec_id_t   codec;         /* MCF_CODEC_AUTO ⇒ smallest that fits */
+    uint32_t         block_size;    /* 0 ⇒ MCF_DEFAULT_BLOCK_SIZE (1024)   */
 
-    /* Memory ceiling; the library refuses to exceed it (see Â§10) */
+    /* Memory ceiling; the library refuses to exceed it (see §10) */
     uint32_t         ram_budget;
 
     /* Optional */
@@ -714,7 +714,7 @@ typedef struct mcf_config {
     const mcf_codec_ops_t *codecs;
     uint32_t         codec_count;
 
-    /* Resume journal (see Â§15); both zero disables it */
+    /* Resume journal (see §15); both zero disables it */
     uint32_t         journal_addr;
     uint32_t         journal_interval;
 } mcf_config_t;
@@ -728,11 +728,11 @@ allocation it cannot satisfy.** This is the direct fix for **B-01** and **W-01**
 ### 9.5 Progress and abort (**P7**)
 
 ```c
-int (*progress)(void *u, uint32_t done, uint32_t total);   /* != 0 â‡’ abort */
+int (*progress)(void *u, uint32_t done, uint32_t total);   /* != 0 ⇒ abort */
 ```
 
 Invoked once per processed block. Returning non-zero sets `MCF_E_ABORTED`, releases all
-resources, and leaves the session in `FAILED` â€” a clean, defined outcome rather than a
+resources, and leaves the session in `FAILED` — a clean, defined outcome rather than a
 forced watchdog reset (**G-07**).
 
 ### 9.6 Step-wise state machine (**P7**)
@@ -751,9 +751,9 @@ sleep, yield, or persist state between steps. `mcf_session_run()` is a trivial l
 
 `step()` returns `MCF_OK` while work remains **and** on the call that completes the image;
 completion is signalled by the state reaching `MCF_ST_VERIFY`, not by a negative return. A
-negative return is always a real failure. See Â§11.2 for the loop.
+negative return is always a real failure. See §11.2 for the loop.
 
-This also provides the natural insertion point for the resume journal (Â§15).
+This also provides the natural insertion point for the resume journal (§15).
 
 ---
 
@@ -790,8 +790,8 @@ when budgeting static RAM.
 
 | Codec | Formula | Default configuration |
 |---|---|---|
-| **LZ4** | `2Â·block_size + 16 B` | `block_size = 1024` â‡’ **2,064 B** |
-| **LZMA** | `state + probs + dict` where `probs = (1984 + 768Â·2^(lc+lp))Â·2 B` | `lc=3,lp=0` â‡’ 16,256 B; `dict=16 KB` â‡’ **~32.9 KB** |
+| **LZ4** | `2·block_size + 16 B` | `block_size = 1024` ⇒ **2,064 B** |
+| **LZMA** | `state + probs + dict` where `probs = (1984 + 768·2^(lc+lp))·2 B` | `lc=3,lp=0` ⇒ 16,256 B; `dict=16 KB` ⇒ **~32.9 KB** |
 
 (The shipped LZMA decoder is the vendored LZMA SDK; the `1984` base-probability count and the
 dictionary rounding are mirrored in `mcf_lzma_workspace()`. See `src/mcf_lzma.h`.)
@@ -809,14 +809,14 @@ Figures below are the actual outputs of `mcf_ctx_size()` (workspace) and
 |---|---|---|---|---|---|---|
 | **Constrained, minimal** | LZ4 | 256 | 528 | 340 | **868 B** | ~12.4 KB |
 | **Constrained (M0)** | LZ4 | 512 | 1,040 | 340 | **1,380 B** | ~12.4 KB |
-| **Standard (M3/M4)** â€” default | LZ4 | 1024 | 2,064 | 340 | **2,404 B** | ~11.5 KB |
-| **Max ratio (M3/M4)** | LZMA | 1024 | 32,896 | 340 | **â‰ˆ 33.2 KB** | ~18 KB |
+| **Standard (M3/M4)** — default | LZ4 | 1024 | 2,064 | 340 | **2,404 B** | ~11.5 KB |
+| **Max ratio (M3/M4)** | LZMA | 1024 | 32,896 | 340 | **≈ 33.2 KB** | ~18 KB |
 
 The LZ4 workspace figures are `2B + sizeof(mcf_lz4_t)`, which is exactly what the query
 returns. The ROM column is the whole library as measured by the CI size gate; it is larger
 than the design's original estimate because the MFP2 authenticated execution path
-(`mcf_v2_session.c`) was added after it. The primary design target â€” the Standard profile
-fitting comfortably on a 32 KB part, and the Constrained profile on an 8 KB one â€” holds.
+(`mcf_v2_session.c`) was added after it. The primary design target — the Standard profile
+fitting comfortably on a 32 KB part, and the Constrained profile on an 8 KB one — holds.
 
 ### 10.5 Static allocation option
 
@@ -852,9 +852,9 @@ enforced as a size gate (see 16.1 B7).
 | Reentrancy | **Yes.** Two sessions with distinct contexts are fully independent, and this is exercised by driving two of them through the whole decode interleaved (`hal_concurrency_test`). |
 | Thread safety of one session | **No.** A single session must be driven by one context at a time. Documented, not defended against. |
 | HAL reentrancy | Depends on the implementation; stated as a HAL requirement. |
-| Blocking calls | `mcf_session_step()` is bounded by one block of work â€” the reason the step-wise API exists. `begin()` and `finish()` are **not**: `begin()` walks the base-image and payload CRCs, and `finish()` reads the whole reconstructed image back for its CRC, so both scale with image size. Use the step-wise API and the progress callback where a watchdog must be serviced. |
+| Blocking calls | `mcf_session_step()` is bounded by one block of work — the reason the step-wise API exists. `begin()` and `finish()` are **not**: `begin()` walks the base-image and payload CRCs, and `finish()` reads the whole reconstructed image back for its CRC, so both scale with image size. Use the step-wise API and the progress callback where a watchdog must be serviced. |
 
-**`mcf_ctx_size()` is pure and reentrant** â€” safe to call from an allocator or a build script.
+**`mcf_ctx_size()` is pure and reentrant** — safe to call from an allocator or a build script.
 
 ### 11.2 Integration guidance
 
@@ -891,13 +891,13 @@ bare-metal, superloop, and RTOS systems identically.
 
 ### 12.1 The problem (**G-06**)
 
-NOR flash cannot be programmed over existing data â€” program only clears bits. A correct
+NOR flash cannot be programmed over existing data — program only clears bits. A correct
 update requires: *erase the containing block, buffer across block boundaries, program,
 optionally verify.* The reference implementation collapses this into a single
 "write" callback with no erase primitive, no alignment contract, and no buffering.
 
-The result is that the most natural integration â€” wiring the callback to a page-program
-primitive â€” produces **silent corruption**, and the library's own error path then hides it
+The result is that the most natural integration — wiring the callback to a page-program
+primitive — produces **silent corruption**, and the library's own error path then hides it
 (**B-02**). This is the most dangerous interface defect in the reference work.
 
 ### 12.2 The contract
@@ -911,7 +911,7 @@ typedef struct mcf_hal {
     /* Program `len` bytes: never crosses an erase-block boundary. */
     int32_t  (*flash_write)(void *ctx, uint32_t addr, const uint8_t *p, uint32_t len);
 
-    /* Read `len` bytes: required â€” read-back verify and the finish CRC use it. */
+    /* Read `len` bytes: required — read-back verify and the finish CRC use it. */
     int32_t  (*flash_read)(void *ctx, uint32_t addr, uint8_t *p, uint32_t len);
 
     /* Erase/program granularity in bytes. Power of two. */
@@ -935,16 +935,16 @@ typedef struct mcf_hal {
 
 ### 12.3 What the library now guarantees
 
-1. **Alignment** â€” the library queries granularity and never issues an unaligned or
+1. **Alignment** — the library queries granularity and never issues an unaligned or
    block-crossing operation.
-2. **Buffering** â€” the library buffers across erase-block boundaries so the HAL never has
+2. **Buffering** — the library buffers across erase-block boundaries so the HAL never has
    to. This is the defect's direct fix.
-3. **Erase-before-program** â€” enforced by the library, not requested in a comment.
-4. **Write verification** â€” read-back compare after program, unless `flash_is_readonly` reports
+3. **Erase-before-program** — enforced by the library, not requested in a comment.
+4. **Write verification** — read-back compare after program, unless `flash_is_readonly` reports
    that region unreadable. Failure returns `MCF_E_FLASH`. Note this skips only the per-write
    compare: the whole-image CRC at finish still reads the destination back, so `flash_read`
    remains required.
-5. **Error propagation** â€” any HAL failure aborts the session and is reported verbatim
+5. **Error propagation** — any HAL failure aborts the session and is reported verbatim
    (**B-02**).
 
 ### 12.4 Buffering cost
@@ -983,26 +983,26 @@ layout, so the two cannot drift.
 
 | Off | Size | Field | Purpose |
 |---:|---:|---|---|
-| 0 | 4 | `magic` | `'MFP1'` = 0x3150464D â€” **G-04** |
-| 4 | 2 | `hdr_len` | Header size in bytes; permits extension â€” **G-04** |
-| 6 | 2 | `hdr_ver` | Major<<8 \| minor â€” **G-04** |
+| 0 | 4 | `magic` | `'MFP1'` = 0x3150464D — **G-04** |
+| 4 | 2 | `hdr_len` | Header size in bytes; permits extension — **G-04** |
+| 6 | 2 | `hdr_ver` | Major<<8 \| minor — **G-04** |
 | 8 | 4 | `flags` | bit0 signed, bit1 raw, bit2 LZMA, bit3 LZ4 |
-| 12 | 4 | `product_id` | Board/product binding â€” **G-03** |
-| 16 | 4 | `fw_version` | Monotonic; anti-rollback â€” **G-02** |
+| 12 | 4 | `product_id` | Board/product binding — **G-03** |
+| 16 | 4 | `fw_version` | Monotonic; anti-rollback — **G-02** |
 | 20 | 4 | `old_size` | Base image length |
 | 24 | 4 | `new_size` | Reconstructed image length |
 | 28 | 4 | `payload_size` | Bytes after the header |
 | 32 | 4 | `old_crc32` | Base image integrity |
 | 36 | 4 | `new_crc32` | Reconstructed image integrity |
 | 40 | 4 | `payload_crc32` | Delta stream integrity |
-| 44 | 4 | `workspace_req` | **Decoder RAM required** â€” **W-01** |
+| 44 | 4 | `workspace_req` | **Decoder RAM required** — **W-01** |
 | 48 | 4 | `old_version` | Version of the base image required |
 | 52 | 1 | `codec_id` | 1 = LZ4, 2 = LZMA; 0 is AUTO and invalid on the wire |
 | 53 | 1 | `block_size_log2` | Decoder block size |
 | 54 | 2 | `reserved` | Must be zero |
-| 56 | 64 | `signature` | Ed25519 (Râ€–S) or ECDSA-P256 â€” **G-01** |
+| 56 | 64 | `signature` | Ed25519 (R‖S) or ECDSA-P256 — **G-01** |
 | 120 | var | `codec_props` | Codec parameters |
-| â€” | var | `payload` | Compressed delta stream |
+| — | var | `payload` | Compressed delta stream |
 
 **`workspace_req` is the keystone field.** It states the decoder's RAM requirement in the
 patch itself. The device compares it against `ram_budget` during header validation and
@@ -1010,7 +1010,7 @@ returns `MCF_E_DICT_TOO_LARGE` before allocating a single byte. A mismatched pat
 error, not a fault (**B-01**).
 
 **Minimum header length is therefore 120 bytes**, and `MCF_HDR_MIN_SIZE` is asserted against
-`sizeof(mcf_header_t)` at compile time. Note that an Ed25519 *signature* is 64 bytes (Râ€–S)
+`sizeof(mcf_header_t)` at compile time. Note that an Ed25519 *signature* is 64 bytes (R‖S)
 while its *public key* is 32; conflating the two shifts the payload by 32 bytes and
 corrupts every field after it. This was caught by the host tool's round-trip test, and the
 field sizes are now asserted independently in C and in Python.
@@ -1024,11 +1024,11 @@ field offsets against the table independently, so the two cannot drift.
 ### 13.3 Retained: the BSDIFF43 delta format
 
 The delta stream format itself is **unchanged**. It is proven, appropriately sized, and its
-weaknesses lie in the surrounding contract, not the algorithm (Â§3.4). Changing it would
+weaknesses lie in the surrounding contract, not the algorithm (§3.4). Changing it would
 invalidate every existing host tool for no engineering benefit.
 
 Consequently, patches produced by the reference toolchain can be made to work by adding a
-header-translation step, preserving field investment (**Â§19**).
+header-translation step, preserving field investment (**§19**).
 
 ### 13.4 Header validation
 
@@ -1043,11 +1043,11 @@ Performed once, in `mcf_hdr_parse()`, and everything downstream trusts the resul
  6. old_version == current version     else MCF_E_MISMATCH
  7. codec_id known                     else MCF_E_UNSUPPORTED
  8. sizes within flash capacity        else MCF_E_PARAM
- 9. workspace_req <= ram_budget        else MCF_E_DICT_TOO_LARGE   â† prevents B-01
+ 9. workspace_req <= ram_budget        else MCF_E_DICT_TOO_LARGE   ← prevents B-01
 10. flag/codec_id agreement (incl. RAW) else MCF_E_FORMAT
 11. LZMA props: lc+lp and dict within
     lzma_max_lc_plus_lp / lzma_max_dict else MCF_E_FORMAT / MCF_E_DICT_TOO_LARGE
-12. signature valid over hdr[0..55]+payload  else MCF_E_SIGNATURE â† prevents G-01
+12. signature valid over hdr[0..55]+payload  else MCF_E_SIGNATURE ← prevents G-01
 13. payload CRC valid                 else MCF_E_CORRUPT
 ```
 
@@ -1079,7 +1079,7 @@ implicitly violates by relying on CRC32 alone.
 
 | Control | Addresses | Mechanism |
 |---|---|---|
-| **Digital signature** | Arbitrary code execution | Ed25519 (built-in verifier, measured â‰ˆ 6 KB flash for verify, opt-in) or ECDSA-P256 where a hardware accelerator exists. Verified before any patch byte is applied. |
+| **Digital signature** | Arbitrary code execution | Ed25519 (built-in verifier, measured ≈ 6 KB flash for verify, opt-in) or ECDSA-P256 where a hardware accelerator exists. Verified before any patch byte is applied. |
 | **Anti-rollback** | Replay of vulnerable versions | `fw_version` must exceed the stored current version. Enforced against a monotonic counter in OTP/eFuse or a signed version record. |
 | **Product binding** | Cross-product patch application | `product_id` compared against a device-provisioned value. |
 | **Integrity** | Corruption in transit or storage | CRC32 for accidental corruption; the signature for authenticity. CRC is explicitly documented as *not* a security control. |
@@ -1090,10 +1090,10 @@ implicitly violates by relying on CRC32 alone.
 
 | | Ed25519 | ECDSA-P256 |
 |---|---|---|
-| Code size (verify) | **â‰ˆ 6 KB, measured** | ~4â€“6 KB, unmeasured |
+| Code size (verify) | **≈ 6 KB, measured** | ~4–6 KB, unmeasured |
 | Public key | 32 B | 64 B uncompressed |
-| Verify time @ 20 MHz M0 | ~10â€“20 ms | ~40â€“80 ms, or ~1 ms with an accelerator |
-| Implementation risk | Low â€” self-contained, constant-time available | Moderate â€” needs constant-time scalar multiplication |
+| Verify time @ 20 MHz M0 | ~10–20 ms | ~40–80 ms, or ~1 ms with an accelerator |
+| Implementation risk | Low — self-contained, constant-time available | Moderate — needs constant-time scalar multiplication |
 
 **Default: Ed25519.** Fastest to audit, smallest, and no dependency on a big-integer
 library. ECDSA-P256 offered where a hardware accelerator already exists. The verification
@@ -1103,7 +1103,7 @@ without modifying the library.
 **Implemented.** Two providers ship. The built-in one
 (`-DMCF_ENABLE_ED25519=ON`, `src/mcf_ed25519.c`) implements plain Ed25519 for MFP1 and
 Ed25519ph for MFP2 with no external crypto library and no heap, using the vendored TweetNaCl
-for field and group arithmetic â€” see `third_party/tweetnacl/README.md` for why the arithmetic
+for field and group arithmetic — see `third_party/tweetnacl/README.md` for why the arithmetic
 is borrowed rather than written, and the README's *Signature verification* section for the
 evidence. The libsodium adapter (`-DMCF_ENABLE_SODIUM=ON`, `src/mcf_sodium.c`) remains
 available. Both are opt-in, and a build with neither still rejects signed patches with
@@ -1111,9 +1111,9 @@ available. Both are opt-in, and a build with neither still rejects signed patche
 a one-line CMake change plus a deliberate raise of the size ceiling, and is not done because
 a product that already carries a crypto stack should not pay ~6 KB of flash for a second one.
 
-The `~2â€“3 KB` estimate in the table above was **wrong by roughly 3Ã—**, and a measured figure now
+The `~2–3 KB` estimate in the table above was **wrong by roughly 3×**, and a measured figure now
 stands in its place: the built-in verifier plus its SHA-512 and the TweetNaCl bridge costs
-**â‰ˆ 6.3 KB of flash** on Cortex-M4 with `--gc-sections` (`.text` 4,342 B + `.rodata` 1,928 B, of
+**≈ 6.3 KB of flash** on Cortex-M4 with `--gc-sections` (`.text` 4,342 B + `.rodata` 1,928 B, of
 which ~0.3 KB is the measuring harness's own stubs). TweetNaCl's field arithmetic and the
 SHA-512 round-constant table are simply larger than the estimate assumed. The figure is obtained
 by linking only the verifier path and letting `--gc-sections` discard the rest; all of
@@ -1130,7 +1130,7 @@ armclang and IAR builds remain pending; IAR has no comparable free proxy.
 
 ### 14.4 Explicitly out of scope
 
-Encryption (Â§4.2 N4) and transport authentication. Both are layered above this library.
+Encryption (§4.2 N4) and transport authentication. Both are layered above this library.
 **Signature verification is mandatory when enabled; a library build without it is a build
 for development only** and is gated behind a compile-time flag that emits a warning.
 
@@ -1145,7 +1145,7 @@ that is not resumable and not discardable produces bricked units.
 
 ### 15.2 Approach: a resumable step machine
 
-The step-wise state machine (Â§9.6) makes resumption natural. The session records a **journal**
+The step-wise state machine (§9.6) makes resumption natural. The session records a **journal**
 into a caller-designated small NVM region at every control-triple boundary in the delta
 stream, and reads it back after a reset.
 
@@ -1162,7 +1162,7 @@ typedef struct mcf_journal {
 `mcf_resume_probe()` validates the record, checks that it belongs to this patch, and verifies
 the reconstructed prefix against the flash that is actually there. `mcf_session_begin()` then
 continues from that point. A damaged, stale, or mismatched record returns
-`MCF_E_NOT_FOUND` and the update starts clean â€” that is an ordinary condition after a power
+`MCF_E_NOT_FOUND` and the update starts clean — that is an ordinary condition after a power
 cut, not an error.
 
 **Integrity argument.** `prefix_crc32` is compared against a fresh read of the reconstructed
@@ -1171,7 +1171,7 @@ rather than trusted. Without this, resume is a correctness hazard rather than a 
 
 **What the journal does not do.** It is not an authenticity control. It lives in NVM the
 device itself writes; an attacker who can write that NVM has already won. The threat
-addressed is corruption and interruption, not forgery. Patch authenticity is Â§14's job.
+addressed is corruption and interruption, not forgery. Patch authenticity is §14's job.
 
 #### 15.2.1 A correction to the original design
 
@@ -1179,7 +1179,7 @@ The first draft of this section specified resuming by seeking the decompressor t
 `payload_pos`. **That is not expressible in the codec interface as designed, and the
 implementation does not attempt it.** A decompressed-stream position and a compressed-stream
 position are different coordinate systems, and the compressed one is only meaningful at a
-codec block boundary â€” which the delta engine knows nothing about. Restoring
+codec block boundary — which the delta engine knows nothing about. Restoring
 `io.payload_pos` to a mid-block offset produces a stream that decodes cleanly and is
 reconstructed incorrectly.
 
@@ -1191,7 +1191,7 @@ codec without extending the vtable.
 Two changes would make resume cheaper, and are the natural next step:
 
 1. Add a `rewind(block_pos, skip)` entry to `mcf_codec_ops_t`, alongside a
-   `checkpoint(&block_pos, &skip)`. The codec â€” not the engine â€” reports where its current
+   `checkpoint(&block_pos, &skip)`. The codec — not the engine — reports where its current
    block starts and how much of it has been emitted.
 2. Have the engine expose the decompressed offset of the current triple, which it already
    knows, instead of the compressed offset.
@@ -1213,16 +1213,16 @@ block-size-to-triple-size ratio.
 
 ### 15.3 Relationship to A/B slots
 
-Slot selection and swap policy are explicitly **out of scope** (Â§4.2 N2) because they are
+Slot selection and swap policy are explicitly **out of scope** (§4.2 N2) because they are
 product-specific. The library provides:
 
-- the `commit` callback (Â§9.4), invoked **only after** the reconstructed image's CRC verifies;
+- the `commit` callback (§9.4), invoked **only after** the reconstructed image's CRC verifies;
 - the `MCF_E_COMMIT` code, so an integrator can reject a swap;
 - the guarantee that a session reaching `MCF_ST_DONE` has produced a verified image.
 
 An integrator implementing a standard A/B scheme writes a small state marker in `commit`,
 selects the new slot, and resets. The library's contribution is the invariant that the
-marker is only ever set on verified data â€” which the reference implementation does not
+marker is only ever set on verified data — which the reference implementation does not
 provide (**B-03**).
 
 ### 15.4 Failure-mode matrix
@@ -1253,8 +1253,8 @@ already safe without it.
 | B4 | The compression **encoder** and file-I/O layers are not in the device build | **W-07** |
 | B5 | No public header includes standard I/O | **W-07** |
 | B6 | All library symbols namespaced (`mcf_`), no global-scope collision | **W-08** |
-| B7 | `mcf_ctx_size()` usable at build time for a size regression gate | **G-10** â€” implemented: `cmake/size_gate.cmake` plus a committed baseline in `cmake/size_baseline.txt`, enforced per core in CI |
-| B8 | CMake â‰¥ 3.15 with a Conan 2.x recipe; both optional for plain-CMake users | â€” |
+| B7 | `mcf_ctx_size()` usable at build time for a size regression gate | **G-10** — implemented: `cmake/size_gate.cmake` plus a committed baseline in `cmake/size_baseline.txt`, enforced per core in CI |
+| B8 | CMake ≥ 3.15 with a Conan 2.x recipe; both optional for plain-CMake users | — |
 
 ### 16.2 Codec selection as a build option
 
@@ -1267,7 +1267,7 @@ option(MCF_ENABLE_SODIUM "Build the libsodium Ed25519ph/AEAD adapter" OFF)
 LZ4 is compiled unconditionally and is the default codec. LZMA is opt-in because it pulls in
 the vendored SDK; the sodium adapter is opt-in because it needs a host crypto library. Only
 selected codecs are compiled, so a device pays only for what it uses. Signatures and the
-resume journal are always compiled in â€” they are runtime configuration
+resume journal are always compiled in — they are runtime configuration
 (`mcf_config_t.verify` and `journal_addr`), not build options.
 
 ### 16.3 Explicit source list
@@ -1281,7 +1281,7 @@ encoder side of the codecs. **No overlap.**
 | Dimension | Values |
 |---|---|
 | Compiler | GCC and ARM GCC on the host and cross jobs (verified); armclang and IAR are unverified portability targets |
-| Core | Cortex-M0, M3, M4, M7 â€” the four the cross-compile job builds. M0+ and M33 are untested portability targets. |
+| Core | Cortex-M0, M3, M4, M7 — the four the cross-compile job builds. M0+ and M33 are untested portability targets. |
 | Build type | Debug and Release (`-Osize`, `-Os` LTO + `--gc-sections`) |
 | Analysis | `-Wall -Wextra -Wconversion -Wsign-conversion -Werror`; a separate sanitizer job builds the host suite under ASan/UBSan |
 | Tests | Host unit tests, the host-to-device cross test, MFP2 boundary tests, and the parser fuzz smoke target |
@@ -1306,7 +1306,7 @@ third party can produce a valid patch, and the system cannot be maintained by an
 person (**W-11**).
 
 **This is the largest non-code defect in the reference work and the precondition for
-everything in Â§13.**
+everything in §13.**
 
 ### 17.2 Scope
 
@@ -1353,14 +1353,14 @@ device executes attacker-supplied bytes, this is the most serious process gap.
 | **API contract** | The deprecation messages reach the compiler and `MCF_NO_DEPRECATED` suppresses them (`cmake/deprecation_probe.cmake`) | Per configure |
 | **Fuzzing** | The MFP2 parser under a coverage-guided libFuzzer target (Clang) plus a portable mutation smoke target | Per commit / continuous |
 
-A **hardware-in-the-loop** tier â€” real flash, a real watchdog, real power cycling on STM32 and
-Renesas parts â€” is a planned addition, not a current gate. A dedicated cppcheck pass is
+A **hardware-in-the-loop** tier — real flash, a real watchdog, real power cycling on STM32 and
+Renesas parts — is a planned addition, not a current gate. A dedicated cppcheck pass is
 likewise not wired up; the compiler warning set above is the enforced static check.
 
 ### 18.2 The fault-injection suite is the core contribution
 
 It exists to close the exact gap that produced the reference implementation's worst findings.
-For each stage â€” allocation, source read, decode, erase, program, verify â€” the suite forces a
+For each stage — allocation, source read, decode, erase, program, verify — the suite forces a
 failure and asserts:
 
 1. The return value is the **specific** expected `mcf_status_t`; and
@@ -1368,7 +1368,7 @@ failure and asserts:
 3. No resources leak (asserted by allocation/deallocation counters); and
 4. No bytes were written after the failure.
 
-Property 2 is the direct regression test for **B-01**, **B-02**, **B-03**, and **B-05** â€” the
+Property 2 is the direct regression test for **B-01**, **B-02**, **B-03**, and **B-05** — the
 four defects that cause silent field failures. This suite is the enforcement mechanism for
 **G1** and **P1**, and it must be green before any release.
 
@@ -1376,25 +1376,25 @@ four defects that cause silent field failures. This suite is the enforcement mec
 
 | Finding | Regression test |
 |---|---|
-| B-01 heap exhaustion | Force workspace alloc to fail â†’ expect `MCF_E_NOMEM`, never a fault |
-| B-01 dict mismatch | Patch declares `workspace_req` > budget â†’ expect `MCF_E_DICT_TOO_LARGE` |
-| B-02 flash write fail | Force `write` to return error â†’ expect `MCF_E_FLASH`, no further writes |
-| B-03 false success | Force any mid-session failure â†’ assert return â‰  `MCF_OK` and state = `FAILED` |
-| B-05 corrupt payload | Flip bits at every offset â†’ expect `MCF_E_CORRUPT` |
+| B-01 heap exhaustion | Force workspace alloc to fail → expect `MCF_E_NOMEM`, never a fault |
+| B-01 dict mismatch | Patch declares `workspace_req` > budget → expect `MCF_E_DICT_TOO_LARGE` |
+| B-02 flash write fail | Force `write` to return error → expect `MCF_E_FLASH`, no further writes |
+| B-03 false success | Force any mid-session failure → assert return ≠ `MCF_OK` and state = `FAILED` |
+| B-05 corrupt payload | Flip bits at every offset → expect `MCF_E_CORRUPT` |
 | B-07/B-08 leaks | Allocation counter balance across every failure path |
-| G-01 no signature | Mutate payload with a valid CRC â†’ expect `MCF_E_SIGNATURE` |
-| G-02 replay | Patch with `fw_version` â‰¤ current â†’ expect `MCF_E_ROLLBACK` |
-| G-03 cross-product | Correct patch, wrong `product_id` â†’ expect `MCF_E_PRODUCT` |
+| G-01 no signature | Mutate payload with a valid CRC → expect `MCF_E_SIGNATURE` |
+| G-02 replay | Patch with `fw_version` ≤ current → expect `MCF_E_ROLLBACK` |
+| G-03 cross-product | Correct patch, wrong `product_id` → expect `MCF_E_PRODUCT` |
 | W-01 implicit dict | Regenerate patches at many dict sizes; every rejection is an error, never a fault |
 
 ### 18.4 The fault-injection catalog
 
-`microfoam_tests` forces each of the following and asserts a *specific* status code â€” never
+`microfoam_tests` forces each of the following and asserts a *specific* status code — never
 `MCF_OK`:
 
 - erase failure, program failure, and *program succeeding but storing the wrong bytes* (caught
-  by the read-back compare) â€” all `MCF_E_FLASH`;
-- truncated payloads and flipped payload bits â€” rejected, never `MCF_OK`;
+  by the read-back compare) — all `MCF_E_FLASH`;
+- truncated payloads and flipped payload bits — rejected, never `MCF_OK`;
 - wrong product (`MCF_E_PRODUCT`), downgrade attempts (`MCF_E_ROLLBACK`), base-version mismatch
   and base-image CRC mismatch (`MCF_E_MISMATCH`);
 - over-budget workspace (`MCF_E_DICT_TOO_LARGE`), an unknown codec marker (`MCF_E_FORMAT`), a
@@ -1403,7 +1403,7 @@ four defects that cause silent field failures. This suite is the enforcement mec
 - abort through the progress callback (`MCF_E_ABORTED`), and a signed patch presented to a
   build with no verifier (`MCF_E_SIGNATURE`).
 
-Property 2 of Â§18.2 â€” "the return value is not `MCF_OK`" â€” is what makes each of these a
+Property 2 of §18.2 — "the return value is not `MCF_OK`" — is what makes each of these a
 regression test for the silent-failure findings rather than a smoke test.
 
 ### 18.5 The MFP2 parser property contract
@@ -1416,8 +1416,8 @@ reproduces, with iteration yielding exactly the declared records.
 
 `v2_format_test` samples that space deterministically; `v2_fuzz_smoke` asserts the same oracle
 on every platform; and with `MCF_BUILD_FUZZER=ON` a Clang/libFuzzer target searches it with
-coverage feedback under ASan/UBSan. The oracle is proven non-vacuous â€” it rejects a view with
-an inflated record count, a shifted header length, or a mutated framing byte â€” so a passing
+coverage feedback under ASan/UBSan. The oracle is proven non-vacuous — it rejects a view with
+an inflated record count, a shifted header length, or a mutated framing byte — so a passing
 run is evidence rather than a tautology.
 
 ### 18.6 Falsifiable claims
@@ -1448,7 +1448,7 @@ Semantic versioning. The **public API is `mcf_*` only**; the container format ve
 (`hdr_ver`) is tracked separately, because a patch format revision must be able to change
 without a library major bump.
 
-One version number is written by hand into seven files â€” `CMakeLists.txt`, `pyproject.toml`,
+One version number is written by hand into seven files — `CMakeLists.txt`, `pyproject.toml`,
 `conanfile.py`, `host/microfoam.py`, the `MCF_VERSION_*` macros, the README spec table, and the
 reconciliation note at the top of this document. That is seven chances to bump five and forget
 two, and the failure mode is silent: the build succeeds, every test passes, and the shipped
@@ -1458,14 +1458,14 @@ firmware header contradicts the PyPI metadata until a user notices.
 build can skip it. It fails on three conditions: the sites disagree, a site no longer declares a
 version, or one file disagrees with itself. CI adds `--tag-check`, which additionally requires an
 exact git tag on HEAD to match the tree, and the packaging job asserts the *installed*
-`microfoam --version` equals the tree version â€” testing the shipped artifact rather than the
+`microfoam --version` equals the tree version — testing the shipped artifact rather than the
 source it was built from.
 
 ### 19.2 Format compatibility
 
 | Strategy | Detail |
 |---|---|
-| Forward compatibility | Unknown `hdr_ver` major â‡’ `MCF_E_UNSUPPORTED`. A newer device may accept a newer minor by ignoring fields beyond `hdr_len`. |
+| Forward compatibility | Unknown `hdr_ver` major ⇒ `MCF_E_UNSUPPORTED`. A newer device may accept a newer minor by ignoring fields beyond `hdr_len`. |
 | Backward compatibility | The v1 BSDIFF43 delta payload is **unchanged in v2**. Only the container header is new. |
 | Migration path | A translator converts v1 patches to v2 by recomputing the header. Field device population requires it only for the first signed release. |
 
@@ -1475,18 +1475,18 @@ No API is removed within a major version. Deprecated entry points remain for one
 cycle with a compile-time warning. `mcf_session_run()` provides the migration path from
 single-call to step-wise usage.
 
-Two compatibility helpers are deprecated today, and neither is on any session path â€”
+Two compatibility helpers are deprecated today, and neither is on any session path —
 `mcf_session_open()` repeats the same HAL checks:
 
-- **`mcf_hal_set_static_workspace()`** â€” the former global workspace entry point. It returns
+- **`mcf_hal_set_static_workspace()`** — the former global workspace entry point. It returns
   `MCF_E_UNSUPPORTED`; a heapless build sets `workspace` / `workspace_size` on each session's
-  `mcf_config_t` instead (Â§10.5).
-- **`mcf_hal_register()`** â€” compatibility-only and stores nothing; every session must set
+  `mcf_config_t` instead (§10.5).
+- **`mcf_hal_register()`** — compatibility-only and stores nothing; every session must set
   `cfg.hal`.
 
 Both carry `MCF_DEPRECATED`, so a migrating caller gets a compiler diagnostic rather than
-silence; define `MCF_NO_DEPRECATED` to suppress it. Each declaration passes a message â€” the
-replacement to use instead â€” which GCC, Clang, and MSVC print as part of the diagnostic, so the
+silence; define `MCF_NO_DEPRECATED` to suppress it. Each declaration passes a message — the
+replacement to use instead — which GCC, Clang, and MSVC print as part of the diagnostic, so the
 migration path is named at the call site rather than only in this document. The messages are
 checked, not trusted: `cmake/deprecation_probe.cmake` compiles
 `tests/deprecation_probe.c` with the configured toolchain at configure time and fails unless both
@@ -1513,21 +1513,21 @@ The library derives from two well-known upstream components:
 **Why MIT:**
 
 - **Compatible with the entire upstream lineage.** The permissive sources can be relicensed
-  under MIT; their notices are preserved (Â§20.3), which is the only obligation either imposes.
+  under MIT; their notices are preserved (§20.3), which is the only obligation either imposes.
 - **Maximally permissive for integrators.** No copyleft obligation, no network-copyleft
   trigger, no patent retaliation clause. For a library that is *statically linked* into
   shipped proprietary firmware, this is decisive: an open-source licence with any copyleft
   or network-copyleft character creates a direct, unavoidable obligation on the
   integrator's product.
 - **Zero runtime and review cost.** A ~1 KB licence text adds nothing to a firmware image and
-  imposes no compliance surface on small teams â€” which is the primary audience.
+  imposes no compliance surface on small teams — which is the primary audience.
 
 **Why not the alternatives:**
 
 | Alternative | Why rejected |
 |---|---|
 | **AGPL-3.0** | Its network-copyleft clause is the worst possible fit for firmware that is compiled into a shipped binary and whose source is not published. Obligations attach regardless of how the library is linked. It actively discourages the adoption this project needs. *(This is the licence of the reference implementation, and is a principal reason it has not been adopted more widely.)* |
-| **Apache-2.0** | Compatible, and its explicit patent grant has merit â€” but it imposes a NOTICE-file obligation and a "state changes" clause for a 3â€“9 KB code footprint where the marginal benefit is near zero. |
+| **Apache-2.0** | Compatible, and its explicit patent grant has merit — but it imposes a NOTICE-file obligation and a "state changes" clause for a 3–9 KB code footprint where the marginal benefit is near zero. |
 | **GPL-2.0/3.0** | Copyleft. Incompatible with proprietary firmware distribution, which is the target use case. |
 | **BSD-3-Clause** | Essentially equivalent to MIT. Rejected only because the non-endorsement clause adds text without adding value here. |
 
@@ -1553,11 +1553,11 @@ LZMA SDK
 
 Source files carry a single-line SPDX identifier (`SPDX-License-Identifier: MIT`) plus, where
 applicable, an `Upstream-License:` line. Attribution is a build-system check, not a
-convention â€” CI fails on a missing SPDX header.
+convention — CI fails on a missing SPDX header.
 
 ### 20.4 Security disclosure
 
-A coordinated-disclosure policy â€” report privately, 90-day window, credit in the advisory â€” is
+A coordinated-disclosure policy — report privately, 90-day window, credit in the advisory — is
 the intended practice. A published security contact is a precondition for a project that asks
 users to trust it with firmware authenticity, and a `SECURITY.md` is the deliverable that
 records it. **It is not yet committed to the repository**; until it is, the maintainer's
@@ -1572,14 +1572,14 @@ artefact and the highest-risk work is de-risked early.
 
 | Phase | Duration | Deliverable | Exit criteria |
 |---|---|---|---|
-| **P0 â€” Foundation** | 2 wks | Repository skeleton, CI, MIT headers, `mcf_hal_t`, error model, `mcf_ctx_size()`, documentation site | Builds clean under `-Werror` on the host and the ARM cross-compile; all SPDX headers present |
-| **P1 â€” Core engine** | 4 wks | Context object, LZ4 codec, BSDIFF43 engine, container parse, `session_run` | Round-trip passes; **all fault-injection tests green** |
-| **P2 â€” Robustness** | 3 wks | Workspace validation (`MCF_E_DICT_TOO_LARGE`), LZMA codec, step-wise API, progress/abort, block-size tuning | Workspace rejection verified at many dict sizes; Constrained profile â‰¤ 3.3 KB measured |
-| **P3 â€” Security** | 3 wks | v2 header, Ed25519 signatures, product binding, anti-rollback | Signature and rollback tests green; products that require signatures configure a verifier, which fails closed |
-| **P4 â€” Resilience** | 3 wks | Journal, `mcf_resume_probe` + `mcf_session_begin`, power-cycle HIL tests | Interrupted restore resumes correctly; corrupted journal is rejected |
-| **P5 â€” Release** | 2 wks | Host tool, docs, three worked ports (STM32 internal flash, STM32 + SPI NOR, Renesas RX) | Host tool produces byte-identical output on repeat runs; a new integrator succeeds unaided |
+| **P0 — Foundation** | 2 wks | Repository skeleton, CI, MIT headers, `mcf_hal_t`, error model, `mcf_ctx_size()`, documentation site | Builds clean under `-Werror` on the host and the ARM cross-compile; all SPDX headers present |
+| **P1 — Core engine** | 4 wks | Context object, LZ4 codec, BSDIFF43 engine, container parse, `session_run` | Round-trip passes; **all fault-injection tests green** |
+| **P2 — Robustness** | 3 wks | Workspace validation (`MCF_E_DICT_TOO_LARGE`), LZMA codec, step-wise API, progress/abort, block-size tuning | Workspace rejection verified at many dict sizes; Constrained profile ≤ 3.3 KB measured |
+| **P3 — Security** | 3 wks | v2 header, Ed25519 signatures, product binding, anti-rollback | Signature and rollback tests green; products that require signatures configure a verifier, which fails closed |
+| **P4 — Resilience** | 3 wks | Journal, `mcf_resume_probe` + `mcf_session_begin`, power-cycle HIL tests | Interrupted restore resumes correctly; corrupted journal is rejected |
+| **P5 — Release** | 2 wks | Host tool, docs, three worked ports (STM32 internal flash, STM32 + SPI NOR, Renesas RX) | Host tool produces byte-identical output on repeat runs; a new integrator succeeds unaided |
 
-**Total: ~17 weeks.** P0â€“P2 (9 weeks) delivers a strictly better library than the reference
+**Total: ~17 weeks.** P0–P2 (9 weeks) delivers a strictly better library than the reference
 implementation in every measured dimension. P3 is what makes it *shippable* in a security-
 sensitive product.
 
@@ -1592,8 +1592,8 @@ important process decision in this roadmap (**P10**).
 
 **P3 is not deferrable.** Shipping a delta updater without signature verification ships a
 remote code execution primitive under a reassuring name. The roadmap is ordered so that a
-team under schedule pressure can ship P0â€“P2 as an *internal* tool but cannot plausibly ship
-P0â€“P2 to the field.
+team under schedule pressure can ship P0–P2 as an *internal* tool but cannot plausibly ship
+P0–P2 to the field.
 
 ---
 
@@ -1603,12 +1603,12 @@ P0â€“P2 to the field.
 |---|---|---|---|---|
 | R-01 | LZ4's lower ratio disappoints on some firmware | Medium | Medium | Host tool emits whichever codec is smaller; both ship; ratio measured per product in P2 |
 | R-02 | Signature verification too slow on the lowest-end target | Low | Medium | Ed25519 default; measured in P3 HIL; `mcf_verify_fn` allows a HSM/accelerator |
-| R-03 | Resume journal adds complexity and new failure modes | Medium | Medium | Correctness does **not** depend on it (Â§15.4); P4 is a pure optimisation and can be cut without losing safety |
-| R-04 | Integrators used to the reference API find the change disruptive | High | Low | API kept deliberately close; deprecation cycle (Â§19.3); porting notes in P5 |
-| R-05 | Upstream attribution obligations missed | Low | High | SPDX headers enforced in CI (Â§20.3), not by convention |
-| R-06 | Format v2 adoption stalls because field devices only understand v1 | Medium | Medium | Header translator (Â§19.2); v1 patch payload unchanged |
-| R-07 | Scope growth from the resume/security features | High | Medium | Explicit non-goals (Â§4.2); each phase has stated exit criteria |
-| R-08 | Single-maintainer continuity (the failure mode of the reference project) | Medium | High | MIT licence, published format, published host tool, documented CI â€” all of which exist specifically to make the project maintainable by more than one person |
+| R-03 | Resume journal adds complexity and new failure modes | Medium | Medium | Correctness does **not** depend on it (§15.4); P4 is a pure optimisation and can be cut without losing safety |
+| R-04 | Integrators used to the reference API find the change disruptive | High | Low | API kept deliberately close; deprecation cycle (§19.3); porting notes in P5 |
+| R-05 | Upstream attribution obligations missed | Low | High | SPDX headers enforced in CI (§20.3), not by convention |
+| R-06 | Format v2 adoption stalls because field devices only understand v1 | Medium | Medium | Header translator (§19.2); v1 patch payload unchanged |
+| R-07 | Scope growth from the resume/security features | High | Medium | Explicit non-goals (§4.2); each phase has stated exit criteria |
+| R-08 | Single-maintainer continuity (the failure mode of the reference project) | Medium | High | MIT licence, published format, published host tool, documented CI — all of which exist specifically to make the project maintainable by more than one person |
 | R-09 | Performance regression from the more thorough bounds checking | Low | Low | Checking is per-block, not per-byte; measured in P2 |
 
 ---
@@ -1619,9 +1619,9 @@ P0â€“P2 to the field.
 |---|---|---|---|
 | Q-01 | Ed25519 or ECDSA-P256 as the default? Depends on whether target parts have crypto accelerators. | Hardware | P3 |
 | Q-02 | Should `fw_version` live in OTP/eFuse, a signed NVM record, or a bootloader-managed slot? Depends on the target's NVM capabilities. | Integrator | P3 |
-| Q-03 | Minimum supported `product_id` granularity â€” per model, per family, or per customer? | Business | P3 |
+| Q-03 | Minimum supported `product_id` granularity — per model, per family, or per customer? | Business | P3 |
 | Q-04 | Should the journal be a required HAL capability or optional? | Integrator | P4 |
-| Q-05 | Is A/B slot support worth building in, given the "out of scope" decision (Â§4.2 N2)? Most integrators need it. | Product | P5 |
+| Q-05 | Is A/B slot support worth building in, given the "out of scope" decision (§4.2 N2)? Most integrators need it. | Product | P5 |
 | Q-06 | Should the host tool be Python or Rust? Affects the static-binary distribution story. | Maintainer | P5 |
 | Q-07 | Target minimum: is the Constrained profile (868 B, Cortex-M0) genuinely in scope, or is the Standard profile (2,404 B) sufficient? Affects whether further optimisation is warranted. | Product | P2 |
 
@@ -1635,21 +1635,21 @@ P0â€“P2 to the field.
 |---|---|
 | **A/B slot** | Two firmware storage regions; the inactive one is written while the other runs, then selected at boot. |
 | **Delta patch** | A file encoding the difference between two binary images, from which the target image can be reconstructed. |
-| **BSDIFF43** | The bsdiff variant by Matthew Endsley; the delta format retained by this design (Â§13.3). |
-| **Codec** | A pluggable compression/decompression back end (Â§7.3). |
-| **Context (`mcf_session_t`)** | The caller-owned object holding all session state (Â§9.3). |
-| **HAL** | Hardware Abstraction Layer â€” the only platform-dependent surface (Â§12). |
-| **Workspace** | Memory a codec needs beyond the fixed work buffers; the key RAM-budget quantity (Â§10.3). |
-| **Staging region** | Non-executing storage the reconstructed image is written to before commit (Â§15.4). |
+| **BSDIFF43** | The bsdiff variant by Matthew Endsley; the delta format retained by this design (§13.3). |
+| **Codec** | A pluggable compression/decompression back end (§7.3). |
+| **Context (`mcf_session_t`)** | The caller-owned object holding all session state (§9.3). |
+| **HAL** | Hardware Abstraction Layer — the only platform-dependent surface (§12). |
+| **Workspace** | Memory a codec needs beyond the fixed work buffers; the key RAM-budget quantity (§10.3). |
+| **Staging region** | Non-executing storage the reconstructed image is written to before commit (§15.4). |
 
-### 24.2 Mapping: findings â†’ architectural controls
+### 24.2 Mapping: findings → architectural controls
 
-Traceability from every Â§3 finding to the design element that prevents it. This table is the
+Traceability from every §3 finding to the design element that prevents it. This table is the
 review artefact that makes the architecture auditable.
 
-| Finding | Control | Â§ |
+| Finding | Control | § |
 |---|---|---|
-| B-01 alloc failure â†’ fault | Workspace pre-validation; `MCF_E_DICT_TOO_LARGE`; alloc-failure tests | 10.4, 13.2, 18.2 |
+| B-01 alloc failure → fault | Workspace pre-validation; `MCF_E_DICT_TOO_LARGE`; alloc-failure tests | 10.4, 13.2, 18.2 |
 | B-02 flash failure hidden | Explicit `erase`/`write`; write verification; error propagation | 12.2, 12.3 |
 | B-03 false success | Error model; single-exit state machine; `DONE` implies CRC verified | 9.2, 8.3 |
 | B-04 ambiguous zero | Return-value convention; zero means zero bytes only | 9.2 |
@@ -1681,7 +1681,7 @@ review artefact that makes the architecture auditable.
 | W-04 oversized default codec | Pluggable codec; LZ4 default | 7.3, 10.3 |
 | W-05 byte-at-a-time loop | Block-granular codec interface | 7.3 |
 | W-06 64-bit arithmetic | 32-bit-clean engine; fields bounded by construction | 7.2 |
-| W-07 platform dependencies | No stdio in public headers; encoder excluded from device build | 16.1 B3â€“B5 |
+| W-07 platform dependencies | No stdio in public headers; encoder excluded from device build | 16.1 B3–B5 |
 | W-08 namespace pollution | `mcf_` prefix on all exported symbols | 16.1 B6 |
 | W-09 non-portable build | Toolchain files; explicit sources; 5-toolchain CI | 16 |
 | W-10 unstructured header | Byte-table format; dual-language layout assertion | 13.2, 17.3 H5 |
@@ -1690,11 +1690,11 @@ review artefact that makes the architecture auditable.
 ### 24.3 Document conventions
 
 - **MUST / SHOULD / MAY** carry their usual normative force.
-- Section references (Â§) are to this document.
+- Section references (§) are to this document.
 - Code excerpts are illustrative C99 and are not compilable without the surrounding headers;
   the authoritative interfaces are those in the corresponding headers, which are
   `static_assert`-ed against this document's byte tables.
 
 ---
 
-*End of document. Microfoam â€” tiny bubbles, tiny footprint, full-strength upgrade.*
+*End of document. Microfoam — tiny bubbles, tiny footprint, full-strength upgrade.*
