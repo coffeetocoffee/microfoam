@@ -17,7 +17,7 @@ and the device rebuilds the image in **868 bytes of RAM** — no heap, no RTOS, 
 
 | RAM | ROM (Cortex-M0) | Patch size | Build | Formats | Version |
 |---|---|---|---|---|---|
-| **868 B**, no heap | **12,358 B** | **1–15%** of the image | C99 · MIT · 3 libc headers | MFP1 · MFP2 | `1.11.0` |
+| **868 B**, no heap | **12,826 B** | **1–15%** of the image | C99 · MIT · 3 libc headers | MFP1 · MFP2 | `1.11.0` |
 
 > [!NOTE]
 > **Sweet spot:** small embedded devices and slow links — BLE, LoRa, infrared, a 9600-baud
@@ -229,10 +229,10 @@ set with zero warnings.
 
 | Target | Code (`.text`) | Static RAM |
 |---|---|---|
-| Cortex-M0 | **12,358 B** | 0 B |
-| Cortex-M3 | 11,420 B | 0 B |
-| Cortex-M4 | 11,426 B | 0 B |
-| Cortex-M7 | 11,422 B | 0 B |
+| Cortex-M0 | **12,826 B** | 0 B |
+| Cortex-M3 | 11,756 B | 0 B |
+| Cortex-M4 | 11,758 B | 0 B |
+| Cortex-M7 | 11,754 B | 0 B |
 
 RAM, on Cortex-M0: **340 B** session + **528 B** workspace at a 256 B block = **868 B total**,
 no heap — the figures `mcf_ctx_size()` returns, asserted by the self-test against the
