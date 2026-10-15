@@ -111,16 +111,28 @@ def find_binary(build: str, name: str) -> str | None:
     nothing and every suite would be reported as "not built" - a guard that
     skips on Windows is exactly the vacuous-green failure this script exists to
     prevent. Both layouts are searched.
+
+    Where a multi-config tree holds more than one configuration, the most
+    recently written candidate wins rather than the first one found. Searching
+    in a fixed order (Release before Debug, say) silently validates whichever
+    configuration was built longest ago, which is how a stale binary can pass a
+    count that the tree you just built would fail. Choosing by mtime makes the
+    answer "the binary this build tree most recently produced", which is the
+    question the caller is actually asking. Ties are broken by the search order,
+    so a single-config tree is unaffected.
     """
     names = (name, name + ".exe")
     roots = [build] + [os.path.join(build, cfg) for cfg in
                        ("Release", "Debug", "RelWithDebInfo", "MinSizeRel")]
-    for root in roots:
+    candidates = []
+    for rank, root in enumerate(roots):
         for n in names:
             path = os.path.join(root, n)
             if os.path.isfile(path):
-                return path
-    return None
+                candidates.append((os.path.getmtime(path), -rank, path))
+    if not candidates:
+        return None
+    return max(candidates)[2]
 
 
 def run(cmd: list[str]) -> str:
