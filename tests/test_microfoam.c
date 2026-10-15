@@ -79,7 +79,11 @@ static void banner(const char *s)
 
 /* A separate NVM region for the resume journal, as a real part would have. */
 #define JOURNAL_BASE 0x0F000000u
-#define JOURNAL_SIZE 64u
+/* One whole erase block. A 20-byte record now erases a full block, because the
+ * flash contract promises every erase is block-aligned and a whole number of
+ * blocks. The journal region used to be exempt from that rule, which meant the
+ * library's own contract was never tested. It is now held to it. */
+#define JOURNAL_SIZE FLASH_BLOCK
 
 static uint8_t g_flash[FLASH_SIZE];
 static uint8_t g_journal[JOURNAL_SIZE];
@@ -107,18 +111,17 @@ static int32_t h_erase(void *ctx, uint32_t addr, uint32_t len)
         return MCF_E_FLASH;
     }
     g_flash_mutations++;
-    /* The journal region models a separate small NVM device with its own
-     * geometry, so it is not subject to the code flash's alignment contract. */
-    if (addr >= JOURNAL_BASE) {
-        if (g_fail_journal) return MCF_E_FLASH;
-        memset(g_journal, 0xFF, sizeof(g_journal));
-        return 0;
-    }
     /* The library promises erase length is a whole number of blocks and the
-     * address is block aligned. Verify the promise rather than assume it. */
+     * address is block aligned. Verify the promise rather than assume it, for
+     * every region including the journal. */
     if ((addr % FLASH_BLOCK) != 0u || (len % FLASH_BLOCK) != 0u || len == 0u) {
         g_contract_violation = 1;
         return MCF_E_FLASH;
+    }
+    if (addr >= JOURNAL_BASE) {
+        if (g_fail_journal) return MCF_E_FLASH;
+        memset(g_journal, 0xFF, JOURNAL_SIZE);
+        return 0;
     }
     off = addr - FLASH_BASE;
     if (off + len > FLASH_SIZE) {
@@ -136,6 +139,12 @@ static int32_t h_write(void *ctx, uint32_t addr, const uint8_t *p, uint32_t len)
         return MCF_E_FLASH;
     }
     g_flash_mutations++;
+    /* The library promises a write never crosses an erase-block boundary.
+     * Checked for every region, journal included. */
+    if (((addr % FLASH_BLOCK) + len) > FLASH_BLOCK) {
+        g_contract_violation = 1;
+        return MCF_E_FLASH;
+    }
     if (addr >= JOURNAL_BASE) {
         if (g_fail_journal) return MCF_E_FLASH;
         if (len > JOURNAL_SIZE) {
@@ -146,11 +155,6 @@ static int32_t h_write(void *ctx, uint32_t addr, const uint8_t *p, uint32_t len)
     }
     off = addr - FLASH_BASE;
     if (off + len > FLASH_SIZE) {
-        return MCF_E_FLASH;
-    }
-    /* The library promises a write never crosses an erase-block boundary. */
-    if (((addr - FLASH_BASE) % FLASH_BLOCK) + len > FLASH_BLOCK) {
-        g_contract_violation = 1;
         return MCF_E_FLASH;
     }
     if (g_corrupt_write) {
@@ -1152,6 +1156,100 @@ static void test_resume_disabled(void)
     mcf_session_close(s);
 }
 
+/* The header promises journal_addr is validated at open/begin. These are the
+ * negative cases that promise, added next to the happy-path resume tests so a
+ * future carve-out in either the library or the test HAL cannot hide them. */
+static void test_resume_rejects_bad_journal_config(void)
+{
+    uint32_t patch_len;
+    static mcf_session_storage_t s_storage;
+    mcf_session_t *s = (mcf_session_t *)(void *)&s_storage;
+    mcf_config_t cfg;
+
+    banner("resume: a bad journal address is rejected");
+    device_reset();
+    patch_len = build_patch(g_patch, g_old, OLD_LEN, g_new, NEW_LEN, PRODUCT, VER_NEW,
+                            VER_OLD, WS_LZ4, 0u, 9u);
+
+    /* Not on an erase-block boundary. Rejected at open(), before any flash. */
+    cfg = journal_cfg(patch_len, 1u);
+    cfg.journal_addr = JOURNAL_BASE + 1u;
+    CHECK_EQ(mcf_session_open(s, &cfg), MCF_E_PARAM, "misaligned journal address is rejected");
+
+    /* Inside the destination image. A checkpoint would erase image bytes the
+     * session has already written and verified. Alignment passes, so this is
+     * the overlap check's job, and it needs the parsed new_size, so it runs in
+     * begin(). */
+    cfg = journal_cfg(patch_len, 1u);
+    cfg.journal_addr = cfg.dst_addr;
+    CHECK_EQ(mcf_session_open(s, &cfg), MCF_OK, "aligned journal inside dst passes open");
+    CHECK_EQ(mcf_session_begin(s), MCF_E_PARAM, "journal overlapping dst is rejected");
+
+    /* Just past the end of the destination is legal: adjacent is not overlap.
+     * The erase footprint is a whole block, so this has to clear the rounded
+     * region, not the destination's last byte. */
+    cfg = journal_cfg(patch_len, 1u);
+    cfg.journal_addr = (cfg.dst_addr + NEW_LEN + FLASH_BLOCK - 1u) & ~(FLASH_BLOCK - 1u);
+    CHECK_EQ(mcf_session_open(s, &cfg), MCF_OK, "journal after dst passes open");
+    CHECK(mcf_session_begin(s) != MCF_E_PARAM, "journal past dst is not an overlap");
+    mcf_session_close(s);
+
+    /* Overlapping only after rounding up to the erase block: the record fits
+     * before dst ends, but the block it is erased into does not. */
+    cfg = journal_cfg(patch_len, 1u);
+    cfg.journal_addr = (cfg.dst_addr + NEW_LEN) & ~(FLASH_BLOCK - 1u);
+    if (cfg.journal_addr + 1u < cfg.dst_addr + NEW_LEN) {
+        CHECK_EQ(mcf_session_open(s, &cfg), MCF_OK, "block-straddling journal passes open");
+        CHECK_EQ(mcf_session_begin(s), MCF_E_PARAM,
+                 "a journal whose erase block reaches into dst is rejected");
+        mcf_session_close(s);
+    }
+
+    /* None of the rejected configurations may have touched flash. */
+    CHECK_EQ(g_contract_violation, 0, "no configuration path broke the flash contract");
+}
+
+/* close() is documented safe from any state, including a session that was
+ * never opened. Storage that is zeroed is trivially safe; storage holding
+ * indeterminate bytes is not, and dereferencing it is an access violation. */
+static void test_close_on_never_opened_storage(void)
+{
+    static mcf_session_storage_t s_storage;
+    mcf_session_t *s = (mcf_session_t *)(void *)&s_storage;
+    uint32_t i;
+    uint8_t *p = (uint8_t *)&s_storage;
+
+    banner("close: safe on never-opened storage, including poisoned");
+    device_reset();
+
+    /* Zeroed: the documented case, and what MCF_SESSION_DECLARE gives you. */
+    memset(&s_storage, 0, sizeof(s_storage));
+    mcf_session_close(s);
+    CHECK_EQ(mcf_session_state(s), MCF_ST_IDLE, "close on zeroed storage is inert");
+
+    /* Indeterminate: every byte a pointer might land on is non-zero, so an
+     * unguarded close() dereferences garbage. Must still be inert: it must
+     * return without writing, so the observable state is unchanged. */
+    for (i = 0; i < sizeof(s_storage); i++) {
+        p[i] = (uint8_t)(0xA5u ^ (i & 0xFFu));
+    }
+    {
+        uint32_t before = (uint32_t)mcf_session_state(s);
+        mcf_session_close(s);
+        CHECK_EQ((uint32_t)mcf_session_state(s), before,
+                 "close on poisoned storage does not write");
+    }
+
+    /* begin() and run() on the same storage must refuse, not fault. */
+    memset(&s_storage, 0, sizeof(s_storage));
+    for (i = 0; i < sizeof(s_storage); i++) {
+        p[i] = (uint8_t)(0x5Au ^ (i & 0xFFu));
+    }
+    CHECK_EQ(mcf_session_begin(s), MCF_E_PARAM, "begin on poisoned storage is a parameter error");
+    CHECK_EQ(mcf_session_run(s), MCF_E_PARAM, "run on poisoned storage is a parameter error");
+    mcf_session_close(s);
+}
+
 /* BSDIFF43 applies a triple's seek *after* its diff and extra bytes, so the
  * seek positions the base cursor for the next triple, not its own. This is the
  * case that distinguishes the two orderings: a triple with both a diff and a
@@ -1288,6 +1386,8 @@ int main(void)
     test_resume_cleared_when_done();
     test_resume_rejects_bad_records();
     test_resume_disabled();
+    test_resume_rejects_bad_journal_config();
+    test_close_on_never_opened_storage();
 
     /* Last: it rewrites the shared old/new fixtures with a delta of its own. */
     test_seek_positions_next_triple();

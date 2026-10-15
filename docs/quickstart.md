@@ -44,7 +44,9 @@ that programs correctly and returns a byte count is a **failure**, not a success
 #define ERASE_BLOCK    2048u         /* the part's page/sector size       */
 
 /* Erase `len` bytes at `addr`. The library always passes an address aligned
- * to, and a length that is a whole multiple of, flash_block_size(). */
+ * to, and a length that is a whole multiple of, flash_block_size(). This holds
+ * for the resume journal region too, so a HAL written from this table alone is
+ * correct: a 20-byte journal record is erased as one whole block. */
 static int32_t my_erase(void *ctx, uint32_t addr, uint32_t len)
 {
     (void)ctx;

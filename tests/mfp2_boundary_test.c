@@ -367,18 +367,27 @@ static int expect_case(const char *name, const uint8_t *patch, uint32_t patch_le
  * ---------------------------------------------------------------------- */
 
 #define JOURNAL_BASE 0x08100000u
-#define JOURNAL_SIZE 256u
+/* One whole erase block: a record now erases a full block rather than its own
+ * length, so the journal region holds the same contract as the main flash. */
+#define JOURNAL_SIZE BLOCK_SIZE
 
 static uint8_t journal[JOURNAL_SIZE];
 static unsigned journal_mutations;
+static int journal_contract_violation;
 
 /* Wrappers around the main flash HAL that divert the journal region. The
  * destination and journal are disjoint address ranges, so the split is by
- * address and the shared `flash` array is untouched by journal traffic. */
+ * address and the shared `flash` array is untouched by journal traffic. The
+ * documented flash contract is enforced for the journal exactly as it is for
+ * the main flash, so a violation cannot hide behind the divert. */
 static int32_t j_erase(void *ctx, uint32_t addr, uint32_t len)
 {
     (void)ctx;
     if (addr >= JOURNAL_BASE && addr < JOURNAL_BASE + JOURNAL_SIZE) {
+        if ((addr % BLOCK_SIZE) != 0u || (len % BLOCK_SIZE) != 0u || len == 0u) {
+            journal_contract_violation = 1;
+            return MCF_E_FLASH;
+        }
         if (len > JOURNAL_SIZE) return MCF_E_FLASH;
         memset(journal, 0xFF, JOURNAL_SIZE);
         journal_mutations++;
@@ -390,6 +399,10 @@ static int32_t j_write(void *ctx, uint32_t addr, const uint8_t *p, uint32_t len)
 {
     (void)ctx;
     if (addr >= JOURNAL_BASE && addr < JOURNAL_BASE + JOURNAL_SIZE) {
+        if (((addr % BLOCK_SIZE) + len) > BLOCK_SIZE) {
+            journal_contract_violation = 1;
+            return MCF_E_FLASH;
+        }
         if (len > JOURNAL_SIZE) return MCF_E_FLASH;
         memcpy(journal, p, len);
         journal_mutations++;
