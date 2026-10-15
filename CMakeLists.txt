@@ -512,12 +512,22 @@ if(MCF_BUILD_TESTS)
         # patch cannot apply. Nothing checked the pair, and it drifted. This
         # builds the documented patch and applies it at the documented settings,
         # then confirms the check can fail, so the example stays runnable.
-        add_test(NAME quickstart_config
-                 COMMAND ${Python3_EXECUTABLE}
-                         ${CMAKE_CURRENT_SOURCE_DIR}/host/check_quickstart.py
-                         --cross-test $<TARGET_FILE:cross_test>
-                         --cc ${CMAKE_C_COMPILER}
-                         --lib $<TARGET_FILE:microfoam>)
+        # The device snippet is compiled, linked against this tree's library and
+        # run, so the sanitizer setting has to be passed through: an ASan-built
+        # library carries sanitizer runtime references and the snippet needs the
+        # same runtime on its own command line to link against it. Only passed
+        # when non-empty, because CMake drops an empty argument and argparse
+        # then sees a flag with no value.
+        set(MCF_QUICKSTART_TEST_CMD
+            ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/host/check_quickstart.py
+            --cross-test $<TARGET_FILE:cross_test>
+            --cc ${CMAKE_C_COMPILER}
+            --lib $<TARGET_FILE:microfoam>)
+        if(MCF_SANITIZE)
+            list(APPEND MCF_QUICKSTART_TEST_CMD --sanitize "address,undefined")
+        endif()
+        add_test(NAME quickstart_config COMMAND ${MCF_QUICKSTART_TEST_CMD})
 
         # The same cross test with a raw (uncompressed) patch: proves the
         # identity codec round-trips through the C session.

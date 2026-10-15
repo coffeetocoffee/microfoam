@@ -164,7 +164,8 @@ int main(void)
 """
 
 
-def check_snippet_compiles(device: str, cc: str, lib: str) -> int:
+def check_snippet_compiles(device: str, cc: str, lib: str,
+                          sanitize: str = "") -> int:
     """Compile the README device snippet verbatim, link it, and run it.
 
     The snippet is the first code a new integrator copies, and nothing compiled
@@ -198,9 +199,15 @@ def check_snippet_compiles(device: str, cc: str, lib: str) -> int:
                    "/I", os.path.join(REPO, "include"),
                    src, lib, "/Fe:" + exe]
         else:
+            # A library built with MCF_SANITIZE carries sanitizer runtime
+            # references, so the snippet linking it needs the same runtime on the
+            # command line. Without this the link fails with no diagnostic,
+            # because clang reports a missing runtime as an empty error.
             cmd = [cc, "-std=c99", "-Wall", "-Wextra", "-Werror",
-                   "-I", os.path.join(REPO, "include"),
-                   src, lib, "-o", exe]
+                   "-I", os.path.join(REPO, "include")]
+            if sanitize:
+                cmd.append(f"-fsanitize={sanitize}")
+            cmd += [src, lib, "-o", exe]
         rc, out = run(cmd)
         if rc != 0:
             # Report as unchecked, not as a failure, when the compiler cannot be
@@ -251,6 +258,10 @@ def main() -> int:
     ap.add_argument("--lib", default=None,
                     help="path to the built microfoam library, linked into the "
                          "device snippet so it can be run, not only compiled")
+    ap.add_argument("--sanitize", default="",
+                    help="sanitizer set the library was built with, e.g. "
+                         "'address,undefined'; the snippet needs the same "
+                         "runtime to link against it")
     args = ap.parse_args()
 
     if not os.path.isfile(args.cross_test):
@@ -297,7 +308,8 @@ def main() -> int:
               "CI passes one, a local run may not")
     else:
         cc = args.cc or os.environ.get("CC") or "cc"
-        failures += check_snippet_compiles(cfg["device"], cc, args.lib)
+        failures += check_snippet_compiles(cfg["device"], cc, args.lib,
+                                           args.sanitize)
 
     # 3. Build the documented patch and apply it at the documented settings.
     with tempfile.TemporaryDirectory() as tmp:
