@@ -462,9 +462,12 @@ typedef struct mcf_config {
     /* Resume support. Both zero disables it, which is the default.
      *
      * journal_addr must be block-aligned and must not overlap the destination
-     * region. Both are checked and reported as MCF_E_PARAM: the alignment by
-     * open(), which can see the erase block size, and the overlap by begin(),
-     * which can see the destination size parsed from the patch header.
+     * region. Both are checked by begin() and reported as MCF_E_PARAM: the
+     * alignment against the erase block size, the overlap against the
+     * destination size parsed from the patch header. The overlap is measured
+     * against the rounded erase footprint, not the record, so a journal whose
+     * record fits outside the image but whose block reaches into it is
+     * rejected.
      *
      * The record itself is sizeof(mcf_journal_t) bytes (20 in v1), but every
      * erase is a whole number of blocks, so the region must have at least one

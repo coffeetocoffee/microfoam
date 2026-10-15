@@ -11,7 +11,7 @@ test.
 Which suites that actually covers depends on the tree, and the script says so rather than
 implying otherwise. The default configuration builds five of the nine: the four behind
 `MCF_ENABLE_SODIUM`, `MCF_ENABLE_ED25519` and `MCF_ENABLE_LZMA` are opt-in, and between them they
-hold 721 of the 1,105 documented checks. Those suites are reported as **not built** or **skipped**
+hold 721 of the 1,106 documented checks. Those suites are reported as **not built** or **skipped**
 and named in the summary, not folded into a pass. The `sodium` CI job is the one tree that builds
 all nine at once, and it runs the script with `--require-all`, which turns a missing or skipped
 suite into a failure — so the counts are verified in one place in full, rather than the union of
@@ -27,7 +27,7 @@ CI rather than only by whoever happens to build it locally.
 
 | Suite | Checks | What it proves |
 |---|---|---|
-| `microfoam_tests` | 147 checks | round trip, the `mcf_ctx_size()` cost query, resume, the BSDIFF43 seek ordering, small-image framing, fault injection, idempotent `finish()`/single commit, use-after-close refusal, the magic-constant spellings, the resume journal's rejection of a misaligned or destination-overlapping `journal_addr`, and `close()`/`begin()`/`run()` against never-opened storage holding indeterminate bytes |
+| `microfoam_tests` | 148 checks | round trip, the `mcf_ctx_size()` cost query, resume, the BSDIFF43 seek ordering, small-image framing, fault injection, idempotent `finish()`/single commit, use-after-close refusal, the magic-constant spellings, the resume journal's rejection of a misaligned or destination-overlapping `journal_addr`, and `close()`/`begin()`/`run()` against never-opened storage holding indeterminate bytes |
 | `custom_codec_test` | 46 checks | caller-owned codec descriptors, per-session table isolation, failure propagation at init, decode and finish |
 | `hal_concurrency_test` | 27 checks | two sessions driven interleaved through a whole decode |
 | `v2_format_test` | 45 checks | MFP2 header/TLV/record-framing rules, plus a deterministic mutation/property loop |

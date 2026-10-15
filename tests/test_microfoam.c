@@ -1156,9 +1156,11 @@ static void test_resume_disabled(void)
     mcf_session_close(s);
 }
 
-/* The header promises journal_addr is validated at open/begin. These are the
+/* The header promises journal_addr is validated at begin. These are the
  * negative cases that promise, added next to the happy-path resume tests so a
- * future carve-out in either the library or the test HAL cannot hide them. */
+ * future carve-out in either the library or the test HAL cannot hide them.
+ * Both checks live in begin(), which is where the block size and the parsed
+ * new_size are first both available. */
 static void test_resume_rejects_bad_journal_config(void)
 {
     uint32_t patch_len;
@@ -1171,19 +1173,20 @@ static void test_resume_rejects_bad_journal_config(void)
     patch_len = build_patch(g_patch, g_old, OLD_LEN, g_new, NEW_LEN, PRODUCT, VER_NEW,
                             VER_OLD, WS_LZ4, 0u, 9u);
 
-    /* Not on an erase-block boundary. Rejected at open(), before any flash. */
+    /* Not on an erase-block boundary. Rejected before any flash is touched. */
     cfg = journal_cfg(patch_len, 1u);
     cfg.journal_addr = JOURNAL_BASE + 1u;
-    CHECK_EQ(mcf_session_open(s, &cfg), MCF_E_PARAM, "misaligned journal address is rejected");
+    CHECK_EQ(mcf_session_open(s, &cfg), MCF_OK, "misaligned journal address passes open");
+    CHECK_EQ(mcf_session_begin(s), MCF_E_PARAM, "misaligned journal address is rejected");
+    mcf_session_close(s);
 
     /* Inside the destination image. A checkpoint would erase image bytes the
-     * session has already written and verified. Alignment passes, so this is
-     * the overlap check's job, and it needs the parsed new_size, so it runs in
-     * begin(). */
+     * session has already written and verified. */
     cfg = journal_cfg(patch_len, 1u);
     cfg.journal_addr = cfg.dst_addr;
     CHECK_EQ(mcf_session_open(s, &cfg), MCF_OK, "aligned journal inside dst passes open");
     CHECK_EQ(mcf_session_begin(s), MCF_E_PARAM, "journal overlapping dst is rejected");
+    mcf_session_close(s);
 
     /* Just past the end of the destination is legal: adjacent is not overlap.
      * The erase footprint is a whole block, so this has to clear the rounded
