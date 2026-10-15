@@ -17,7 +17,7 @@ and the device rebuilds the image in **868 bytes of RAM** — no heap, no RTOS, 
 
 | RAM | ROM (Cortex-M0) | Patch size | Build | Formats | Version |
 |---|---|---|---|---|---|
-| **868 B**, no heap | **12,358 B** | **1–15%** of the image | C99 · MIT · 3 libc headers | MFP1 · MFP2 | `1.10.0` |
+| **868 B**, no heap | **12,358 B** | **1–15%** of the image | C99 · MIT · 3 libc headers | MFP1 · MFP2 | `1.11.0` |
 
 > [!NOTE]
 > **Sweet spot:** small embedded devices and slow links — BLE, LoRa, infrared, a 9600-baud
