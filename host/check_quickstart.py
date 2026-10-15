@@ -186,9 +186,14 @@ def check_snippet_compiles(device: str, cc: str, lib: str) -> int:
         exe = os.path.join(tmp, "snippet.exe" if os.name == "nt" else "snippet")
         # MSVC and gcc/clang disagree on nearly every flag, and the tree may be
         # built by either (CMAKE_C_COMPILER is passed in), so the flags are
-        # chosen by compiler family rather than assumed. /W4 /WX is the MSVC
-        # equivalent of -Wall -Wextra -Werror.
-        if "cl" in os.path.basename(cc).lower():
+        # chosen by compiler family rather than assumed. Matching on "cl" would
+        # catch "clang" too, which is how the clang CI job came to hand clang a
+        # set of /W4 flags. /W4 /WX is the MSVC equivalent of
+        # -Wall -Wextra -Werror.
+        base = os.path.basename(cc).replace("\\", "/").rsplit("/", 1)[-1].lower()
+        base = base[:-4] if base.endswith(".exe") else base
+        is_msvc = base in ("cl", "cl2", "_cl", "cl386")
+        if is_msvc:
             cmd = [cc, "/nologo", "/W4", "/WX", "/std:c11",
                    "/I", os.path.join(REPO, "include"),
                    src, lib, "/Fe:" + exe]
