@@ -888,13 +888,15 @@ static void test_ctx_size(void)
     cfg.ram_budget = 64u;
     CHECK_EQ(mcf_ctx_size(&cfg), base, "budget does not cap the reported cost");
 
-    /* A larger block size costs more: the two block buffers scale with it. */
+    /* The window is the caller's block size capped at the patch's framing, which
+     * the fixture declares as block_log2 = 9 (512 bytes). A larger block size
+     * therefore costs no more: it is capped at the framing, not at the image. */
     cfg = make_cfg(len);
     cfg.block_size = 1024u;
-    CHECK(mcf_ctx_size(&cfg) > base, "a larger block size reports a larger cost");
+    CHECK_EQ(mcf_ctx_size(&cfg), base,
+             "a block size above the patch framing is capped at the framing");
 
-    /* A smaller block size costs less, down to the point where the patch's
-     * new_size clamps it. */
+    /* A smaller block size costs less. */
     cfg = make_cfg(len);
     cfg.block_size = 256u;
     CHECK(mcf_ctx_size(&cfg) < base, "a smaller block size reports a smaller cost");
@@ -914,10 +916,15 @@ static void test_ctx_size(void)
     cfg.patch_size = 4u;
     CHECK_EQ(mcf_ctx_size(&cfg), 0u, "truncated patch is unsizable");
 
+    /* A block size that is not a power of two is still a configuration error.
+     * The fix for the framing divergence was to cap the window at the patch's
+     * framing rather than at the image, which leaves this requirement intact:
+     * both the caller's value and the framing are powers of two, so the cap is
+     * too. What must NOT happen is a legitimate power-of-two request being
+     * refused because new_size is not one. */
     cfg = make_cfg(len);
     cfg.block_size = 500u; /* not a power of two */
     CHECK_EQ(mcf_ctx_size(&cfg), 0u, "non-power-of-two block size is unsizable");
-
     /* A patch the session would refuse on codec grounds is unsizable, not
      * silently sized for a codec that will never run. The patch declares LZ4;
      * a configuration demanding LZMA is rejected during header validation. */

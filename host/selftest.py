@@ -540,14 +540,35 @@ def test_small_image_framing() -> None:
     h = M.parse_header(patch)
     check(h.block_log2 == 9, "MFP1 lowers framing exponent for a 512-byte image")
     payload = patch[h.hdr_len:h.hdr_len + h.payload_size]
-    # Model the device: its window is the configured block size clamped to the
-    # image, so decode at min(1024, new_size) rather than an unbounded buffer.
+    # Model the device: its window is the configured block size capped at the
+    # framing the header declares, not clamped to the image. A window wider than
+    # the image is harmless, and clamping to the image is what produced a
+    # non-power-of-two window that no block_size could match.
     try:
-        delta = M.lz4_decompress(payload[M.LZ4_PROPS_LEN:], min(1 << 10, len(new)))
+        delta = M.lz4_decompress(payload[M.LZ4_PROPS_LEN:], min(1 << 10, 1 << h.block_log2))
         check(M.bspatch(old, delta, h.new_size) == new,
               "MFP1 small-image framing reconstructs byte-exact")
     except ValueError as exc:
         check(False, f"MFP1 small-image framing reconstructs byte-exact: {exc}")
+
+    # The case the fixtures above cannot see, because both are powers of two:
+    # an image whose size is not one. The producer must declare a power-of-two
+    # framing, and the device must apply the patch at the documented default
+    # block_size of 1024. Before the fix the declared framing was the image size
+    # (1000, not a power of two), and every block_size failed on the device.
+    odd = bytes((i * 3 + 7) & 0xFF for i in range(1000))
+    opatch = M.Patch(old, odd, product_id=0x1234, fw_version=2, old_version=1,
+                     block_log2=10, codec=M.CODEC_LZ4).build()
+    oh = M.parse_header(opatch)
+    check(oh.block_log2 == 9, "MFP1 declares a power-of-two framing for a 1000-byte image")
+    check((1 << oh.block_log2) <= 1000, "the declared framing does not exceed the image")
+    opayload = opatch[oh.hdr_len:oh.hdr_len + oh.payload_size]
+    try:
+        odelta = M.lz4_decompress(opayload[M.LZ4_PROPS_LEN:], min(1 << 10, 1 << oh.block_log2))
+        check(M.bspatch(old, odelta, oh.new_size) == odd,
+              "MFP1 non-power-of-two image applies at the documented default window")
+    except ValueError as exc:
+        check(False, f"MFP1 non-power-of-two image applies at the documented default window: {exc}")
 
     # The window has to apply to a literal run, not only to a match: a block can
     # be all literals and still overflow. The device rejects both (mcf_lz4_block
@@ -573,14 +594,32 @@ def test_small_image_framing() -> None:
     v2 = M.V2Patch(old[:128], tiny, product_id=0x1234, fw_version=2,
                    old_version=1, private_key=seed, key=key,
                    key_id=bytes(range(16)), record_log2=rlog2).build()
-    # The device's inner window is the record size clamped to the image.
-    window = min(1 << rlog2, len(tiny))
+    # The device's inner window is the caller's block size capped at the record
+    # framing the header declares. The cap is the framing, not the image: the
+    # inner session is handed 1 << record_log2 and no longer clamps it to
+    # new_size, so a small image with a larger record size still applies.
+    window = 1 << rlog2
     try:
         got = M.verify_v2(v2, pub, key=key, old=old[:128], window=window)
         check(got == tiny,
               "MFP2 small-image framing applies at the device window")
     except (SystemExit, ValueError) as exc:
         check(False, f"MFP2 small-image framing applies at the device window: {exc}")
+
+    # MFP2 with a non-power-of-two image at the default record size. The default
+    # record_log2 is 13, so any image between 8192 and 16383 bytes was affected
+    # out of the box: the inner session clamped 1 << 13 to new_size and rejected
+    # the result for not being a power of two.
+    odd_new = bytes((i * 11 + 5) & 0xFF for i in range(1000))
+    v2odd = M.V2Patch(old[:128], odd_new, product_id=0x1234, fw_version=2,
+                      old_version=1, private_key=seed, key=key,
+                      key_id=bytes(range(16)), record_log2=13).build()
+    try:
+        got = M.verify_v2(v2odd, pub, key=key, old=old[:128], window=1 << 13)
+        check(got == odd_new,
+              "MFP2 non-power-of-two image applies at the default record size")
+    except (SystemExit, ValueError) as exc:
+        check(False, f"MFP2 non-power-of-two image applies at the default record size: {exc}")
 
     # The default window must be the device's, not an unbounded buffer. The CLI
     # (`microfoam apply`) and the fixture tools call verify_v2 without a window,

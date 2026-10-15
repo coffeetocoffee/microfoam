@@ -70,10 +70,10 @@ if(NOT rc EQUAL 0)
     message(FATAL_ERROR "MFP2 variant fixture generation failed:\n${out}\n${err}")
 endif()
 # A second fixture over a small image (512-byte base, 128-byte target). The
-# device's decode window is min(record_size, new_size), clamped to the image, so
-# the producer must cap its framing at the image; a patch framed at the full
-# record size is rejected at site 17 on the device. The C test's small-image
-# case consumes this, and deleting the producer's cap regenerates the fixture
+# device's decode window is the caller's block size capped at the record framing
+# the header declares - not clamped to the image - so the producer's declared
+# framing is what the device sizes against. The C test's small-image case
+# consumes this, and deleting the producer's cap regenerates the fixture
 # uncapped so that case fails - the check is falsifiable, not merely green.
 execute_process(
     COMMAND "${PY}" -c "from pathlib import Path; d=Path(r'${WORK}'); d.joinpath('small_old.bin').write_bytes(bytes((i*7+3)&0xFF for i in range(512))); d.joinpath('small_new.bin').write_bytes(bytes((i*5+11)&0xFF for i in range(128)))"
@@ -93,6 +93,32 @@ execute_process(
     RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "small-image MFP2 fixture generation failed:\n${out}\n${err}")
+endif()
+# A third fixture: a 1000-byte target, which is not a power of two, at the
+# default record size. The inner session used to be handed 1 << record_log2 and
+# then clamp it to new_size, so it computed a 1000-byte window and rejected it
+# for not being a power of two: every MFP2 patch whose new_size is not a power
+# of two was unappliable, and at the default record_log2 of 13 that covers every
+# image from 8192 to 16383 bytes. The 512/128 fixture above cannot see it,
+# because both of its sizes are powers of two.
+execute_process(
+    COMMAND "${PY}" -c "from pathlib import Path; d=Path(r'${WORK}'); d.joinpath('odd_old.bin').write_bytes(bytes((i*7+3)&0xFF for i in range(512))); d.joinpath('odd_new.bin').write_bytes(bytes((i*3+7)&0xFF for i in range(1000)))"
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+if(NOT rc EQUAL 0)
+    message(FATAL_ERROR "non-power-of-two fixture generation failed:\n${out}\n${err}")
+endif()
+execute_process(
+    COMMAND "${PY}" "${TOOL}" make --v2
+            --old "${WORK}/odd_old.bin" --new "${WORK}/odd_new.bin" --out "${WORK}/odd.mfp2"
+            --product 0x1234 --version 0x00020000 --old-version 0x00010000
+            --signing-key "${WORK}/signing.key" --key "${WORK}/symmetric.key"
+            --key-id 00112233445566778899aabbccddeeff
+            --nonce-prefix 102132435465768798a9bacbdcedfe0f
+            --nonce-prefix-ack-reuse
+            --record-log2 13
+    RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
+if(NOT rc EQUAL 0)
+    message(FATAL_ERROR "non-power-of-two MFP2 fixture generation failed:\n${out}\n${err}")
 endif()
 # A many-triples fixture: a 4 KB image whose delta stream is longer than the
 # image (every control triple adds 24 bytes on top of its output), so a
@@ -139,6 +165,7 @@ execute_process(COMMAND "${MCF}" "${WORK}/valid.mfp2" "${OLD}" "${NEW}" "${WORK}
                 "${WORK}/duplicated.mfp2"
                 "${WORK}/small.mfp2" "${WORK}/small_old.bin" "${WORK}/small_new.bin"
                 "${WORK}/dense.mfp2" "${WORK}/dense_old.bin" "${WORK}/dense_new.bin"
+                "${WORK}/odd.mfp2" "${WORK}/odd_old.bin" "${WORK}/odd_new.bin"
     RESULT_VARIABLE rc OUTPUT_VARIABLE out ERROR_VARIABLE err)
 if(NOT rc EQUAL 0)
     message(FATAL_ERROR "MFP2 host-to-session integration failed:\n${out}\n${err}")

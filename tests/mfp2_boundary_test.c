@@ -559,11 +559,17 @@ static int small_image_case(const uint8_t *patch, uint32_t patch_len,
                             crypto_ctx_t *crypto)
 {
     mcf_status_t st;
+    uint32_t site = 0u;
     memset(flash, 0xFF, sizeof(flash));
     mutations = 0;
-    st = run_patch(patch, patch_len, old, old_len, crypto);
+    /* The site-aware runner: a bare status says only that the case failed, and
+     * for a framing defect the status is the same whichever of the gates
+     * rejected it. Naming the site is what makes the failure diagnosable. */
+    st = run_patch_site(patch, patch_len, old, old_len, crypto, &site);
     if (st != MCF_OK) {
-        fprintf(stderr, "small-image patch rejected: status %d\n", (int)st);
+        fprintf(stderr,
+                "small-image patch rejected: status %d at site %u (%u-byte image)\n",
+                (int)st, (unsigned)site, (unsigned)new_len);
         return 0;
     }
     if (memcmp(flash, expected, new_len) != 0) {
@@ -655,21 +661,24 @@ int main(int argc, char **argv)
     uint32_t dupe_len = 0;
     uint32_t small_len = 0, small_old_len = 0, small_new_len = 0;
     uint32_t dense_len = 0, dense_old_len = 0, dense_new_len = 0;
+    uint32_t odd_len = 0, odd_old_len = 0, odd_new_len = 0;
     uint8_t *patch, *old, *expected, *pub, *key;
     uint8_t *reord = NULL, *wrong_nonce = NULL, *tag_tamper = NULL;
     uint8_t *ct_tamper = NULL, *bad_key_id = NULL, *dupe = NULL;
     uint8_t *small = NULL, *small_old = NULL, *small_new = NULL;
     uint8_t *dense = NULL, *dense_old = NULL, *dense_new = NULL;
+    uint8_t *odd = NULL, *odd_old = NULL, *odd_new = NULL;
     mcf_v2_view_t view; crypto_ctx_t crypto;
     int ok = 1;
     /* argv: patch old new pub key reordered wrong_nonce tag_tamper ct_tamper
      * bad_key_id duplicated small_patch small_old small_new dense_patch
-     * dense_old dense_new — the six variants come from
+     * dense_old dense_new odd_patch odd_old odd_new - the six variants come from
      * tests/mfp2_fixtures.py, the small trio from a second host make run over a
-     * small image, and the dense trio from a third over a many-triples patch
-     * whose delta stream is longer than the image. All eighteen are required: a
-     * case that can quietly disappear is not a case. */
-    if (argc != 18 || sodium_init() < 0) return 2;
+     * small image, the dense trio from a third over a many-triples patch whose
+     * delta stream is longer than the image, and the odd trio from a fourth over
+     * a 1000-byte target, which is not a power of two. All twenty-one are
+     * required: a case that can quietly disappear is not a case. */
+    if (argc != 21 || sodium_init() < 0) return 2;
     patch = read_file(argv[1], &patch_len); old = read_file(argv[2], &old_len);
     expected = read_file(argv[3], &new_len); pub = read_file(argv[4], &pub_len);
     key = read_file(argv[5], &key_len);
@@ -688,6 +697,9 @@ int main(int argc, char **argv)
     if (!(dense = read_file(argv[15], &dense_len))) return 2;
     if (!(dense_old = read_file(argv[16], &dense_old_len))) return 2;
     if (!(dense_new = read_file(argv[17], &dense_new_len))) return 2;
+    if (!(odd = read_file(argv[18], &odd_len))) return 2;
+    if (!(odd_old = read_file(argv[19], &odd_old_len))) return 2;
+    if (!(odd_new = read_file(argv[20], &odd_new_len))) return 2;
     memcpy(crypto.public_key, pub, sizeof(crypto.public_key));
     memcpy(crypto.symmetric_key, key, sizeof(crypto.symmetric_key));
     /* Fixture key id is 00112233445566778899aabbccddeeff. */
@@ -1165,12 +1177,22 @@ int main(int argc, char **argv)
          * What must hold on every ABI is the exact fit above. */
     }
 
-    /* Small image: the producer must cap its framing at the image, because the
-     * device's window is min(record_size, new_size). The large fixture above
-     * never enters this regime, so without this case the cap is untested on the
-     * device. */
+    /* Small image: the producer caps its framing, and the device sizes its
+     * window from the declared framing rather than from new_size. The large
+     * fixture above never enters this regime, so without this case the cap is
+     * untested on the device. */
     ok &= small_image_case(small, small_len, small_old, small_old_len,
                            small_new, small_new_len, &crypto);
+
+    /* A 1000-byte target at the default record size. Not a power of two, which
+     * is the whole point: the inner session used to clamp 1 << record_log2 to
+     * new_size, compute a 1000-byte window, and reject it for not being a power
+     * of two, so every MFP2 patch over such an image was unappliable at every
+     * configuration. The 512/128 fixture cannot see it, both being powers of
+     * two, and at the default record_log2 of 13 this covers every image from
+     * 8192 to 16383 bytes. */
+    ok &= small_image_case(odd, odd_len, odd_old, odd_old_len,
+                           odd_new, odd_new_len, &crypto);
 
     /* Many-triples image: the delta stream is longer than the image, so
      * legitimate checkpoints carry d_off > new_size and a cut on the final
@@ -1184,6 +1206,7 @@ int main(int argc, char **argv)
     free(bad_key_id); free(dupe);
     free(small); free(small_old); free(small_new);
     free(dense); free(dense_old); free(dense_new);
+    free(odd); free(odd_old); free(odd_new);
     free(patch); free(old); free(expected); free(pub); free(key);
     if (!ok) { fprintf(stderr, "MFP2 session integration test FAILED\n"); return 1; }
     puts("MFP2 session success, Ed25519ph/AEAD tamper tests passed"); return 0;
