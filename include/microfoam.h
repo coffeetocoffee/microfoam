@@ -462,8 +462,13 @@ typedef struct mcf_config {
     /* Resume support. Both zero disables it, which is the default.
      *
      * journal_addr must be block-aligned and must not overlap the destination
-     * region; both are checked by begin() and reported as MCF_E_PARAM. The
-     * region must be at least sizeof(mcf_journal_t) bytes (20 bytes in v1).
+     * region. Both are checked and reported as MCF_E_PARAM: the alignment by
+     * open(), which can see the erase block size, and the overlap by begin(),
+     * which can see the destination size parsed from the patch header.
+     *
+     * The record itself is sizeof(mcf_journal_t) bytes (20 in v1), but every
+     * erase is a whole number of blocks, so the region must have at least one
+     * erase block free at journal_addr, not merely 20 bytes.
      *
      * journal_interval is the number of blocks between checkpoints. Zero selects
      * 32. A very small value costs an erase and a program per block, which on
@@ -674,7 +679,9 @@ mcf_status_t mcf_resume_probe(mcf_session_t *s, const mcf_config_t *cfg);
 mcf_status_t mcf_resume_clear(mcf_session_t *s);
 
 /* Release workspace and reset to MCF_ST_IDLE. Safe to call from any state,
- * and safe to call on a session that was never opened. */
+ * and safe to call on a session that was never opened. That holds even when the
+ * session storage was never zeroed: a session opened by open() is marked, and
+ * anything not so marked is left alone. */
 void mcf_session_close(mcf_session_t *s);
 
 /* --- queries ----------------------------------------------------------- */

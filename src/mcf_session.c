@@ -91,6 +91,9 @@ uint32_t mcf_ctx_size(const mcf_config_t *cfg)
  * Failure funnel. The single exit for every error in the session. Records the
  * status and site, releases everything, and moves to MCF_ST_FAILED.
  * ---------------------------------------------------------------------- */
+/* No magic check here: this is only ever reached from begin()/step(), both of
+ * which have already validated it, and it must be able to record the failure
+ * state on a closed session, which is what the post-close contract tests. */
 static mcf_status_t mcf_fail(mcf_session_t *s, mcf_status_t st, uint32_t site)
 {
     s->status = st;
@@ -298,6 +301,26 @@ static int32_t mcf_sess_base_read(void *ctx, uint32_t off, uint8_t *p, uint32_t 
 
 #define MCF_JOURNAL_DEFAULT_INTERVAL 32u
 
+/* Overflow-checked add. Returns 0 when the sum would wrap, so a caller can
+ * treat a malformed range as such instead of computing a meaningless end. */
+static int mcf_add_u32(uint32_t a, uint32_t b, uint32_t *out)
+{
+    if (a > 0xFFFFFFFFu - b) {
+        return 0;
+    }
+    *out = a + b;
+    return 1;
+}
+
+/* Erase length for a record of `len` bytes. The flash contract promises every
+ * erase is a whole number of aligned blocks, so a record shorter than one block
+ * still erases one whole block. `blk` must be a power of two, which open()
+ * enforces before any journal is used. */
+static uint32_t mcf_erase_len(uint32_t len, uint32_t blk)
+{
+    return (len + (blk - 1u)) & ~(blk - 1u);
+}
+
 static uint32_t mcf_journal_crc(const mcf_journal_t *j)
 {
     /* Over the six fields, with record_crc treated as zero. */
@@ -333,8 +356,12 @@ static int32_t mcf_journal_write(const mcf_config_t *cfg, const mcf_hal_t *hal,
 
     j->record_crc = mcf_journal_crc(j);
 
-    /* Erase then program: a journal update is a fresh record, not a patch. */
-    r = hal->flash_erase(hal->ctx, cfg->journal_addr, (uint32_t)sizeof(*j));
+    /* Erase then program: a journal update is a fresh record, not a patch.
+     * The erase is rounded up to whole blocks so the flash contract holds; the
+     * program below still writes only the record. */
+    r = hal->flash_erase(hal->ctx, cfg->journal_addr,
+                         mcf_erase_len((uint32_t)sizeof(*j),
+                                       hal->flash_block_size(hal->ctx)));
     if (r != MCF_OK) {
         return (r < 0) ? r : (int32_t)MCF_E_FLASH;
     }
@@ -544,11 +571,29 @@ mcf_status_t mcf_session_open(mcf_session_t *s, const mcf_config_t *cfg)
         ((cfg->hal->alloc == NULL) != (cfg->hal->free == NULL))) {
         return MCF_E_PARAM;
     }
+    /* Resume configuration. The journal region must sit on an erase boundary:
+     * the flash contract promises every erase is block-aligned and a whole
+     * number of blocks, and a checkpoint that breaks that promise corrupts
+     * whatever else shares the block. The block size is cached here so the
+     * overlap check in begin() and every journal erase can use it. The
+     * overlap check itself needs the parsed new_size, so it runs there.
+     * journal_addr of zero disables resume and is always valid. */
+    if (cfg->journal_addr != 0u) {
+        uint32_t blk = cfg->hal->flash_block_size(cfg->hal->ctx);
+        if (blk == 0u || (blk & (blk - 1u)) != 0u) {
+            return MCF_E_PARAM;
+        }
+        if ((cfg->journal_addr & (blk - 1u)) != 0u) {
+            return MCF_E_PARAM;
+        }
+        s->flash_block = blk;
+    }
     s->cfg    = cfg;
     s->hal    = cfg->hal;
     s->state  = MCF_ST_IDLE;
     s->status = MCF_OK;
     s->flags  = 0u;
+    s->magic   = MCF_SESSION_MAGIC;
     return MCF_OK;
 }
 
@@ -560,7 +605,7 @@ mcf_status_t mcf_session_begin(mcf_session_t *s)
     uint32_t     blk;
     uint32_t     need;
 
-    if (s == NULL || s->cfg == NULL) {
+    if (s == NULL || s->cfg == NULL || s->magic != MCF_SESSION_MAGIC) {
         return MCF_E_PARAM;
     }
     if (s->state != MCF_ST_IDLE) {
@@ -599,6 +644,24 @@ mcf_status_t mcf_session_begin(mcf_session_t *s)
     }
     if ((s->block_size & (s->block_size - 1u)) != 0u) {
         return mcf_fail(s, MCF_E_PARAM, MCF_SITE_ALIGN);
+    }
+
+    /* The journal must not overlap the destination image. A checkpoint erases
+     * before it programs, and the erase is a whole block, so the footprint that
+     * matters is the rounded one, not the 20-byte record. Both ranges are
+     * half-open and compared with overflow-safe ends, so a region that wraps
+     * the address space is rejected rather than silently treated as disjoint. */
+    if (s->cfg->journal_addr != 0u && s->flash_block != 0u) {
+        uint32_t j_len = mcf_erase_len((uint32_t)sizeof(mcf_journal_t), s->flash_block);
+        uint32_t j_end, d_end;
+        if (mcf_add_u32(s->cfg->journal_addr, j_len, &j_end) &&
+            mcf_add_u32(s->cfg->dst_addr, s->hdr.new_size, &d_end)) {
+            if (s->cfg->journal_addr < d_end && j_end > s->cfg->dst_addr) {
+                return mcf_fail(s, MCF_E_PARAM, MCF_SITE_CONFIG);
+            }
+        } else {
+            return mcf_fail(s, MCF_E_PARAM, MCF_SITE_CONFIG);
+        }
     }
 
     /* 2. Signature, when the patch claims to be signed. Fails closed: with no
@@ -854,10 +917,17 @@ int32_t mcf_nvm_record_write(const mcf_hal_t *hal, uint32_t addr, const uint8_t 
 
     if (hal == NULL || rec == NULL || len == 0u || len > MCF_NVM_RECORD_MAX ||
         hal->flash_erase == NULL || hal->flash_write == NULL ||
-        hal->flash_read == NULL) {
+        hal->flash_read == NULL || hal->flash_block_size == NULL) {
         return (int32_t)MCF_E_PARAM;
     }
-    r = hal->flash_erase(hal->ctx, addr, len);
+    {
+        uint32_t blk = hal->flash_block_size(hal->ctx);
+        if (blk == 0u || (blk & (blk - 1u)) != 0u) {
+            return (int32_t)MCF_E_PARAM;
+        }
+        /* Whole blocks, per the flash contract. */
+        r = hal->flash_erase(hal->ctx, addr, mcf_erase_len(len, blk));
+    }
     if (r != MCF_OK) {
         return (r < 0) ? r : (int32_t)MCF_E_FLASH;
     }
@@ -1060,9 +1130,10 @@ mcf_status_t mcf_session_run(mcf_session_t *s)
 
 void mcf_session_close(mcf_session_t *s)
 {
-    if (s == NULL) {
+    if (s == NULL || s->magic != MCF_SESSION_MAGIC) {
         return;
     }
+    s->magic = 0u; /* before anything else: a double close is now inert */
     if (s->codec != NULL && s->ops != NULL && s->ops->destroy != NULL) {
         s->ops->destroy(s->codec);
     }

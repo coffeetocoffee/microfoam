@@ -193,6 +193,7 @@ typedef struct mcf_v2_journal {
  * cfg->journal_addr (see mcf_v2_resume_probe); with it disabled the session
  * behaves exactly as a cold run. */
 typedef struct mcf_v2_session {
+    uint32_t magic;
     mcf_session_storage_t inner_storage;
     mcf_session_t *inner;
     const mcf_v2_config_t *cfg;
@@ -256,6 +257,11 @@ typedef struct mcf_v2_session {
 } mcf_v2_session_t;
 
 #define MCF_V2_SESSION_FLAG_RESUME_DEGRADED 0x00000001u
+
+/* Set by open(), cleared by close(). Guards every entry point that would
+ * otherwise dereference a session that was never opened or is already
+ * closed. */
+#define MCF_V2_SESSION_MAGIC 0x4D434656u /* 'MCFV' */
 
 mcf_status_t mcf_v2_session_open(mcf_v2_session_t *s, const mcf_v2_config_t *cfg);
 

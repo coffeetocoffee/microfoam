@@ -318,7 +318,14 @@ typedef struct mcf_sess_io {
     uint32_t raw_D;       /*!< Decompressed offset that engine.raw[0] maps to. */
 } mcf_sess_io_t;
 
+#define MCF_SESSION_MAGIC 0x4D43464Du /* 'MCFM' */
+
 struct mcf_session {
+    /* Set by open() and cleared by close(). Any entry point that dereferences
+     * the rest of this struct checks it first, so a session that was never
+     * opened, or was already closed, is inert instead of a wild pointer. */
+    uint32_t     magic;
+
     const mcf_hal_t    *hal;
     const mcf_config_t *cfg;
 

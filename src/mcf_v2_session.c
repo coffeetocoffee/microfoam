@@ -273,6 +273,7 @@ mcf_status_t mcf_v2_session_open(mcf_v2_session_t *s, const mcf_v2_config_t *cfg
     uint32_t blk;
     if (s==NULL || cfg==NULL) return MCF_E_PARAM;
     memset(s,0,sizeof(*s)); s->cfg=cfg; s->status=MCF_OK; s->state=MCF_ST_IDLE;
+    s->magic=MCF_V2_SESSION_MAGIC;
     if (cfg->hal==NULL || cfg->patch==NULL || cfg->patch_size==0u ||
         (cfg->old==NULL && cfg->old_read==NULL) || cfg->key_provider==NULL ||
         cfg->verify==NULL || cfg->aead==NULL || cfg->workspace==NULL ||
@@ -510,7 +511,7 @@ mcf_status_t mcf_v2_session_begin(mcf_v2_session_t *s)
     uint32_t codec_ws;
     mcf_resume_point_t pt;
     mcf_hdr_view_t hv;
-    if (s==NULL || s->cfg==NULL) return MCF_E_PARAM;
+    if (s==NULL || s->cfg==NULL || s->magic!=MCF_V2_SESSION_MAGIC) return MCF_E_PARAM;
     if (s->state!=MCF_ST_IDLE) return v2_fail(s,MCF_E_STATE,MCF_SITE_V2_STATE);
     c=s->cfg;
     r=(int32_t)mcf_v2_parse(c->patch,c->patch_size,&v); if (r!=MCF_OK) return v2_fail(s,(mcf_status_t)r,MCF_SITE_V2_PARSE);
@@ -748,7 +749,7 @@ mcf_status_t mcf_v2_session_finish(mcf_v2_session_t *s)
 mcf_status_t mcf_v2_session_run(mcf_v2_session_t *s)
 { mcf_status_t st; if(s==NULL)return MCF_E_PARAM; st=mcf_v2_session_begin(s);if(st!=MCF_OK)return st;for(;;){st=mcf_v2_session_step(s);if(st!=MCF_OK)return st;if(mcf_session_state(s->inner)==MCF_ST_VERIFY)break;}return mcf_v2_session_finish(s); }
 void mcf_v2_session_close(mcf_v2_session_t *s)
-{ if(s==NULL)return; if(s->inner!=NULL)mcf_session_close(s->inner);v2_wipe(s->key,(uint32_t)sizeof(s->key));if(s->scratch!=NULL)v2_wipe(s->scratch,s->scratch_len);s->scratch=NULL;s->scratch_len=0u;s->inner=NULL;s->state=MCF_ST_IDLE;s->status=MCF_OK;s->site=MCF_SITE_NONE;
+{ if(s==NULL||s->magic!=MCF_V2_SESSION_MAGIC)return; s->magic=0u; if(s->inner!=NULL)mcf_session_close(s->inner);v2_wipe(s->key,(uint32_t)sizeof(s->key));if(s->scratch!=NULL)v2_wipe(s->scratch,s->scratch_len);s->scratch=NULL;s->scratch_len=0u;s->inner=NULL;s->state=MCF_ST_IDLE;s->status=MCF_OK;s->site=MCF_SITE_NONE;
    /* Released last, for the same reason as mcf_session_close(): the caller's
     * config is only guaranteed to outlive the *session*, and keeping the
     * pointer past close() would make begin()'s s->cfg == NULL guard
