@@ -19,6 +19,37 @@
  * overflowing an integrator's static session. */
 typedef char mcf_session_fits[(sizeof(struct mcf_session) <= MCF_SESSION_MAX_BYTES) ? 1 : -1];
 
+/* The processing window for a patch framed at `framing` bytes, given the
+ * caller's requested `block_size`. One definition, used by mcf_ctx_size() and
+ * mcf_session_begin(), because the whole point of mcf_ctx_size() is to equal
+ * what begin() allocates.
+ *
+ * The window is the caller's block_size capped at the patch's framing. Both are
+ * powers of two - the caller's is a documented requirement, the framing is a
+ * header field - so the result is too.
+ *
+ * Capping at the framing is what makes a device and a producer agree.
+ * mcf_lz4_block() rejects any frame wider than the window, so the window must be
+ * at least the framing, and a window wider than the framing buys nothing. The
+ * header's block_size_log2 is the producer's own record of what it framed to,
+ * so the device reads the answer instead of deriving it.
+ *
+ * Deriving it from new_size instead is what broke: for new_size = 1000 the
+ * producer frames 512 and declares log2 9, but a window derived from new_size
+ * is 1000, which is not a power of two, and rejecting it left such a patch
+ * unappliable at every block_size. A window wider than the image is harmless -
+ * the engine stops at new_size - which is why the framing, not the image, is
+ * the right cap.
+ *
+ * A caller whose block_size is below the framing still fails, loudly, in the
+ * codec: the patch needs a wider window than was offered, which is a real
+ * configuration error and not something to paper over by quietly allocating
+ * more than the caller asked for. */
+static uint32_t mcf_window(uint32_t block_size, uint32_t framing)
+{
+    return (block_size < framing) ? block_size : framing;
+}
+
 uint32_t mcf_session_sizeof(void)
 {
     return (uint32_t)sizeof(struct mcf_session);
@@ -28,10 +59,10 @@ uint32_t mcf_session_sizeof(void)
  *
  * This mirrors the accounting in mcf_session_begin() step 6 - two block
  * buffers plus the codec's own requirement, where the block size is the
- * configured one clamped to the patch's new_size - so the number returned is
- * the number the HAL allocator will be asked for, not an estimate. The test
- * suite asserts exactly that equality against a recording allocator, which is
- * what keeps the two from drifting apart.
+ * configured one capped at the patch's declared framing (see mcf_window) - so
+ * the number returned is the number the HAL allocator will be asked for, not an
+ * estimate. The test suite asserts exactly that equality against a recording
+ * allocator, which is what keeps the two from drifting apart.
  *
  * The caller's ram_budget is deliberately not consulted: the point of this
  * function is to discover the cost so the budget can be chosen, so a
@@ -72,10 +103,11 @@ uint32_t mcf_ctx_size(const mcf_config_t *cfg)
     }
 
     blk = (cfg->block_size != 0u) ? cfg->block_size : (uint32_t)MCF_DEFAULT_BLOCK_SIZE;
-    if (blk > hdr.new_size) {
-        blk = hdr.new_size;
-    }
     if ((blk & (blk - 1u)) != 0u) {
+        return 0u;
+    }
+    blk = mcf_window(blk, 1u << hdr.block_log2);
+    if (blk == 0u) {
         return 0u;
     }
 
@@ -611,12 +643,10 @@ mcf_status_t mcf_session_begin(mcf_session_t *s)
     s->state      = MCF_ST_VALIDATE;
     s->ops        = mcf_codec_lookup(s->cfg, (mcf_codec_id_t)s->hdr.codec_id);
     s->block_size = (s->cfg->block_size != 0u) ? s->cfg->block_size : MCF_DEFAULT_BLOCK_SIZE;
-    if (s->block_size > s->hdr.new_size) {
-        s->block_size = s->hdr.new_size;
-    }
     if ((s->block_size & (s->block_size - 1u)) != 0u) {
         return mcf_fail(s, MCF_E_PARAM, MCF_SITE_ALIGN);
     }
+    s->block_size = mcf_window(s->block_size, 1u << s->hdr.block_log2);
 
     /* The journal must sit on an erase boundary and outside the destination image.
      * A checkpoint erases a whole block before it programs, so a journal that

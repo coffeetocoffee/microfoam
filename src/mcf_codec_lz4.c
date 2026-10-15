@@ -12,12 +12,15 @@
  *   u32 le   content_size         exact decompressed length
  *
  * A single block may not expand past the decode window the caller supplies as
- * `cap` (the session's `block_size`, clamped to new_size). This is a format
- * constraint, not a hint: the host tool chunks its framing to a window the
- * device will use, and the header's block_size_log2 records what it framed to,
- * because a block that would overflow the decode buffer is rejected as corrupt.
- * The window and the framing need not be equal - a larger window is harmless -
- * but the framing must not exceed the window.
+ * `cap` (the session's `block_size`, capped at the framing the patch declares).
+ * This is a format constraint, not a hint: the host tool chunks its framing to
+ * the window the device will use, and the header's block_size_log2 records what
+ * it framed to, because a block that would overflow the decode buffer is
+ * rejected as corrupt. The window and the framing need not be equal - a larger
+ * window is harmless - but the framing must not exceed the window, which is why
+ * the device sizes its window from the declared framing rather than from
+ * new_size: deriving it from new_size produced a non-power-of-two window for an
+ * image whose size is not a power of two, and no block_size could match it.
  *
  * The explicit content size is what makes truncation detectable: a stream cut
  * short leaves the decoder unable to reach the declared total, which

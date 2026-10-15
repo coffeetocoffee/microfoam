@@ -430,27 +430,29 @@ def lz4_frame(data: bytes, block_size: int) -> bytes:
 def image_framing(block_log2: int, new_size: int) -> tuple[int, int]:
     """Framing size, and the exponent to declare, for an image of `new_size`.
 
-    The device's decode window is `min(cfg.block_size, new_size)` - capped at
-    the image - so a producer that frames larger than the image emits a patch no
-    device configuration can apply: the window can never exceed `new_size`,
-    while the delta is never smaller than it (the control triples add to it), so
-    such a block overruns the window on every apply, at every `cfg.block_size`.
-    The producer therefore frames within the image.
+    The device's decode window is `min(cfg.block_size, 1 << declared_log2)`: the
+    caller's configured block size capped at the framing this header declares.
+    A frame wider than the window is rejected as corrupt by the decoder, so the
+    declared exponent has to describe what was actually framed.
 
-    Returns `(frame_size, declared_log2)`: the frame size is capped at the image,
-    and the declared exponent is the one actually used, floored at 8 (the
-    format's minimum). An image below 256 bytes cannot express its framing
-    exactly; the declared value then overstates it, which only makes the
-    device's budget pre-check conservative. The header field drives nothing but
-    that pre-check - the decode window comes from the caller's configuration -
-    so declaring the real figure is what keeps the two honest.
+    Returns `(frame_size, declared_log2)`: the frame size is a power of two, and
+    the declared exponent is the one actually used, floored at 8 (the format's
+    minimum). An image below 256 bytes cannot express its framing exactly; the
+    declared value then overstates it, which the device tolerates because a
+    window wider than the image is harmless - the engine stops at new_size.
+
+    The frame is deliberately NOT capped at new_size. Capping it there made the
+    declared exponent describe a non-power-of-two window (1000 for a 1000-byte
+    image), which the device had no legal block_size for, so such a patch could
+    not be applied at all. Rounding the frame down to a power of two instead
+    keeps every declared window legal.
     """
     if new_size <= 0:
         return (1 << block_log2, block_log2)
     eff = block_log2
     while eff > 8 and (1 << eff) > new_size:
         eff -= 1
-    return (min(1 << block_log2, new_size), eff)
+    return (1 << eff, eff)
 
 
 # --------------------------------------------------------------------------

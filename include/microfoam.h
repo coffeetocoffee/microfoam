@@ -604,12 +604,21 @@ uint32_t mcf_ctx_size(const mcf_config_t *cfg);
 /* Declare static session storage plus a ready-to-use pointer.
  *
  *     MCF_SESSION_DECLARE(s_upgrade);
+ *     mcf_session_open(s_upgrade, &cfg);
  *     mcf_session_run(s_upgrade);
  *
  * `name` becomes a `mcf_session_t *`, so it is passed wherever a session
- * pointer is expected. */
+ * pointer is expected.
+ *
+ * The storage is `static`, which is what makes the declaration usable at file
+ * scope and guarantees it is zero-initialised. That matters: a session must be
+ * passed to mcf_session_open() before any other call, and the zero
+ * initialisation is what makes a session that was never opened harmless rather
+ * than indeterminate. The declaration was previously automatic, so a file-scope
+ * use of this macro silently created an uninitialised object with static
+ * storage duration only by accident of where it was written. */
 #define MCF_SESSION_DECLARE(name)                                             \
-    mcf_session_storage_t name##__storage;                                    \
+    static mcf_session_storage_t name##__storage;                             \
     mcf_session_t *const name = (mcf_session_t *)(void *)&name##__storage
 
 /* --- lifecycle --------------------------------------------------------- */
