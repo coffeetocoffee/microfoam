@@ -11,7 +11,7 @@ test.
 Which suites that actually covers depends on the tree, and the script says so rather than
 implying otherwise. The default configuration builds five of the nine: the four behind
 `MCF_ENABLE_SODIUM`, `MCF_ENABLE_ED25519` and `MCF_ENABLE_LZMA` are opt-in, and between them they
-hold 721 of the 1,106 documented checks. Those suites are reported as **not built** or **skipped**
+hold 721 of the 1,110 documented checks. Those suites are reported as **not built** or **skipped**
 and named in the summary, not folded into a pass. The `sodium` CI job is the one tree that builds
 all nine at once, and it runs the script with `--require-all`, which turns a missing or skipped
 suite into a failure — so the counts are verified in one place in full, rather than the union of
@@ -31,7 +31,7 @@ CI rather than only by whoever happens to build it locally.
 | `custom_codec_test` | 46 checks | caller-owned codec descriptors, per-session table isolation, failure propagation at init, decode and finish |
 | `hal_concurrency_test` | 27 checks | two sessions driven interleaved through a whole decode |
 | `v2_format_test` | 45 checks | MFP2 header/TLV/record-framing rules, plus a deterministic mutation/property loop |
-| `host_selftest` | 119 checks | host round-trips, the measured LZ4-vs-LZMA ratio, format-layout agreement, signing, the MFP2 KAT, host-side tamper cases |
+| `host_selftest` | 123 checks | host round-trips, the measured LZ4-vs-LZMA ratio, format-layout agreement, signing, the MFP2 KAT, host-side tamper cases |
 | `sodium_rfc_test` | 17 checks | published Ed25519 / Ed25519ph / XChaCha20-Poly1305 vectors and adapter tamper cases *(with `MCF_ENABLE_SODIUM=ON`)* |
 | `ed25519_test` | 354 checks | SHA-512 digests, RFC 8032 §7.1/§7.3 vectors, a negative matrix, the `S + L` case, domain separation, and a **differential** against libsodium *(with `MCF_ENABLE_ED25519=ON`)* |
 | `lzma_conformance_test` | 335 checks | 67 liblzma vectors at five block sizes each *(with `MCF_ENABLE_LZMA=ON`)* |

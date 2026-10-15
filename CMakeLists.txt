@@ -515,7 +515,9 @@ if(MCF_BUILD_TESTS)
         add_test(NAME quickstart_config
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/host/check_quickstart.py
-                         --cross-test $<TARGET_FILE:cross_test>)
+                         --cross-test $<TARGET_FILE:cross_test>
+                         --cc ${CMAKE_C_COMPILER}
+                         --lib $<TARGET_FILE:microfoam>)
 
         # The same cross test with a raw (uncompressed) patch: proves the
         # identity codec round-trips through the C session.

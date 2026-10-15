@@ -55,24 +55,32 @@ to get right are `block_size` and `ram_budget`, and both have to agree with the 
 ```c
 #include "microfoam.h"
 
-static mcf_config_t cfg;
-MCF_SESSION_DECLARE(session);
+void apply_update(const uint8_t *patch, uint32_t patch_size)
+{
+    static mcf_config_t cfg;
+    MCF_SESSION_DECLARE(session);
 
-cfg.hal         = &g_hal;                        /* your callbacks; see the HAL contract */
-cfg.patch       = patch;
-cfg.patch_size  = patch_size;
-cfg.old         = (const uint8_t *)0x08000000u;  /* running image */
-cfg.old_size    = FW_SIZE;
-cfg.dst_addr    = 0x08020000u;                   /* staging slot    */
-cfg.codec       = MCF_CODEC_AUTO;
-cfg.block_size  = 1024u;   /* must be >= the patch's framing block size */
-cfg.ram_budget  = 4096u;   /* >= 2*block_size + the codec's own state   */
+    cfg.hal         = &g_hal;                        /* your callbacks; see the HAL contract */
+    cfg.patch       = patch;
+    cfg.patch_size  = patch_size;
+    cfg.old         = (const uint8_t *)0x08000000u;  /* running image */
+    cfg.old_size    = FW_SIZE;
+    cfg.dst_addr    = 0x08020000u;                   /* staging slot    */
+    cfg.codec       = MCF_CODEC_AUTO;
+    cfg.block_size  = 1024u;   /* must be >= the patch's framing block size */
+    cfg.ram_budget  = 4096u;   /* >= 2*block_size + the codec's own state   */
 
-if (mcf_session_run(session) != MCF_OK) {
-    /* Every failure is a distinct code. mcf_session_strerror() names it. */
-    log_error("microfoam: %s", mcf_session_strerror(mcf_session_status(session)));
+    if (mcf_session_open(session, &cfg) != MCF_OK) {
+        /* A bad configuration, before any flash is touched. */
+        log_error("microfoam: %s", mcf_session_strerror(mcf_session_status(session)));
+        return;
+    }
+    if (mcf_session_run(session) != MCF_OK) {
+        /* Every failure is a distinct code. mcf_session_strerror() names it. */
+        log_error("microfoam: %s", mcf_session_strerror(mcf_session_status(session)));
+    }
+    mcf_session_close(session);
 }
-mcf_session_close(session);
 ```
 
 A complete, commented HAL for a generic Cortex-M part — flash callbacks, workspace, and how to

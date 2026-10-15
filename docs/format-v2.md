@@ -211,12 +211,15 @@ buffer — the processing window, `cfg.block_size` clamped to `new_size` — so 
 configuration can reach is exactly `new_size`. A block that would expand past it is rejected as
 `MCF_E_CORRUPT` at site 17. A producer must therefore frame within the image
 (`framing <= new_size`), and the device window must be at least the framing
-(`cfg.block_size >= framing`). The host tool caps its framing at the image automatically and
-writes the exponent it actually used to the header's `block_size_log2`; that header field drives
-only the pre-allocation budget check (`1 << block_size_log2 > (ram_budget - workspace_req) / 2`
-is `MCF_E_DICT_TOO_LARGE` at site 14, before anything is allocated), while the decode buffer comes
-from the caller's `cfg.block_size`. MFP2 has the same inner window with the record size in the
-framing role: its window is `min(record_size, new_size)`.
+(`cfg.block_size >= framing`). The host tool rounds its framing down to a power of two and
+writes the exponent it actually used to the header's `block_size_log2`; that field drives the
+pre-allocation budget check (`1 << block_size_log2 > (ram_budget - workspace_req) / 2`
+is `MCF_E_DICT_TOO_LARGE` at site 14, before anything is allocated) and also caps the decode
+buffer, which is `min(cfg.block_size, 1 << block_size_log2)`. It is capped at the declared
+framing rather than at `new_size`: a window wider than the image is harmless, while a window
+derived from `new_size` is not a power of two when the image size is not, and no `cfg.block_size`
+could then match it. MFP2 has the same inner window with the record size in the framing role:
+its window is `min(cfg.block_size, 1 << record_log2)`, likewise not clamped to `new_size`.
 
 ## Delta stream
 

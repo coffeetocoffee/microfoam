@@ -119,6 +119,11 @@ void apply_update(const uint8_t *patch, uint32_t patch_size)
     cfg.block_size  = 1024u;   /* must be >= the patch's framing block size */
     cfg.ram_budget  = 4096u;   /* >= 2*block_size + the codec's own state   */
 
+    if (mcf_session_open(session, &cfg) != MCF_OK) {
+        /* A bad configuration, before any flash is touched. */
+        log_error("microfoam: %s", mcf_session_strerror(mcf_session_status(session)));
+        return;
+    }
     if (mcf_session_run(session) != MCF_OK) {
         /* Every failure is a distinct code. mcf_session_strerror() names it. */
         log_error("microfoam: %s", mcf_session_strerror(mcf_session_status(session)));
